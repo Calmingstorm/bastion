@@ -105,7 +105,8 @@ func (h *UnfurlHandler) Unfurl(w http.ResponseWriter, r *http.Request) {
 
 func (h *UnfurlHandler) unfurlTenor(w http.ResponseWriter, r *http.Request, originalURL, postID string) {
 	if h.cfg.TenorAPIKey == "" {
-		writeJSON(w, http.StatusServiceUnavailable, errorBody("GIF resolution is not configured"))
+		// Tenor not configured — return empty result so frontend shows the URL as a plain link
+		writeJSON(w, http.StatusOK, unfurlResult{})
 		return
 	}
 

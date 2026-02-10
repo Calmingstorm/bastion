@@ -19,6 +19,11 @@ export function GifEmbed({ url }: GifEmbedProps) {
     apiUnfurl(url)
       .then((result) => {
         if (cancelled) return;
+        if (!result.mediaUrl) {
+          // Provider not configured or no media found — show as plain link
+          setFailed(true);
+          return;
+        }
         urlCache.set(url, result.mediaUrl);
         setMediaUrl(result.mediaUrl);
       })
