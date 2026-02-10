@@ -84,6 +84,13 @@ export function MessageList({ onToggleMembers }: MessageListProps) {
     return map;
   }, [channelMessages]);
 
+  // Always scroll to bottom after the current user sends a message
+  useEffect(() => {
+    const handler = () => setTimeout(scrollToBottom, 50);
+    window.addEventListener('bastion:message-sent', handler);
+    return () => window.removeEventListener('bastion:message-sent', handler);
+  }, [scrollToBottom]);
+
   // Fetch messages when channel changes
   useEffect(() => {
     if (selectedChannelId && channelMessages.length === 0 && !channelIsLoading) {

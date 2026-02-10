@@ -91,6 +91,7 @@ export function MessageInput() {
       if (files.length > 0) {
         const msg = await apiSendMessageWithFiles(activeChannelId, trimmed, files);
         addMessage(activeChannelId, msg);
+        window.dispatchEvent(new CustomEvent('bastion:message-sent'));
       } else {
         await sendMessage(activeChannelId, trimmed, replyingTo?.id);
       }

@@ -118,6 +118,8 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       // Add the message optimistically (the WebSocket might also deliver it,
       // but addMessage deduplicates)
       get().addMessage(channelId, message);
+      // Signal message list to scroll to bottom for own messages
+      window.dispatchEvent(new CustomEvent('bastion:message-sent'));
     } catch (err: unknown) {
       const errMsg = extractErrorMessage(err, 'Failed to send message.');
       set({ error: errMsg });
