@@ -14,6 +14,7 @@ import (
 
 	"github.com/Calmingstorm/bastion/server/internal/auth"
 	"github.com/Calmingstorm/bastion/server/internal/models"
+	"github.com/Calmingstorm/bastion/server/internal/permissions"
 	"github.com/Calmingstorm/bastion/server/internal/realtime"
 )
 
@@ -147,6 +148,21 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 	if !h.checkChannelAccess(r, channelID, userID) {
 		writeJSON(w, http.StatusForbidden, errorBody("you do not have access to this channel"))
 		return
+	}
+
+	// Check if user is timed out in this server
+	var serverID *uuid.UUID
+	h.db.QueryRow(r.Context(), `SELECT server_id FROM channels WHERE id = $1`, channelID).Scan(&serverID)
+	if serverID != nil {
+		var timedOutUntil *time.Time
+		err := h.db.QueryRow(r.Context(),
+			`SELECT timed_out_until FROM server_members WHERE server_id = $1 AND user_id = $2`,
+			*serverID, userID,
+		).Scan(&timedOutUntil)
+		if err == nil && timedOutUntil != nil && timedOutUntil.After(time.Now()) {
+			writeJSON(w, http.StatusForbidden, errorBody("you are timed out in this server"))
+			return
+		}
 	}
 
 	var req sendMessageRequest
@@ -296,17 +312,14 @@ func (h *MessageHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Allow deletion if author OR server owner
+	// Allow deletion if author OR has MANAGE_MESSAGES permission
 	if authorID != userID {
 		if serverID == nil {
 			writeJSON(w, http.StatusForbidden, errorBody("you can only delete your own messages"))
 			return
 		}
-		var ownerID uuid.UUID
-		err = h.db.QueryRow(r.Context(),
-			`SELECT owner_id FROM servers WHERE id = $1`, *serverID,
-		).Scan(&ownerID)
-		if err != nil || ownerID != userID {
+		perms, err := getMemberPermissions(h.db, r, *serverID, userID)
+		if err != nil || !permissions.Has(perms, permissions.ManageMessages) {
 			writeJSON(w, http.StatusForbidden, errorBody("you can only delete your own messages"))
 			return
 		}

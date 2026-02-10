@@ -234,10 +234,21 @@ func (h *InviteHandler) Join(w http.ResponseWriter, r *http.Request) {
 		// Already a member — just return the server
 		var s models.Server
 		h.db.QueryRow(r.Context(),
-			`SELECT id, name, icon_url, owner_id, created_at FROM servers WHERE id = $1`,
+			`SELECT id, name, icon_url, description, owner_id, created_at FROM servers WHERE id = $1`,
 			invite.ServerID,
-		).Scan(&s.ID, &s.Name, &s.IconURL, &s.OwnerID, &s.CreatedAt)
+		).Scan(&s.ID, &s.Name, &s.IconURL, &s.Description, &s.OwnerID, &s.CreatedAt)
 		writeJSON(w, http.StatusOK, s)
+		return
+	}
+
+	// Check if banned
+	var isBanned bool
+	err = h.db.QueryRow(r.Context(),
+		`SELECT EXISTS(SELECT 1 FROM server_bans WHERE server_id = $1 AND user_id = $2)`,
+		invite.ServerID, userID,
+	).Scan(&isBanned)
+	if err == nil && isBanned {
+		writeJSON(w, http.StatusForbidden, errorBody("you are banned from this server"))
 		return
 	}
 
@@ -260,6 +271,13 @@ func (h *InviteHandler) Join(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Assign default @bastion role
+	tx.Exec(r.Context(),
+		`INSERT INTO member_roles (server_id, user_id, role_id)
+		 SELECT $1, $2, id FROM roles WHERE server_id = $1 AND is_default = TRUE`,
+		invite.ServerID, userID,
+	)
+
 	// Increment uses
 	_, err = tx.Exec(r.Context(),
 		`UPDATE server_invites SET uses = uses + 1 WHERE id = $1`, invite.ID,
@@ -279,9 +297,9 @@ func (h *InviteHandler) Join(w http.ResponseWriter, r *http.Request) {
 	// Get the server to return
 	var s models.Server
 	h.db.QueryRow(r.Context(),
-		`SELECT id, name, icon_url, owner_id, created_at FROM servers WHERE id = $1`,
+		`SELECT id, name, icon_url, description, owner_id, created_at FROM servers WHERE id = $1`,
 		invite.ServerID,
-	).Scan(&s.ID, &s.Name, &s.IconURL, &s.OwnerID, &s.CreatedAt)
+	).Scan(&s.ID, &s.Name, &s.IconURL, &s.Description, &s.OwnerID, &s.CreatedAt)
 
 	// Broadcast member join to server channels
 	channelIDs, _ := getServerChannelIDs(r.Context(), h.db, invite.ServerID)

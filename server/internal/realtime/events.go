@@ -7,6 +7,8 @@ const (
 	EventTypingStart      = "TYPING_START"
 	EventPresenceUpdate   = "PRESENCE_UPDATE"
 	EventServerMemberJoin = "SERVER_MEMBER_JOIN"
+	EventMemberKick       = "MEMBER_KICK"
+	EventMemberBan        = "MEMBER_BAN"
 	EventNotification     = "NOTIFICATION"
 )
 

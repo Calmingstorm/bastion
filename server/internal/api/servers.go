@@ -11,6 +11,7 @@ import (
 
 	"github.com/Calmingstorm/bastion/server/internal/auth"
 	"github.com/Calmingstorm/bastion/server/internal/models"
+	"github.com/Calmingstorm/bastion/server/internal/permissions"
 )
 
 type ServerHandler struct {
@@ -52,9 +53,9 @@ func (h *ServerHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var server models.Server
 	err = tx.QueryRow(r.Context(),
 		`INSERT INTO servers (name, owner_id) VALUES ($1, $2)
-		 RETURNING id, name, icon_url, owner_id, created_at`,
+		 RETURNING id, name, icon_url, description, owner_id, created_at`,
 		req.Name, userID,
-	).Scan(&server.ID, &server.Name, &server.IconURL, &server.OwnerID, &server.CreatedAt)
+	).Scan(&server.ID, &server.Name, &server.IconURL, &server.Description, &server.OwnerID, &server.CreatedAt)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create server")
 		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
@@ -68,6 +69,32 @@ func (h *ServerHandler) Create(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to add creator as member")
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+
+	// Create default @bastion role
+	defaultPerms := permissions.ViewChannel | permissions.SendMessages | permissions.CreateInvites | permissions.AttachFiles
+	var defaultRoleID string
+	err = tx.QueryRow(r.Context(),
+		`INSERT INTO roles (server_id, name, position, permissions, is_default)
+		 VALUES ($1, '@bastion', 0, $2, TRUE)
+		 RETURNING id`,
+		server.ID, defaultPerms,
+	).Scan(&defaultRoleID)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to create default role")
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+
+	// Assign default role to creator
+	_, err = tx.Exec(r.Context(),
+		`INSERT INTO member_roles (server_id, user_id, role_id) VALUES ($1, $2, $3)`,
+		server.ID, userID, defaultRoleID,
+	)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to assign default role")
 		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
 		return
 	}
@@ -96,7 +123,7 @@ func (h *ServerHandler) List(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 
 	rows, err := h.db.Query(r.Context(),
-		`SELECT s.id, s.name, s.icon_url, s.owner_id, s.created_at
+		`SELECT s.id, s.name, s.icon_url, s.description, s.owner_id, s.created_at
 		 FROM servers s
 		 INNER JOIN server_members sm ON sm.server_id = s.id
 		 WHERE sm.user_id = $1
@@ -112,7 +139,7 @@ func (h *ServerHandler) List(w http.ResponseWriter, r *http.Request) {
 	servers := make([]models.Server, 0)
 	for rows.Next() {
 		var s models.Server
-		if err := rows.Scan(&s.ID, &s.Name, &s.IconURL, &s.OwnerID, &s.CreatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.Name, &s.IconURL, &s.Description, &s.OwnerID, &s.CreatedAt); err != nil {
 			log.Error().Err(err).Msg("failed to scan server")
 			writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
 			return
@@ -155,9 +182,9 @@ func (h *ServerHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 	var s models.Server
 	err = h.db.QueryRow(r.Context(),
-		`SELECT id, name, icon_url, owner_id, created_at FROM servers WHERE id = $1`,
+		`SELECT id, name, icon_url, description, owner_id, created_at FROM servers WHERE id = $1`,
 		serverID,
-	).Scan(&s.ID, &s.Name, &s.IconURL, &s.OwnerID, &s.CreatedAt)
+	).Scan(&s.ID, &s.Name, &s.IconURL, &s.Description, &s.OwnerID, &s.CreatedAt)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, errorBody("server not found"))
 		return
@@ -200,18 +227,122 @@ func (h *ServerHandler) Join(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if banned
+	var isBanned bool
+	err = h.db.QueryRow(r.Context(),
+		`SELECT EXISTS(SELECT 1 FROM server_bans WHERE server_id = $1 AND user_id = $2)`,
+		serverID, userID,
+	).Scan(&isBanned)
+	if err == nil && isBanned {
+		writeJSON(w, http.StatusForbidden, errorBody("you are banned from this server"))
+		return
+	}
+
+	tx, err := h.db.Begin(r.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("failed to begin transaction")
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+	defer tx.Rollback(r.Context())
+
 	// Add as member
 	var member models.ServerMember
-	err = h.db.QueryRow(r.Context(),
+	err = tx.QueryRow(r.Context(),
 		`INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)
-		 RETURNING server_id, user_id, nickname, role, joined_at`,
+		 RETURNING server_id, user_id, nickname, role, timed_out_until, joined_at`,
 		serverID, userID,
-	).Scan(&member.ServerID, &member.UserID, &member.Nickname, &member.Role, &member.JoinedAt)
+	).Scan(&member.ServerID, &member.UserID, &member.Nickname, &member.Role, &member.TimedOutUntil, &member.JoinedAt)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to join server")
 		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
 		return
 	}
 
+	// Assign default @bastion role
+	tx.Exec(r.Context(),
+		`INSERT INTO member_roles (server_id, user_id, role_id)
+		 SELECT $1, $2, id FROM roles WHERE server_id = $1 AND is_default = TRUE`,
+		serverID, userID,
+	)
+
+	if err := tx.Commit(r.Context()); err != nil {
+		log.Error().Err(err).Msg("failed to commit join")
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+
 	writeJSON(w, http.StatusCreated, member)
+}
+
+type updateServerRequest struct {
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+}
+
+func (h *ServerHandler) Update(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromContext(r.Context())
+	serverID, err := parseUUID(chi.URLParam(r, "id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		return
+	}
+
+	if _, ok := requirePermission(h.db, w, r, serverID, userID, permissions.ManageServer); !ok {
+		return
+	}
+
+	var req updateServerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		return
+	}
+
+	sets := []string{}
+	args := []any{}
+	argIdx := 1
+
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" || len(name) > 100 {
+			writeJSON(w, http.StatusBadRequest, errorBody("server name must be 1-100 characters"))
+			return
+		}
+		sets = append(sets, "name = $"+itoa(argIdx))
+		args = append(args, name)
+		argIdx++
+	}
+
+	if req.Description != nil {
+		desc := strings.TrimSpace(*req.Description)
+		if len(desc) > 1000 {
+			writeJSON(w, http.StatusBadRequest, errorBody("description too long (max 1000 chars)"))
+			return
+		}
+		sets = append(sets, "description = $"+itoa(argIdx))
+		args = append(args, desc)
+		argIdx++
+	}
+
+	if len(sets) == 0 {
+		writeJSON(w, http.StatusBadRequest, errorBody("no fields to update"))
+		return
+	}
+
+	args = append(args, serverID)
+	query := "UPDATE servers SET " + strings.Join(sets, ", ") +
+		" WHERE id = $" + itoa(argIdx) +
+		" RETURNING id, name, icon_url, description, owner_id, created_at"
+
+	var s models.Server
+	err = h.db.QueryRow(r.Context(), query, args...).Scan(
+		&s.ID, &s.Name, &s.IconURL, &s.Description, &s.OwnerID, &s.CreatedAt)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorBody("server not found"))
+		return
+	}
+
+	writeAuditLog(h.db, r.Context(), serverID, userID, models.AuditServerUpdate, "server", serverID, nil, nil)
+
+	writeJSON(w, http.StatusOK, s)
 }

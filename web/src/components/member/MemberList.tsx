@@ -28,9 +28,39 @@ export function MemberList() {
 
   if (!selectedServerId) return null;
 
-  // Group by role
-  const owners = members.filter((m) => m.role === 'owner');
-  const memberList = members.filter((m) => m.role === 'member');
+  // Group: Owner first, then by highest role, then members with no custom roles
+  const servers = useServerStore.getState().servers;
+  const server = servers.find((s) => s.id === selectedServerId);
+
+  const owners = members.filter((m) => server && m.userId === server.ownerId);
+  const nonOwners = members.filter((m) => !(server && m.userId === server.ownerId));
+
+  // Collect unique roles across non-owner members
+  const roleGroups = new Map<string, { name: string; color?: string; position: number; members: MemberWithUser[] }>();
+  const noRoleMembers: MemberWithUser[] = [];
+
+  for (const member of nonOwners) {
+    if (member.roles && member.roles.length > 0) {
+      // Assign to highest role
+      const highestRole = [...member.roles].sort((a, b) => b.position - a.position)[0];
+      const existing = roleGroups.get(highestRole.id);
+      if (existing) {
+        existing.members.push(member);
+      } else {
+        roleGroups.set(highestRole.id, {
+          name: highestRole.name,
+          color: highestRole.color,
+          position: highestRole.position,
+          members: [member],
+        });
+      }
+    } else {
+      noRoleMembers.push(member);
+    }
+  }
+
+  // Sort role groups by position (highest first)
+  const sortedRoleGroups = [...roleGroups.values()].sort((a, b) => b.position - a.position);
 
   // Sort: online first within each group
   const sortByPresence = (a: MemberWithUser, b: MemberWithUser) => {
@@ -42,7 +72,8 @@ export function MemberList() {
   };
 
   owners.sort(sortByPresence);
-  memberList.sort(sortByPresence);
+  sortedRoleGroups.forEach((g) => g.members.sort(sortByPresence));
+  noRoleMembers.sort(sortByPresence);
 
   const onlineCount = members.filter(
     (m) => (presences[m.userId] || m.status) !== 'offline'
@@ -66,8 +97,16 @@ export function MemberList() {
             {owners.length > 0 && (
               <MemberGroup title={`Owner — ${owners.length}`} members={owners} />
             )}
-            {memberList.length > 0 && (
-              <MemberGroup title={`Members — ${memberList.length}`} members={memberList} />
+            {sortedRoleGroups.map((group) => (
+              <MemberGroup
+                key={group.name}
+                title={`${group.name} — ${group.members.length}`}
+                members={group.members}
+                color={group.color}
+              />
+            ))}
+            {noRoleMembers.length > 0 && (
+              <MemberGroup title={`Members — ${noRoleMembers.length}`} members={noRoleMembers} />
             )}
           </>
         )}
@@ -76,10 +115,13 @@ export function MemberList() {
   );
 }
 
-function MemberGroup({ title, members }: { title: string; members: MemberWithUser[] }) {
+function MemberGroup({ title, members, color }: { title: string; members: MemberWithUser[]; color?: string }) {
   return (
     <div className="mb-4">
-      <span className="mb-1 block px-1 text-[11px] font-bold uppercase tracking-wide text-[var(--text-muted)]">
+      <span
+        className="mb-1 block px-1 text-[11px] font-bold uppercase tracking-wide"
+        style={{ color: color || 'var(--text-muted)' }}
+      >
         {title}
       </span>
       {members.map((member) => (
@@ -94,6 +136,11 @@ function MemberItem({ member }: { member: MemberWithUser }) {
   const isOffline = status === 'offline';
   const displayName = member.nickname || member.displayName || member.username;
   const initial = displayName.charAt(0).toUpperCase();
+
+  // Show highest role color on name
+  const highestRole = member.roles && member.roles.length > 0
+    ? [...member.roles].sort((a, b) => b.position - a.position)[0]
+    : null;
 
   return (
     <UserProfileCard userId={member.userId}>
@@ -119,7 +166,10 @@ function MemberItem({ member }: { member: MemberWithUser }) {
             className="absolute -bottom-0.5 -right-0.5"
           />
         </div>
-        <span className="truncate text-sm font-medium text-[var(--text-secondary)]">
+        <span
+          className="truncate text-sm font-medium"
+          style={{ color: highestRole?.color || 'var(--text-secondary)' }}
+        >
           {displayName}
         </span>
       </button>

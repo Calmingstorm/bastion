@@ -1,9 +1,12 @@
-import { useState, type FormEvent } from 'react';
+import { useState, useEffect, type FormEvent } from 'react';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { ChannelItem } from './ChannelItem';
 import { InviteDialog } from '../server/InviteDialog';
+import { ServerSettingsDialog } from '../server/ServerSettingsDialog';
 import { UserPanel } from '../user/UserPanel';
+import { apiGetCategories } from '../../api/client';
+import type { ChannelCategory } from '../../types';
 
 export function ChannelList() {
   // Targeted selectors to avoid cascading re-renders
@@ -20,9 +23,29 @@ export function ChannelList() {
   const [newChannelName, setNewChannelName] = useState('');
   const [isCreating, setIsCreating] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [categories, setCategories] = useState<ChannelCategory[]>([]);
+  const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set());
 
   const selectedServer = servers.find((s) => s.id === selectedServerId);
   const isOwner = selectedServer && user && selectedServer.ownerId === user.id;
+
+  // Fetch categories when server changes
+  useEffect(() => {
+    if (!selectedServerId) return;
+    apiGetCategories(selectedServerId).then((cats) => {
+      setCategories(cats.sort((a, b) => a.position - b.position));
+    }).catch(() => {});
+  }, [selectedServerId]);
+
+  const toggleCategory = (catId: string) => {
+    setCollapsedCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(catId)) next.delete(catId);
+      else next.add(catId);
+      return next;
+    });
+  };
 
   const handleCreateChannel = async (e: FormEvent) => {
     e.preventDefault();
@@ -65,45 +88,36 @@ export function ChannelList() {
         <h2 className="truncate text-sm font-semibold text-[var(--text-primary)]">
           {selectedServer.name}
         </h2>
-        <button
-          onClick={() => setInviteOpen(true)}
-          className="shrink-0 rounded p-1 text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)] hover:text-[var(--text-secondary)]"
-          title="Invite People"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2" />
-            <circle cx="8.5" cy="7" r="4" />
-            <line x1="20" y1="8" x2="20" y2="14" />
-            <line x1="23" y1="11" x2="17" y2="11" />
-          </svg>
-        </button>
-      </div>
-
-      {/* Channel list */}
-      <div className="flex-1 overflow-y-auto px-2 py-3">
-        {/* Text Channels header */}
-        <div className="mb-1 flex items-center justify-between px-1">
-          <span className="text-[11px] font-bold uppercase tracking-wide text-[var(--text-muted)]">
-            Text Channels
-          </span>
+        <div className="flex shrink-0 gap-1">
+          <button
+            onClick={() => setInviteOpen(true)}
+            className="rounded p-1 text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)] hover:text-[var(--text-secondary)]"
+            title="Invite People"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2" />
+              <circle cx="8.5" cy="7" r="4" />
+              <line x1="20" y1="8" x2="20" y2="14" />
+              <line x1="23" y1="11" x2="17" y2="11" />
+            </svg>
+          </button>
           {isOwner && (
             <button
-              onClick={() => setShowCreate(!showCreate)}
-              className="text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
-              title="Create Channel"
+              onClick={() => setSettingsOpen(true)}
+              className="rounded p-1 text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)] hover:text-[var(--text-secondary)]"
+              title="Server Settings"
             >
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="currentColor"
-              >
-                <path d="M13 5h-2v6H5v2h6v6h2v-6h6v-2h-6V5z" />
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
               </svg>
             </button>
           )}
         </div>
+      </div>
 
+      {/* Channel list */}
+      <div className="flex-1 overflow-y-auto px-2 py-3">
         {/* Create channel inline form */}
         {showCreate && (
           <form onSubmit={handleCreateChannel} className="mb-2 px-1">
@@ -140,16 +154,81 @@ export function ChannelList() {
             {isOwner && ' Click + to create one.'}
           </p>
         ) : (
-          <div className="space-y-0.5">
-            {channels.map((channel) => (
-              <ChannelItem
-                key={channel.id}
-                channel={channel}
-                isSelected={channel.id === selectedChannelId}
-                onClick={() => selectChannel(channel.id)}
-              />
-            ))}
-          </div>
+          <>
+            {/* Uncategorized channels */}
+            {(() => {
+              const uncategorized = channels.filter((c) => !c.categoryId);
+              if (uncategorized.length === 0 && categories.length > 0) return null;
+              return (
+                <div className="mb-2">
+                  <div className="mb-1 flex items-center justify-between px-1">
+                    <span className="text-[11px] font-bold uppercase tracking-wide text-[var(--text-muted)]">
+                      Text Channels
+                    </span>
+                    {isOwner && (
+                      <button
+                        onClick={() => setShowCreate(!showCreate)}
+                        className="text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
+                        title="Create Channel"
+                      >
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                          <path d="M13 5h-2v6H5v2h6v6h2v-6h6v-2h-6V5z" />
+                        </svg>
+                      </button>
+                    )}
+                  </div>
+                  <div className="space-y-0.5">
+                    {uncategorized.map((channel) => (
+                      <ChannelItem
+                        key={channel.id}
+                        channel={channel}
+                        isSelected={channel.id === selectedChannelId}
+                        onClick={() => selectChannel(channel.id)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Categorized channels */}
+            {categories.map((cat) => {
+              const catChannels = channels.filter((c) => c.categoryId === cat.id);
+              if (catChannels.length === 0) return null;
+              const isCollapsed = collapsedCategories.has(cat.id);
+              return (
+                <div key={cat.id} className="mb-2">
+                  <button
+                    onClick={() => toggleCategory(cat.id)}
+                    className="mb-1 flex w-full items-center gap-1 px-1 text-[11px] font-bold uppercase tracking-wide text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
+                  >
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 24 24"
+                      fill="currentColor"
+                      className={`shrink-0 transition-transform ${isCollapsed ? '-rotate-90' : ''}`}
+                    >
+                      <path d="M7 10l5 5 5-5z" />
+                    </svg>
+                    {cat.name}
+                  </button>
+                  {!isCollapsed && (
+                    <div className="space-y-0.5">
+                      {catChannels.map((channel) => (
+                        <ChannelItem
+                          key={channel.id}
+                          channel={channel}
+                          isSelected={channel.id === selectedChannelId}
+                          onClick={() => selectChannel(channel.id)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </>
         )}
       </div>
 
@@ -158,11 +237,18 @@ export function ChannelList() {
 
       {/* Dialogs */}
       {selectedServerId && (
-        <InviteDialog
-          open={inviteOpen}
-          onOpenChange={setInviteOpen}
-          serverId={selectedServerId}
-        />
+        <>
+          <InviteDialog
+            open={inviteOpen}
+            onOpenChange={setInviteOpen}
+            serverId={selectedServerId}
+          />
+          <ServerSettingsDialog
+            open={settingsOpen}
+            onOpenChange={setSettingsOpen}
+            serverId={selectedServerId}
+          />
+        </>
       )}
     </div>
   );

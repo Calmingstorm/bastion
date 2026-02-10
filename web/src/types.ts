@@ -12,6 +12,7 @@ export interface Server {
   id: string;
   name: string;
   iconUrl?: string;
+  description?: string;
   ownerId: string;
   createdAt: string;
 }
@@ -23,6 +24,7 @@ export interface Channel {
   topic?: string;
   type: string;
   position: number;
+  categoryId?: string;
 }
 
 export interface MessageAuthor {
@@ -115,7 +117,57 @@ export interface MemberWithUser {
   nickname?: string;
   role: string;
   status: string;
+  timedOutUntil?: string;
   joinedAt: string;
+  roles?: RoleInfo[];
+}
+
+export interface RoleInfo {
+  id: string;
+  name: string;
+  color?: string;
+  position: number;
+}
+
+export interface Role {
+  id: string;
+  serverId: string;
+  name: string;
+  color?: string;
+  position: number;
+  permissions: number;
+  isDefault: boolean;
+  createdAt: string;
+}
+
+export interface ChannelCategory {
+  id: string;
+  serverId: string;
+  name: string;
+  position: number;
+  createdAt: string;
+}
+
+export interface ServerBan {
+  serverId: string;
+  userId: string;
+  username: string;
+  reason?: string;
+  bannedBy: string;
+  createdAt: string;
+}
+
+export interface AuditLogEntry {
+  id: string;
+  serverId: string;
+  actorId: string;
+  actor?: MessageAuthor;
+  actionType: string;
+  targetType?: string;
+  targetId?: string;
+  changes?: Record<string, unknown>;
+  reason?: string;
+  createdAt: string;
 }
 
 export type WSEventType =
@@ -128,6 +180,8 @@ export type WSEventType =
   | 'SERVER_UPDATE'
   | 'MEMBER_JOIN'
   | 'MEMBER_LEAVE'
+  | 'MEMBER_KICK'
+  | 'MEMBER_BAN'
   | 'PRESENCE_UPDATE'
   | 'TYPING_START'
   | 'SERVER_MEMBER_JOIN'

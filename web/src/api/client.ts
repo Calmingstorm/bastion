@@ -10,6 +10,10 @@ import type {
   DMChannel,
   ReadState,
   MemberWithUser,
+  Role,
+  ChannelCategory,
+  ServerBan,
+  AuditLogEntry,
 } from '../types';
 
 const apiClient = axios.create({
@@ -385,6 +389,169 @@ export async function apiResetPassword(
   const response = await apiClient.post<{ message: string }>(
     '/api/auth/reset-password',
     { token, password }
+  );
+  return response.data;
+}
+
+// ---- Server Settings API ----
+
+export async function apiUpdateServer(
+  serverId: string,
+  data: { name?: string; description?: string }
+): Promise<Server> {
+  const response = await apiClient.patch<Server>(`/api/servers/${serverId}`, data);
+  return response.data;
+}
+
+// ---- Roles API ----
+
+export async function apiGetRoles(serverId: string): Promise<Role[]> {
+  const response = await apiClient.get<Role[]>(`/api/servers/${serverId}/roles`);
+  return response.data;
+}
+
+export async function apiCreateRole(
+  serverId: string,
+  data: { name: string; color?: string; permissions?: number }
+): Promise<Role> {
+  const response = await apiClient.post<Role>(`/api/servers/${serverId}/roles`, data);
+  return response.data;
+}
+
+export async function apiUpdateRole(
+  serverId: string,
+  roleId: string,
+  data: { name?: string; color?: string; permissions?: number }
+): Promise<Role> {
+  const response = await apiClient.patch<Role>(
+    `/api/servers/${serverId}/roles/${roleId}`,
+    data
+  );
+  return response.data;
+}
+
+export async function apiDeleteRole(serverId: string, roleId: string): Promise<void> {
+  await apiClient.delete(`/api/servers/${serverId}/roles/${roleId}`);
+}
+
+export async function apiAssignRole(
+  serverId: string,
+  roleId: string,
+  userId: string
+): Promise<void> {
+  await apiClient.post(`/api/servers/${serverId}/roles/${roleId}/assign`, { userId });
+}
+
+export async function apiRemoveRole(
+  serverId: string,
+  roleId: string,
+  userId: string
+): Promise<void> {
+  await apiClient.post(`/api/servers/${serverId}/roles/${roleId}/remove`, { userId });
+}
+
+export async function apiGetMemberPermissions(
+  serverId: string
+): Promise<{ permissions: number }> {
+  const response = await apiClient.get<{ permissions: number }>(
+    `/api/servers/${serverId}/permissions`
+  );
+  return response.data;
+}
+
+// ---- Categories API ----
+
+export async function apiGetCategories(serverId: string): Promise<ChannelCategory[]> {
+  const response = await apiClient.get<ChannelCategory[]>(
+    `/api/servers/${serverId}/categories`
+  );
+  return response.data;
+}
+
+export async function apiCreateCategory(
+  serverId: string,
+  name: string
+): Promise<ChannelCategory> {
+  const response = await apiClient.post<ChannelCategory>(
+    `/api/servers/${serverId}/categories`,
+    { name }
+  );
+  return response.data;
+}
+
+export async function apiUpdateCategory(
+  serverId: string,
+  categoryId: string,
+  data: { name?: string; position?: number }
+): Promise<ChannelCategory> {
+  const response = await apiClient.patch<ChannelCategory>(
+    `/api/servers/${serverId}/categories/${categoryId}`,
+    data
+  );
+  return response.data;
+}
+
+export async function apiDeleteCategory(
+  serverId: string,
+  categoryId: string
+): Promise<void> {
+  await apiClient.delete(`/api/servers/${serverId}/categories/${categoryId}`);
+}
+
+// ---- Moderation API ----
+
+export async function apiKickMember(
+  serverId: string,
+  userId: string,
+  reason?: string
+): Promise<void> {
+  await apiClient.post(`/api/servers/${serverId}/kick/${userId}`, { reason });
+}
+
+export async function apiBanMember(
+  serverId: string,
+  userId: string,
+  reason?: string
+): Promise<void> {
+  await apiClient.post(`/api/servers/${serverId}/bans/${userId}`, { reason });
+}
+
+export async function apiUnbanMember(
+  serverId: string,
+  userId: string
+): Promise<void> {
+  await apiClient.delete(`/api/servers/${serverId}/bans/${userId}`);
+}
+
+export async function apiGetBans(serverId: string): Promise<ServerBan[]> {
+  const response = await apiClient.get<ServerBan[]>(`/api/servers/${serverId}/bans`);
+  return response.data;
+}
+
+export async function apiTimeoutMember(
+  serverId: string,
+  userId: string,
+  duration: number,
+  reason?: string
+): Promise<void> {
+  await apiClient.post(`/api/servers/${serverId}/timeout/${userId}`, {
+    duration,
+    reason,
+  });
+}
+
+// ---- Audit Log API ----
+
+export async function apiGetAuditLog(
+  serverId: string,
+  filters?: { action?: string; actor?: string }
+): Promise<AuditLogEntry[]> {
+  const params: Record<string, string> = {};
+  if (filters?.action) params.action = filters.action;
+  if (filters?.actor) params.actor = filters.actor;
+  const response = await apiClient.get<AuditLogEntry[]>(
+    `/api/servers/${serverId}/audit-log`,
+    { params }
   );
   return response.data;
 }

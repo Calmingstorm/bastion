@@ -5,6 +5,7 @@ import { useServerStore } from './serverStore';
 import { usePresenceStore } from './presenceStore';
 import { useTypingStore } from './typingStore';
 import { useUnreadStore } from './unreadStore';
+import { useAuthStore } from './authStore';
 import type { Message, Channel } from '../types';
 
 interface WSState {
@@ -89,6 +90,42 @@ export const useWSStore = create<WSState>((set) => ({
         useUnreadStore.getState().markUnread(payload.channelId);
         if (payload.mentionCount) {
           useUnreadStore.getState().incrementMention(payload.channelId);
+        }
+      }
+    });
+
+    wsClient.on('MEMBER_KICK', (data: unknown) => {
+      const payload = data as { serverId: string; userId: string };
+      if (payload.serverId && payload.userId) {
+        // If the kicked user is us, remove the server from our list
+        const { user } = useAuthStore.getState();
+        if (user && payload.userId === user.id) {
+          const { servers, selectedServerId } = useServerStore.getState();
+          const remaining = servers.filter((s) => s.id !== payload.serverId);
+          if (selectedServerId === payload.serverId) {
+            // Reset and select first remaining server if available
+            useServerStore.setState({ servers: remaining, selectedServerId: remaining[0]?.id || null, channels: [], selectedChannelId: null });
+            if (remaining[0]) useServerStore.getState().selectServer(remaining[0].id);
+          } else {
+            useServerStore.setState({ servers: remaining });
+          }
+        }
+      }
+    });
+
+    wsClient.on('MEMBER_BAN', (data: unknown) => {
+      const payload = data as { serverId: string; userId: string };
+      if (payload.serverId && payload.userId) {
+        const { user } = useAuthStore.getState();
+        if (user && payload.userId === user.id) {
+          const { servers, selectedServerId } = useServerStore.getState();
+          const remaining = servers.filter((s) => s.id !== payload.serverId);
+          if (selectedServerId === payload.serverId) {
+            useServerStore.setState({ servers: remaining, selectedServerId: remaining[0]?.id || null, channels: [], selectedChannelId: null });
+            if (remaining[0]) useServerStore.getState().selectServer(remaining[0].id);
+          } else {
+            useServerStore.setState({ servers: remaining });
+          }
         }
       }
     });

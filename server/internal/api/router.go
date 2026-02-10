@@ -61,6 +61,10 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 	uploadHandler := NewUploadHandler(db, hub, fileStorage, cfg)
 	dmHandler := NewDMHandler(db)
 	readStateHandler := NewReadStateHandler(db)
+	roleHandler := NewRoleHandler(db, rdb, hub)
+	categoryHandler := NewCategoryHandler(db)
+	moderationHandler := NewModerationHandler(db, rdb, hub)
+	auditLogHandler := NewAuditLogHandler(db)
 
 	// Public routes
 	r.Route("/api/auth", func(r chi.Router) {
@@ -91,11 +95,29 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 			r.Post("/", serverHandler.Create)
 			r.Get("/", serverHandler.List)
 			r.Get("/{id}", serverHandler.Get)
+			r.Patch("/{id}", serverHandler.Update)
 			r.Post("/{id}/join", serverHandler.Join)
 
 			// Channels (nested under servers)
 			r.Get("/{serverID}/channels", channelHandler.List)
 			r.Post("/{serverID}/channels", channelHandler.Create)
+
+			// Channel categories
+			r.Get("/{serverID}/categories", categoryHandler.List)
+			r.Post("/{serverID}/categories", categoryHandler.Create)
+			r.Patch("/{serverID}/categories/{categoryID}", categoryHandler.Update)
+			r.Delete("/{serverID}/categories/{categoryID}", categoryHandler.Delete)
+
+			// Roles
+			r.Get("/{serverID}/roles", roleHandler.List)
+			r.Post("/{serverID}/roles", roleHandler.Create)
+			r.Patch("/{serverID}/roles/{roleID}", roleHandler.Update)
+			r.Delete("/{serverID}/roles/{roleID}", roleHandler.Delete)
+			r.Post("/{serverID}/roles/{roleID}/assign", roleHandler.AssignRole)
+			r.Post("/{serverID}/roles/{roleID}/remove", roleHandler.RemoveRole)
+
+			// Permissions
+			r.Get("/{serverID}/permissions", roleHandler.GetMemberPermissions)
 
 			// Invites (nested under servers)
 			r.Post("/{serverID}/invites", inviteHandler.Create)
@@ -103,6 +125,16 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 
 			// Members
 			r.Get("/{serverID}/members", userHandler.GetMembers)
+
+			// Moderation
+			r.Post("/{serverID}/kick/{targetID}", moderationHandler.Kick)
+			r.Post("/{serverID}/bans/{targetID}", moderationHandler.Ban)
+			r.Delete("/{serverID}/bans/{targetID}", moderationHandler.Unban)
+			r.Get("/{serverID}/bans", moderationHandler.ListBans)
+			r.Post("/{serverID}/timeout/{targetID}", moderationHandler.Timeout)
+
+			// Audit log
+			r.Get("/{serverID}/audit-log", auditLogHandler.List)
 		})
 
 		// Invites (top-level for join/delete)
