@@ -10,9 +10,11 @@ import { useDMStore } from '../../stores/dmStore';
 import { useNotifications } from '../../hooks/useNotifications';
 import { useFeatureStore } from '../../stores/featureStore';
 import { useBreakpoints } from '../../hooks/useMediaQuery';
+import { useActivityPresence } from '../../hooks/useActivityPresence';
 
 export function AppLayout() {
   useNotifications();
+  useActivityPresence();
   const fetchFeatures = useFeatureStore((s) => s.fetchFeatures);
   useEffect(() => { fetchFeatures(); }, [fetchFeatures]);
   const selectedServerId = useServerStore((s) => s.selectedServerId);
