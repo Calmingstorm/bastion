@@ -134,6 +134,27 @@ func (h *Hub) RegisterUser(client *Client) {
 	clients[client] = struct{}{}
 }
 
+// SubscribeUser subscribes all connected clients of a user to a channel.
+func (h *Hub) SubscribeUser(userID, channelID uuid.UUID) {
+	h.mu.RLock()
+	clients, ok := h.users[userID]
+	if !ok {
+		h.mu.RUnlock()
+		return
+	}
+	// Collect clients under read lock
+	clientList := make([]*Client, 0, len(clients))
+	for c := range clients {
+		clientList = append(clientList, c)
+	}
+	h.mu.RUnlock()
+
+	// Subscribe each client (goes through the channel-based register flow)
+	for _, c := range clientList {
+		h.Subscribe(channelID, c)
+	}
+}
+
 func (h *Hub) BroadcastToUser(userID uuid.UUID, event Event) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()

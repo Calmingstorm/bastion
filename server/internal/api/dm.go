@@ -5,19 +5,22 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
 
 	"github.com/Calmingstorm/bastion/server/internal/auth"
 	"github.com/Calmingstorm/bastion/server/internal/models"
+	"github.com/Calmingstorm/bastion/server/internal/realtime"
 )
 
 type DMHandler struct {
-	db *pgxpool.Pool
+	db  *pgxpool.Pool
+	hub *realtime.Hub
 }
 
-func NewDMHandler(db *pgxpool.Pool) *DMHandler {
-	return &DMHandler{db: db}
+func NewDMHandler(db *pgxpool.Pool, hub *realtime.Hub) *DMHandler {
+	return &DMHandler{db: db, hub: hub}
 }
 
 type createDMRequest struct {
@@ -124,11 +127,29 @@ func (h *DMHandler) CreateOrGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ch := h.getDMChannel(r, channelID, userID)
-	if ch != nil {
-		writeJSON(w, http.StatusCreated, ch)
-	} else {
+	if ch == nil {
 		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
 	}
+
+	// Subscribe all participants to the new DM channel via WebSocket
+	chUUID, err := uuid.Parse(channelID)
+	if err == nil {
+		h.hub.SubscribeUser(userID, chUUID)
+		for _, rid := range req.RecipientIDs {
+			recipientUUID, err := uuid.Parse(rid)
+			if err == nil {
+				h.hub.SubscribeUser(recipientUUID, chUUID)
+				// Notify recipient so they can add the DM to their list
+				h.hub.BroadcastToUser(recipientUUID, realtime.Event{
+					Type: realtime.EventDMCreate,
+					Data: h.getDMChannel(r, channelID, recipientUUID),
+				})
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusCreated, ch)
 }
 
 func (h *DMHandler) List(w http.ResponseWriter, r *http.Request) {

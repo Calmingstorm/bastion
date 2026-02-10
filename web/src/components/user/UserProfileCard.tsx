@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import * as Popover from '@radix-ui/react-popover';
-import { apiGetUser, apiCreateDM } from '../../api/client';
+import { apiGetUser, apiCreateDM, apiKickMember, apiBanMember, apiTimeoutMember } from '../../api/client';
 import { useAuthStore } from '../../stores/authStore';
 import { useDMStore } from '../../stores/dmStore';
 import { useServerStore } from '../../stores/serverStore';
@@ -11,10 +11,13 @@ interface UserProfileCardProps {
   userId: string;
   roles?: RoleInfo[];
   joinedAt?: string;
+  serverId?: string;
+  canModerate?: boolean;
+  isOwner?: boolean;
   children: React.ReactNode;
 }
 
-export function UserProfileCard({ userId, roles, joinedAt, children }: UserProfileCardProps) {
+export function UserProfileCard({ userId, roles, joinedAt, serverId, canModerate, isOwner, children }: UserProfileCardProps) {
   const [user, setUser] = useState<User | null>(null);
   const [open, setOpen] = useState(false);
   const currentUser = useAuthStore((s) => s.user);
@@ -130,6 +133,28 @@ export function UserProfileCard({ userId, roles, joinedAt, children }: UserProfi
                   >
                     Message
                   </button>
+                )}
+                {canModerate && !isOwner && currentUser?.id !== userId && serverId && (
+                  <div className="mt-2 flex gap-1">
+                    <button
+                      onClick={async () => { try { await apiTimeoutMember(serverId, userId, 300); setOpen(false); } catch {} }}
+                      className="flex-1 rounded-[3px] border border-[var(--border)] py-1.5 text-xs font-medium text-[var(--danger)] hover:bg-[var(--danger)]/10"
+                    >
+                      Timeout
+                    </button>
+                    <button
+                      onClick={async () => { try { await apiKickMember(serverId, userId); setOpen(false); } catch {} }}
+                      className="flex-1 rounded-[3px] border border-[var(--border)] py-1.5 text-xs font-medium text-[var(--danger)] hover:bg-[var(--danger)]/10"
+                    >
+                      Kick
+                    </button>
+                    <button
+                      onClick={async () => { try { await apiBanMember(serverId, userId); setOpen(false); } catch {} }}
+                      className="flex-1 rounded-[3px] border border-[var(--border)] py-1.5 text-xs font-medium text-[var(--danger)] hover:bg-[var(--danger)]/10"
+                    >
+                      Ban
+                    </button>
+                  </div>
                 )}
               </>
             ) : (

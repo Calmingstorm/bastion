@@ -45,12 +45,14 @@ export const useMessageStore = create<MessageState>((set, get) => ({
 
     try {
       const fetched = await apiGetMessages(channelId, before, MESSAGE_LIMIT);
+      // API returns messages in DESC order (newest first); reverse to ASC (oldest first)
+      fetched.reverse();
 
       set((s) => {
         const existing = s.messages[channelId] || [];
 
         if (before) {
-          // Loading older messages: prepend
+          // Loading older messages: prepend (fetched is now ASC, so oldest first)
           const existingIds = new Set(existing.map((m) => m.id));
           const newMessages = fetched.filter((m) => !existingIds.has(m.id));
           return {

@@ -145,14 +145,14 @@
 .markdown-content h2 { font-size: 1.15em; }
 .markdown-content h3 { font-size: 1.05em; }
 
-/* highlight.js dark theme (GitHub Dark inspired) */
+/* highlight.js dark theme (purple-tinted) */
 .hljs {
-  color: #e2e8f0;
+  color: #e4e0ed;
 }
 
 .hljs-comment,
 .hljs-meta {
-  color: #64748b;
+  color: #6b6280;
 }
 
 .hljs-keyword,

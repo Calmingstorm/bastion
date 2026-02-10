@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useServerStore } from '../../stores/serverStore';
 import { usePresenceStore } from '../../stores/presenceStore';
 import { useAuthStore } from '../../stores/authStore';
@@ -15,19 +15,29 @@ export function MemberList() {
   const presences = usePresenceStore((s) => s.presences);
   const currentUser = useAuthStore((s) => s.user);
 
-  useEffect(() => {
+  const fetchMemberList = useCallback(() => {
     if (!selectedServerId) return;
     setIsLoading(true);
     apiGetMembers(selectedServerId)
       .then((m) => {
         setMembers(m);
-        // Seed presence store
         const { setPresence } = usePresenceStore.getState();
         m.forEach((member) => setPresence(member.userId, member.status));
       })
       .catch(() => {})
       .finally(() => setIsLoading(false));
   }, [selectedServerId]);
+
+  useEffect(() => {
+    fetchMemberList();
+  }, [fetchMemberList]);
+
+  // Refetch on new member join (via WS event)
+  useEffect(() => {
+    const handler = () => fetchMemberList();
+    window.addEventListener('bastion:member-join', handler);
+    return () => window.removeEventListener('bastion:member-join', handler);
+  }, [fetchMemberList]);
 
   if (!selectedServerId) return null;
 
@@ -187,7 +197,7 @@ function MemberItem({ member, serverId, canModerate, isOwner }: {
       isOwner={isOwner}
       canModerate={canModerate}
     >
-      <UserProfileCard userId={member.userId} roles={member.roles} joinedAt={member.joinedAt}>
+      <UserProfileCard userId={member.userId} roles={member.roles} joinedAt={member.joinedAt} serverId={serverId} canModerate={canModerate} isOwner={isOwner}>
         <button
           className={`group flex w-full items-center gap-2 rounded px-2 py-1.5 text-left transition-colors hover:bg-[var(--bg-input)]/50 ${
             isOffline ? 'opacity-40' : ''

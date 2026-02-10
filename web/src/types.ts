@@ -196,7 +196,9 @@ export type WSEventType =
   | 'SERVER_MEMBER_JOIN'
   | 'NOTIFICATION'
   | 'REACTION_ADD'
-  | 'REACTION_REMOVE';
+  | 'REACTION_REMOVE'
+  | 'DM_CREATE'
+  | 'SERVER_MEMBER_JOIN';
 
 export interface WSMessage {
   type: WSEventType;

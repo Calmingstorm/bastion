@@ -9,6 +9,7 @@ import { UserContextMenu } from '../user/UserContextMenu';
 import { UserProfileCard } from '../user/UserProfileCard';
 import { useMessageStore } from '../../stores/messageStore';
 import { useServerStore } from '../../stores/serverStore';
+import { useAuthStore } from '../../stores/authStore';
 
 interface MessageItemProps {
   message: Message;
@@ -76,6 +77,8 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
   const selectedServerId = useServerStore((s) => s.selectedServerId);
   const servers = useServerStore((s) => s.servers);
   const server = servers.find((s) => s.id === selectedServerId);
+  const currentUser = useAuthStore((s) => s.user);
+  const canModerate = !!(server && currentUser && server.ownerId === currentUser.id);
 
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState(content);
@@ -229,8 +232,8 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
       <div className="group relative flex gap-4 py-1 pr-12 pl-4 mt-4 hover:bg-[var(--bg-secondary)]/30">
         <MessageActions message={message} onEdit={handleEdit} onDelete={() => setShowDeleteDialog(true)} onReply={handleReply} />
         {/* Avatar */}
-        <UserContextMenu userId={author.id} username={author.username} serverId={selectedServerId || undefined} isOwner={server?.ownerId === author.id}>
-          <UserProfileCard userId={author.id}>
+        <UserContextMenu userId={author.id} username={author.username} serverId={selectedServerId || undefined} isOwner={server?.ownerId === author.id} canModerate={canModerate}>
+          <UserProfileCard userId={author.id} serverId={selectedServerId || undefined} canModerate={canModerate} isOwner={server?.ownerId === author.id}>
             <div className="cursor-pointer">
               {author.avatarUrl ? (
                 <img
@@ -253,9 +256,11 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
         {/* Content */}
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline gap-2">
-            <span className="font-medium text-[var(--text-primary)] hover:underline cursor-pointer">
-              {displayName}
-            </span>
+            <UserProfileCard userId={author.id} serverId={selectedServerId || undefined} canModerate={canModerate} isOwner={server?.ownerId === author.id}>
+              <span className="font-medium text-[var(--text-primary)] hover:underline cursor-pointer">
+                {displayName}
+              </span>
+            </UserProfileCard>
             <span className="text-xs text-[var(--text-muted)]">
               {formatFullTimestamp(createdAt)}
             </span>

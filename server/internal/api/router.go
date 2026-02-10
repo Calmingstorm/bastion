@@ -59,7 +59,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 	inviteHandler := NewInviteHandler(db, hub)
 	userHandler := NewUserHandler(db, rdb, fileStorage, cfg)
 	uploadHandler := NewUploadHandler(db, hub, fileStorage, cfg)
-	dmHandler := NewDMHandler(db)
+	dmHandler := NewDMHandler(db, hub)
 	readStateHandler := NewReadStateHandler(db)
 	roleHandler := NewRoleHandler(db, rdb, hub)
 	categoryHandler := NewCategoryHandler(db)

@@ -6,7 +6,8 @@ import { usePresenceStore } from './presenceStore';
 import { useTypingStore } from './typingStore';
 import { useUnreadStore } from './unreadStore';
 import { useAuthStore } from './authStore';
-import type { Message, Channel } from '../types';
+import { useDMStore } from './dmStore';
+import type { Message, Channel, DMChannel } from '../types';
 
 interface WSState {
   isConnected: boolean;
@@ -139,6 +140,29 @@ export const useWSStore = create<WSState>((set) => ({
       const payload = data as { channelId: string; messageId: string; userId: string; emoji: string };
       if (payload.channelId && payload.messageId && payload.emoji) {
         useMessageStore.getState().removeReaction(payload.channelId, payload.messageId, payload.emoji, payload.userId);
+      }
+    });
+
+    wsClient.on('DM_CREATE', (data: unknown) => {
+      const dm = data as DMChannel;
+      if (dm && dm.id) {
+        const { dmChannels } = useDMStore.getState();
+        const exists = dmChannels.some((d) => d.id === dm.id);
+        if (!exists) {
+          useDMStore.setState({ dmChannels: [dm, ...dmChannels] });
+        }
+      }
+    });
+
+    wsClient.on('SERVER_MEMBER_JOIN', (data: unknown) => {
+      const payload = data as { serverId: string; userId: string };
+      if (payload.serverId) {
+        const { selectedServerId } = useServerStore.getState();
+        // Refetch member list if viewing the server the new member joined
+        if (selectedServerId === payload.serverId) {
+          // Dispatch a custom event that MemberList can listen for
+          window.dispatchEvent(new CustomEvent('bastion:member-join', { detail: payload }));
+        }
       }
     });
 

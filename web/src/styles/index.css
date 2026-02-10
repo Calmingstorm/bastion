@@ -3,34 +3,34 @@
 
 :root,
 [data-theme="dark"] {
-  /* Bastion dark palette — navy/slate */
-  --bg-primary: #1b2332;
-  --bg-secondary: #151c29;
-  --bg-tertiary: #0f1520;
-  --bg-input: #1e2a3a;
-  --text-primary: #e2e8f0;
-  --text-secondary: #94a3b8;
-  --text-muted: #64748b;
-  --accent: #0ea5e9;
-  --accent-hover: #0284c7;
-  --danger: #ef4444;
-  --success: #22c55e;
-  --border: #1e293b;
+  /* Bastion dark palette — midnight purple + violet */
+  --bg-primary: #16121e;
+  --bg-secondary: #110e18;
+  --bg-tertiary: #0d0a13;
+  --bg-input: #1e1829;
+  --text-primary: #e4e0ed;
+  --text-secondary: #9e95b0;
+  --text-muted: #6b6280;
+  --accent: #8b5cf6;
+  --accent-hover: #7c3aed;
+  --danger: #f43f5e;
+  --success: #34d399;
+  --border: #231d30;
 }
 
 [data-theme="light"] {
-  --bg-primary: #ffffff;
-  --bg-secondary: #f1f5f9;
-  --bg-tertiary: #e2e8f0;
-  --bg-input: #f8fafc;
-  --text-primary: #0f172a;
-  --text-secondary: #475569;
-  --text-muted: #94a3b8;
-  --accent: #0ea5e9;
-  --accent-hover: #0284c7;
-  --danger: #ef4444;
-  --success: #22c55e;
-  --border: #cbd5e1;
+  --bg-primary: #faf8ff;
+  --bg-secondary: #f0ecf9;
+  --bg-tertiary: #e4dff0;
+  --bg-input: #f5f3fa;
+  --text-primary: #1a1425;
+  --text-secondary: #4a3d60;
+  --text-muted: #8b7fa5;
+  --accent: #8b5cf6;
+  --accent-hover: #7c3aed;
+  --danger: #f43f5e;
+  --success: #34d399;
+  --border: #d4cce6;
 }
 
 body {

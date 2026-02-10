@@ -15,6 +15,7 @@ const (
 	EventNotification     = "NOTIFICATION"
 	EventReactionAdd      = "REACTION_ADD"
 	EventReactionRemove   = "REACTION_REMOVE"
+	EventDMCreate         = "DM_CREATE"
 )
 
 type Event struct {
