@@ -264,23 +264,18 @@ type resetPasswordRequest struct {
 }
 
 func (h *AuthHandler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
-	log.Debug().Msg("forgot-password handler entered")
 	if !h.cfg.SMTP.Enabled() || h.emailSvc == nil {
-		log.Debug().Msg("SMTP not enabled, returning 501")
 		writeJSON(w, http.StatusNotImplemented, errorBody("password reset not available"))
 		return
 	}
-	log.Debug().Msg("SMTP is enabled, decoding request")
 
 	var req forgotPasswordRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		log.Debug().Err(err).Msg("failed to decode request")
 		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
 		return
 	}
 
 	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
-	log.Debug().Str("email", req.Email).Msg("looking up user")
 	msg := map[string]string{"message": "If that email exists, a reset link has been sent."}
 
 	// Look up user — always return same message to prevent enumeration
@@ -288,7 +283,6 @@ func (h *AuthHandler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
 	err := h.db.QueryRow(r.Context(),
 		`SELECT id FROM users WHERE email = $1`, req.Email,
 	).Scan(&userID)
-	log.Debug().Err(err).Str("userID", userID).Msg("db query result")
 	if err != nil {
 		writeJSON(w, http.StatusOK, msg)
 		return
@@ -311,7 +305,7 @@ func (h *AuthHandler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Send email
+	// Send email asynchronously so the response isn't blocked by SMTP
 	resetLink := fmt.Sprintf("%s/reset-password?token=%s", h.cfg.Domain, token)
 	htmlBody := fmt.Sprintf(`<div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:24px">
 <h2 style="color:#e4e6eb">Password Reset</h2>
@@ -320,10 +314,13 @@ func (h *AuthHandler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
 <p style="color:#6b7084;font-size:13px">This link expires in 1 hour. If you didn't request this, you can ignore this email.</p>
 </div>`, resetLink)
 
-	if err := h.emailSvc.Send(req.Email, "Bastion — Password Reset", htmlBody); err != nil {
-		log.Error().Err(err).Str("email", req.Email).Msg("failed to send reset email")
-		// Still return success to prevent enumeration
-	}
+	go func() {
+		if err := h.emailSvc.Send(req.Email, "Bastion — Password Reset", htmlBody); err != nil {
+			log.Error().Err(err).Str("email", req.Email).Msg("failed to send reset email")
+		} else {
+			log.Info().Str("email", req.Email).Msg("password reset email sent")
+		}
+	}()
 
 	writeJSON(w, http.StatusOK, msg)
 }
