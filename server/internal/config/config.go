@@ -18,6 +18,7 @@ type Config struct {
 	Mailgun     MailgunConfig
 	Domain      string
 	TenorAPIKey string
+	GiphyAPIKey string
 }
 
 type SMTPConfig struct {
@@ -115,6 +116,7 @@ func Load() *Config {
 		},
 		Domain:      getEnvMulti("http://localhost:5173", "BASTION_DOMAIN"),
 		TenorAPIKey: getEnvMulti("", "BASTION_TENOR_API_KEY"),
+		GiphyAPIKey: getEnvMulti("", "BASTION_GIPHY_API_KEY"),
 	}
 }
 

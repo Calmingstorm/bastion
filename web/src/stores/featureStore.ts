@@ -3,6 +3,7 @@ import apiClient from '../api/client';
 
 interface Features {
   gifSearch: boolean;
+  gifProvider: string; // "tenor", "giphy", or ""
 }
 
 interface FeatureState {
@@ -12,7 +13,7 @@ interface FeatureState {
 }
 
 export const useFeatureStore = create<FeatureState>((set) => ({
-  features: { gifSearch: false },
+  features: { gifSearch: false, gifProvider: '' },
   loaded: false,
   fetchFeatures: async () => {
     try {

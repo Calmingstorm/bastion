@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { apiSearchGifs, apiTrendingGifs } from '../../api/client';
 import type { GifResult } from '../../api/client';
+import { useFeatureStore } from '../../stores/featureStore';
 
 interface GifPickerProps {
   onSelect: (url: string) => void;
@@ -13,6 +14,9 @@ export function GifPicker({ onSelect }: GifPickerProps) {
   const [loading, setLoading] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const gifProvider = useFeatureStore((s) => s.features.gifProvider);
+
+  const providerName = gifProvider === 'giphy' ? 'GIPHY' : 'Tenor';
 
   // Close on outside click
   useEffect(() => {
@@ -66,7 +70,7 @@ export function GifPicker({ onSelect }: GifPickerProps) {
               type="text"
               value={query}
               onChange={(e) => handleSearch(e.target.value)}
-              placeholder="Search Tenor"
+              placeholder={`Search ${providerName}`}
               className="w-full rounded bg-[var(--bg-input)] px-3 py-1.5 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] outline-none"
               autoFocus
             />
@@ -110,7 +114,7 @@ export function GifPicker({ onSelect }: GifPickerProps) {
 
           {/* Attribution */}
           <div className="border-t border-[var(--border)] px-2 py-1 text-center text-[10px] text-[var(--text-muted)]">
-            Powered by Tenor
+            Powered by {providerName}
           </div>
         </div>
       )}

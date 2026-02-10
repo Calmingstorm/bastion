@@ -46,8 +46,9 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 
 	// Public features endpoint — tells clients which optional features are available
 	r.Get("/api/features", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]bool{
-			"gifSearch": cfg.TenorAPIKey != "",
+		writeJSON(w, http.StatusOK, map[string]any{
+			"gifSearch":   cfg.TenorAPIKey != "" || cfg.GiphyAPIKey != "",
+			"gifProvider": gifProvider(cfg),
 		})
 	})
 
@@ -249,4 +250,14 @@ func parseUUID(s string) (uuid.UUID, error) {
 		return uuid.Nil, fmt.Errorf("invalid UUID: %w", err)
 	}
 	return id, nil
+}
+
+func gifProvider(cfg *config.Config) string {
+	if cfg.TenorAPIKey != "" {
+		return "tenor"
+	}
+	if cfg.GiphyAPIKey != "" {
+		return "giphy"
+	}
+	return ""
 }
