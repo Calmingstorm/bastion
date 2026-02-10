@@ -647,5 +647,20 @@ export async function apiTrendingGifs(limit = 20): Promise<GifResult[]> {
   return response.data;
 }
 
+// ---- Unfurl API ----
+
+export interface UnfurlResult {
+  mediaUrl: string;
+  width?: number;
+  height?: number;
+}
+
+export async function apiUnfurl(url: string): Promise<UnfurlResult> {
+  const response = await apiClient.get<UnfurlResult>('/api/unfurl', {
+    params: { url },
+  });
+  return response.data;
+}
+
 export { getAccessToken, getRefreshToken, setTokens, clearTokens };
 export default apiClient;

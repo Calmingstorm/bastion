@@ -75,6 +75,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 	auditLogHandler := NewAuditLogHandler(db)
 	gifHandler := NewGifHandler(cfg)
 	searchHandler := NewSearchHandler(db)
+	unfurlHandler := NewUnfurlHandler(cfg)
 
 	// Public routes
 	r.Route("/api/auth", func(r chi.Router) {
@@ -174,6 +175,9 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 
 		// Message search
 		r.Get("/api/search", searchHandler.Search)
+
+		// URL unfurling (resolve Tenor/Giphy share URLs to media URLs)
+		r.Get("/api/unfurl", unfurlHandler.Unfurl)
 
 		// Direct Messages
 		r.Post("/api/dm", dmHandler.CreateOrGet)

@@ -4,6 +4,7 @@ import { MessageActions } from './MessageActions';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { AttachmentPreview } from './AttachmentPreview';
 import { MarkdownRenderer } from './MarkdownRenderer';
+import { GifEmbed } from './GifEmbed';
 import { ReactionBar } from './ReactionBar';
 import { UserContextMenu } from '../user/UserContextMenu';
 import { UserProfileCard } from '../user/UserProfileCard';
@@ -14,6 +15,15 @@ import { useAuthStore } from '../../stores/authStore';
 interface MessageItemProps {
   message: Message;
   isCompact: boolean;
+}
+
+// Tenor/Giphy share page URL patterns (not direct media URLs — those are handled by MarkdownRenderer)
+const TENOR_SHARE_RE = /^https?:\/\/(?:www\.)?tenor\.com\/view\/[a-zA-Z0-9_-]+-\d+$/;
+const GIPHY_SHARE_RE = /^https?:\/\/(?:www\.)?giphy\.com\/gifs\/.+$/;
+
+function isShareUrl(content: string): boolean {
+  const trimmed = content.trim();
+  return TENOR_SHARE_RE.test(trimmed) || GIPHY_SHARE_RE.test(trimmed);
 }
 
 const AVATAR_COLORS = [
@@ -186,7 +196,11 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
           </div>
         )}
         <div className="text-[15px] text-[var(--text-secondary)]">
-          <MarkdownRenderer content={content} />
+          {isShareUrl(content) ? (
+            <GifEmbed url={content.trim()} />
+          ) : (
+            <MarkdownRenderer content={content} />
+          )}
           {editedAt && (
             <span className="ml-1 text-[10px] text-[var(--text-muted)]">
               (edited)
