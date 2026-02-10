@@ -225,10 +225,14 @@ func (h *UserHandler) GetMembers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Overlay presence from Redis if available
-		presenceStatus, err := h.rdb.Get(r.Context(), "presence:"+m.UserID.String()).Result()
-		if err == nil && presenceStatus != "" {
-			m.Status = presenceStatus
+		// Presence from Redis: key exists = online/status, key missing = offline
+		if h.rdb != nil {
+			presenceStatus, err := h.rdb.Get(r.Context(), "presence:"+m.UserID.String()).Result()
+			if err == nil && presenceStatus != "" {
+				m.Status = presenceStatus
+			} else {
+				m.Status = "offline"
+			}
 		}
 
 		members = append(members, m)
