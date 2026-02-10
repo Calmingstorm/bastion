@@ -10,7 +10,7 @@ A self-hostable, open-source chat platform built for communities. Real-time text
 - Message editing, deletion, and reply threads
 - Emoji reactions
 - File uploads with drag-and-drop, paste, and image previews
-- GIF picker with Tenor search (optional, requires API key)
+- GIF picker with Tenor or Giphy search (optional, requires API key)
 - Image/GIF URL embeds (Tenor, Giphy, direct image links)
 - Full-text message search (Ctrl+K)
 - Browser notifications on @mention
@@ -80,6 +80,7 @@ These are configured via environment variables in `.env`. See `.env.example` for
 |---------|----------|-------|
 | Password reset emails | `BASTION_MAILGUN_*` or `BASTION_SMTP_*` | Mailgun HTTP API or any SMTP server |
 | GIF picker | `BASTION_TENOR_API_KEY` | Free Tenor API key from [Google Cloud](https://developers.google.com/tenor/guides/quickstart) |
+| GIF picker (alt) | `BASTION_GIPHY_API_KEY` | Free Giphy API key from [Giphy Developers](https://developers.giphy.com/dashboard/?create=true). Configure one of Tenor or Giphy — if both are set, Tenor is used. |
 
 Features that aren't configured are gracefully hidden from the UI.
 
