@@ -1,41 +1,110 @@
 # Bastion
 
-Self-hostable, end-to-end encrypted chat platform.
+A self-hostable, open-source chat platform built for communities. Real-time text chat with servers, channels, direct messages, roles, moderation, and more.
+
+## Features
+
+**Messaging**
+- Real-time text chat via WebSocket
+- Markdown rendering with syntax-highlighted code blocks, spoiler tags, and @mentions
+- Message editing, deletion, and reply threads
+- Emoji reactions
+- File uploads with drag-and-drop, paste, and image previews
+- GIF picker with Tenor search (optional, requires API key)
+- Image/GIF URL embeds (Tenor, Giphy, direct image links)
+- Full-text message search (Ctrl+K)
+- Browser notifications on @mention
+
+**Servers & Channels**
+- Create and join servers via invite links
+- Text channels with topics, organized into collapsible categories
+- Direct messages (1:1)
+- Typing indicators and online/offline/idle/DND presence
+
+**Roles & Permissions**
+- Custom roles with colors and granular bitfield permissions
+- Role hierarchy with position-based authority
+- Channel permission overrides (per-role and per-member)
+- Default @bastion role for new members
+
+**Moderation**
+- Kick, ban/unban, and timeout with duration
+- Audit log tracking all admin actions
+- Message deletion by moderators (MANAGE_MESSAGES permission)
+
+**User Accounts**
+- Email/password registration and login
+- JWT authentication with automatic token refresh
+- Password reset via email (Mailgun or SMTP)
+- User profiles with avatars, display names, about me, and custom status
 
 ## Quick Start
 
 ### Prerequisites
-- Docker & Docker Compose
 
-### Run with Docker
+- [Docker](https://docs.docker.com/get-docker/) and Docker Compose
+
+### Deploy with Docker
 
 ```bash
-cd deploy
+git clone https://github.com/Calmingstorm/bastion.git
+cd bastion/deploy
+
+# Create your environment file
 cp .env.example .env
-# Edit .env with your values (especially JWT_SECRET and DB_PASSWORD)
+```
+
+Edit `.env` and set at minimum:
+- `DB_PASSWORD` — a strong random password
+- `JWT_SECRET` — a long random string (e.g. `openssl rand -base64 48`)
+- `BASTION_DOMAIN` — your domain or `http://localhost` for local use
+
+Then update `Caddyfile` (copy from `Caddyfile.example`) and replace `YOUR_DOMAIN` with your domain.
+
+```bash
+cp Caddyfile.example Caddyfile
+# Edit Caddyfile — replace YOUR_DOMAIN with your actual domain
+
 docker compose up -d
 ```
 
-The app will be available at `http://localhost` (port 80).
+Bastion will be available at your configured domain. Caddy handles TLS automatically.
 
-### Development
+Database migrations run automatically on first startup — no manual SQL required.
+
+### Optional Features
+
+These are configured via environment variables in `.env`. See `.env.example` for all options.
+
+| Feature | Variable | Notes |
+|---------|----------|-------|
+| Password reset emails | `BASTION_MAILGUN_*` or `BASTION_SMTP_*` | Mailgun HTTP API or any SMTP server |
+| GIF picker | `BASTION_TENOR_API_KEY` | Free Tenor API key from [Google Cloud](https://developers.google.com/tenor/guides/quickstart) |
+
+Features that aren't configured are gracefully hidden from the UI.
+
+## Development
+
+### Docker (recommended)
 
 ```bash
-# Start dev environment with hot reload
 cd deploy
 cp .env.example .env
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 ```
 
-- Web client: `http://localhost:5173`
-- API server: `http://localhost:8080`
+- Web client with hot reload: `http://localhost:5173`
+- API server with live rebuild: `http://localhost:8080`
 
-### Manual Development Setup
+### Manual Setup
+
+Requires Go 1.23+, Node.js 22+, PostgreSQL 16, and Redis 7.
 
 **Backend:**
 ```bash
 cd server
 go mod download
+# Set DB/Redis env vars (see .env.example), then:
 go run ./cmd/bastion
 ```
 
@@ -48,10 +117,57 @@ npm run dev
 
 ## Architecture
 
-- **Backend**: Go with chi router, PostgreSQL, Redis, WebSocket
-- **Frontend**: React + TypeScript, Vite, Tailwind CSS, Zustand
-- **Deployment**: Docker Compose with Caddy reverse proxy
+```
+bastion/
+├── server/              # Go backend
+│   ├── cmd/bastion/     # Entry point
+│   ├── internal/
+│   │   ├── api/         # HTTP/WS handlers, router
+│   │   ├── auth/        # JWT middleware
+│   │   ├── config/      # Environment-based config
+│   │   ├── database/    # PostgreSQL pool, migrations
+│   │   ├── email/       # SMTP + Mailgun
+│   │   ├── models/      # Data structures
+│   │   ├── permissions/ # Bitfield permission engine
+│   │   ├── realtime/    # WebSocket hub + client
+│   │   └── storage/     # File upload handling
+│   └── migrations/      # SQL migrations (auto-applied)
+├── web/                 # React web client
+│   └── src/
+│       ├── api/         # Axios client, API functions
+│       ├── components/  # UI components
+│       ├── hooks/       # React hooks
+│       ├── pages/       # Route pages
+│       ├── stores/      # Zustand state management
+│       └── styles/      # CSS
+└── deploy/              # Docker Compose, Dockerfiles, Caddy
+```
+
+**Backend**: Go, chi v5 router, pgx v5 (PostgreSQL), Redis, WebSocket (coder/websocket), zerolog, golang-migrate
+
+**Frontend**: React 19, TypeScript, Vite 6, Tailwind CSS 4, Zustand 5, Axios, Radix UI, markdown-it, highlight.js
+
+**Infrastructure**: Docker Compose, multi-stage builds, Caddy reverse proxy with automatic TLS
+
+## Database
+
+Bastion uses PostgreSQL 16 with automatic schema migrations. On startup, the server applies all pending migrations from `server/migrations/` in order. A fresh database is fully provisioned automatically — no manual SQL or seed scripts needed.
+
+Migrations are embedded into the Go binary at compile time, so they work in both development and Docker deployments.
+
+## API
+
+All endpoints are under `/api/`. Authentication uses Bearer JWT tokens.
+
+See the full endpoint list in the [project documentation](https://bastions.org) (coming soon) or browse `server/internal/api/router.go` for the complete route table.
+
+Key public endpoints:
+- `GET /health` — health check
+- `GET /api/features` — feature flags (which optional features are enabled)
+- `POST /api/auth/register` — create account
+- `POST /api/auth/login` — sign in
+- `GET /api/ws` — WebSocket connection (authenticated)
 
 ## License
 
-AGPL-3.0 — see [LICENSE](LICENSE) for details.
+[AGPL-3.0](LICENSE) — you can use, modify, and self-host freely. If you distribute a modified version as a network service, you must share your source code under the same license.
