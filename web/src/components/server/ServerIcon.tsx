@@ -1,5 +1,5 @@
 import * as Tooltip from '@radix-ui/react-tooltip';
-import type { Server } from '../../types';
+import type { Server, Channel } from '../../types';
 import { useServerStore } from '../../stores/serverStore';
 import { useUnreadStore } from '../../stores/unreadStore';
 
@@ -8,6 +8,8 @@ interface ServerIconProps {
   isSelected: boolean;
   onClick: () => void;
 }
+
+const EMPTY_CHANNELS: Channel[] = [];
 
 const COLORS = [
   '#0ea5e9', // sky
@@ -34,7 +36,7 @@ export function ServerIcon({ server, isSelected, onClick }: ServerIconProps) {
   const initial = server.name.charAt(0).toUpperCase();
   const bgColor = getColorForId(server.id);
   const channels = useServerStore((s) =>
-    s.selectedServerId === server.id ? s.channels : []
+    s.selectedServerId === server.id ? s.channels : EMPTY_CHANNELS
   );
   const unreadChannels = useUnreadStore((s) => s.unreadChannels);
   const readStates = useUnreadStore((s) => s.readStates);

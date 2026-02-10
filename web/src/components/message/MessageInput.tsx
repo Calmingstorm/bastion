@@ -13,9 +13,11 @@ export function MessageInput() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const lastTypingSentRef = useRef(0);
-  const { sendMessage, addMessage } = useMessageStore();
-  const { selectedChannelId, channels } = useServerStore();
-  const { selectedDMId } = useDMStore();
+  const sendMessage = useMessageStore((s) => s.sendMessage);
+  const addMessage = useMessageStore((s) => s.addMessage);
+  const selectedChannelId = useServerStore((s) => s.selectedChannelId);
+  const channels = useServerStore((s) => s.channels);
+  const selectedDMId = useDMStore((s) => s.selectedDMId);
 
   const activeChannelId = selectedChannelId || selectedDMId;
   const selectedChannel = channels.find((c) => c.id === selectedChannelId);
@@ -50,7 +52,10 @@ export function MessageInput() {
       // Error is handled in the store
     } finally {
       setIsSending(false);
-      textareaRef.current?.focus();
+      // Defer focus until React re-renders and removes the disabled attribute
+      requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+      });
     }
   }, [content, files, activeChannelId, isSending, sendMessage, addMessage]);
 
