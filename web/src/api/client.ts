@@ -605,5 +605,47 @@ export async function apiRemoveReaction(
   await apiClient.delete(`/api/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`);
 }
 
+// ---- Search API ----
+
+import type { SearchResult } from '../types';
+
+export async function apiSearch(
+  query: string,
+  options?: { serverId?: string; channelId?: string; limit?: number; offset?: number }
+): Promise<SearchResult[]> {
+  const params: Record<string, string | number> = { q: query };
+  if (options?.serverId) params.serverId = options.serverId;
+  if (options?.channelId) params.channelId = options.channelId;
+  if (options?.limit) params.limit = options.limit;
+  if (options?.offset) params.offset = options.offset;
+  const response = await apiClient.get<SearchResult[]>('/api/search', { params });
+  return response.data;
+}
+
+// ---- GIF API ----
+
+export interface GifResult {
+  id: string;
+  title: string;
+  previewUrl: string;
+  url: string;
+  width: number;
+  height: number;
+}
+
+export async function apiSearchGifs(query: string, limit = 20): Promise<GifResult[]> {
+  const response = await apiClient.get<GifResult[]>('/api/gifs/search', {
+    params: { q: query, limit },
+  });
+  return response.data;
+}
+
+export async function apiTrendingGifs(limit = 20): Promise<GifResult[]> {
+  const response = await apiClient.get<GifResult[]>('/api/gifs/trending', {
+    params: { limit },
+  });
+  return response.data;
+}
+
 export { getAccessToken, getRefreshToken, setTokens, clearTokens };
 export default apiClient;

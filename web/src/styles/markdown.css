@@ -122,6 +122,14 @@
   color: var(--text-secondary);
 }
 
+/* Image/GIF embeds */
+.markdown-content .image-embed img {
+  max-width: 400px;
+  max-height: 300px;
+  border-radius: 8px;
+  object-fit: contain;
+}
+
 /* Horizontal rules */
 .markdown-content hr {
   border: none;

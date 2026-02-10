@@ -8,15 +8,16 @@ import (
 )
 
 type Config struct {
-	Host    string
-	Port    string
-	DB      DBConfig
-	JWT     JWTConfig
-	Redis   RedisConfig
-	Upload  UploadConfig
-	SMTP    SMTPConfig
-	Mailgun MailgunConfig
-	Domain  string
+	Host        string
+	Port        string
+	DB          DBConfig
+	JWT         JWTConfig
+	Redis       RedisConfig
+	Upload      UploadConfig
+	SMTP        SMTPConfig
+	Mailgun     MailgunConfig
+	Domain      string
+	TenorAPIKey string
 }
 
 type SMTPConfig struct {
@@ -112,7 +113,8 @@ func Load() *Config {
 			Domain: getEnvMulti("", "BASTION_MAILGUN_DOMAIN"),
 			From:   getEnvMulti("Bastion <noreply@localhost>", "BASTION_MAILGUN_FROM"),
 		},
-		Domain: getEnvMulti("http://localhost:5173", "BASTION_DOMAIN"),
+		Domain:      getEnvMulti("http://localhost:5173", "BASTION_DOMAIN"),
+		TenorAPIKey: getEnvMulti("", "BASTION_TENOR_API_KEY"),
 	}
 }
 

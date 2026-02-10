@@ -3,6 +3,7 @@ import MarkdownIt from 'markdown-it';
 import type { Options } from 'markdown-it';
 import type Token from 'markdown-it/lib/token.mjs';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
+import type StateCore from 'markdown-it/lib/rules_core/state_core.mjs';
 import type Renderer from 'markdown-it/lib/renderer.mjs';
 import hljs from 'highlight.js/lib/core';
 
@@ -119,6 +120,63 @@ md.inline.ruler.after('emphasis', 'mention', (state: StateInline, silent: boolea
 
   state.pos += match[0].length;
   return true;
+});
+
+// Image/GIF embed core rule: detect standalone image URLs in paragraphs
+const IMAGE_EXT_RE = /\.(gif|gifv|png|jpg|jpeg|webp)(\?[^\s]*)?$/i;
+const GIF_CDN_HOSTS = ['media.tenor.com', 'media1.tenor.com', 'media2.tenor.com', 'media3.tenor.com', 'media4.tenor.com', 'i.giphy.com', 'media.giphy.com', 'media0.giphy.com', 'media1.giphy.com', 'media2.giphy.com', 'media3.giphy.com', 'media4.giphy.com', 'c.tenor.com'];
+
+function isImageUrl(href: string): boolean {
+  if (IMAGE_EXT_RE.test(href)) return true;
+  try {
+    const host = new URL(href).hostname;
+    return GIF_CDN_HOSTS.includes(host);
+  } catch { return false; }
+}
+
+md.core.ruler.after('inline', 'image_embed', (state: StateCore) => {
+  const tokens = state.tokens;
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i].type !== 'inline') continue;
+    const parent = tokens[i - 1];
+    if (!parent || parent.type !== 'paragraph_open') continue;
+
+    const children = tokens[i].children;
+    if (!children) continue;
+
+    // Check if inline contains exactly one link with no other text
+    const linkTokens = children.filter((t: Token) => t.type !== 'softbreak' && t.content?.trim() !== '');
+    const linkOpens = children.filter((t: Token) => t.type === 'link_open');
+    const linkCloses = children.filter((t: Token) => t.type === 'link_close');
+
+    if (linkOpens.length !== 1 || linkCloses.length !== 1) continue;
+
+    // Ensure there's no text outside the link
+    const linkOpenIdx = children.indexOf(linkOpens[0]);
+    const linkCloseIdx = children.indexOf(linkCloses[0]);
+    let hasOutsideText = false;
+    for (let j = 0; j < children.length; j++) {
+      if (j >= linkOpenIdx && j <= linkCloseIdx) continue;
+      if (children[j].type === 'text' && children[j].content.trim() !== '') {
+        hasOutsideText = true;
+        break;
+      }
+    }
+    if (hasOutsideText) continue;
+
+    const href = linkOpens[0].attrGet('href');
+    if (!href || !isImageUrl(href)) continue;
+
+    const escapedHref = md.utils.escapeHtml(href);
+
+    // Replace paragraph_open + inline + paragraph_close with html_block
+    const imgToken = new state.Token('html_block', '', 0);
+    imgToken.content = `<div class="image-embed"><img src="${escapedHref}" alt="" loading="lazy" /></div>\n`;
+
+    // Replace: tokens[i-1] = paragraph_open, tokens[i] = inline, tokens[i+1] = paragraph_close
+    tokens.splice(i - 1, 3, imgToken);
+    i--; // re-check from same position
+  }
 });
 
 interface MarkdownRendererProps {

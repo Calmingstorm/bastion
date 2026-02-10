@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { ServerList } from '../server/ServerList';
 import { ChannelList } from '../channel/ChannelList';
 import { MessageList } from '../message/MessageList';
@@ -8,8 +8,13 @@ import { DMList } from '../dm/DMList';
 import { DMChannelHeader } from '../dm/DMChannelHeader';
 import { useServerStore } from '../../stores/serverStore';
 import { useDMStore } from '../../stores/dmStore';
+import { useNotifications } from '../../hooks/useNotifications';
+import { useFeatureStore } from '../../stores/featureStore';
 
 export function AppLayout() {
+  useNotifications();
+  const fetchFeatures = useFeatureStore((s) => s.fetchFeatures);
+  useEffect(() => { fetchFeatures(); }, [fetchFeatures]);
   const selectedServerId = useServerStore((s) => s.selectedServerId);
   const selectedDMId = useDMStore((s) => s.selectedDMId);
   const [showMembers, setShowMembers] = useState(true);

@@ -1,10 +1,11 @@
-import { useEffect, useCallback, useRef, useMemo } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useMessageStore } from '../../stores/messageStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useUnreadStore } from '../../stores/unreadStore';
 import { useAutoScroll } from '../../hooks/useAutoScroll';
 import { MessageItem, DateSeparator } from './MessageItem';
 import { TypingIndicator } from './TypingIndicator';
+import { SearchDialog } from '../search/SearchDialog';
 import type { Message } from '../../types';
 
 function isSameDay(a: string, b: string): boolean {
@@ -33,6 +34,20 @@ interface MessageListProps {
 const EMPTY_MESSAGES: Message[] = [];
 
 export function MessageList({ onToggleMembers }: MessageListProps) {
+  const [searchOpen, setSearchOpen] = useState(false);
+
+  // Ctrl+K keyboard shortcut for search
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+        e.preventDefault();
+        setSearchOpen(true);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
+
   // Use targeted selectors to avoid re-renders from unrelated store changes
   const selectedChannelId = useServerStore((s) => s.selectedChannelId);
   const channels = useServerStore((s) => s.channels);
@@ -192,11 +207,12 @@ export function MessageList({ onToggleMembers }: MessageListProps) {
             </>
           )}
         </div>
-        {onToggleMembers && (
+        <div className="flex items-center gap-1">
+          {/* Search button */}
           <button
-            onClick={onToggleMembers}
+            onClick={() => setSearchOpen(true)}
             className="shrink-0 rounded p-1 text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)] hover:text-[var(--text-secondary)]"
-            title="Toggle Member List"
+            title="Search (Ctrl+K)"
           >
             <svg
               width="20"
@@ -208,13 +224,35 @@ export function MessageList({ onToggleMembers }: MessageListProps) {
               strokeLinecap="round"
               strokeLinejoin="round"
             >
-              <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2" />
-              <circle cx="9" cy="7" r="4" />
-              <path d="M23 21v-2a4 4 0 00-3-3.87" />
-              <path d="M16 3.13a4 4 0 010 7.75" />
+              <circle cx="11" cy="11" r="8" />
+              <line x1="21" y1="21" x2="16.65" y2="16.65" />
             </svg>
           </button>
-        )}
+
+          {onToggleMembers && (
+            <button
+              onClick={onToggleMembers}
+              className="shrink-0 rounded p-1 text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)] hover:text-[var(--text-secondary)]"
+              title="Toggle Member List"
+            >
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2" />
+                <circle cx="9" cy="7" r="4" />
+                <path d="M23 21v-2a4 4 0 00-3-3.87" />
+                <path d="M16 3.13a4 4 0 010 7.75" />
+              </svg>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Messages area */}
@@ -291,6 +329,9 @@ export function MessageList({ onToggleMembers }: MessageListProps) {
           usernames={usernameMap}
         />
       )}
+
+      {/* Search dialog */}
+      <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} />
     </div>
   );
 }

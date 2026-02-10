@@ -179,6 +179,19 @@ export interface AuditLogEntry {
   createdAt: string;
 }
 
+export interface SearchResult {
+  id: string;
+  channelId: string;
+  content: string;
+  createdAt: string;
+  authorId: string;
+  username: string;
+  displayName?: string;
+  avatarUrl?: string;
+  channelName: string;
+  serverName?: string;
+}
+
 export type WSEventType =
   | 'MESSAGE_CREATE'
   | 'MESSAGE_UPDATE'

@@ -101,11 +101,25 @@ export const useWSStore = create<WSState>((set) => ({
     });
 
     wsClient.on('NOTIFICATION', (data: unknown) => {
-      const payload = data as { channelId: string; mentionCount?: number };
+      const payload = data as {
+        channelId: string; mentionCount?: number;
+        senderName?: string; channelName?: string; content?: string;
+      };
       if (payload.channelId) {
         useUnreadStore.getState().markUnread(payload.channelId);
         if (payload.mentionCount) {
           useUnreadStore.getState().incrementMention(payload.channelId);
+        }
+        // Browser notification when tab is hidden
+        if (payload.senderName && 'Notification' in window &&
+            Notification.permission === 'granted' && document.hidden) {
+          const title = payload.channelName
+            ? `${payload.senderName} in #${payload.channelName}`
+            : payload.senderName;
+          new Notification(title, {
+            body: payload.content || 'mentioned you',
+            icon: '/favicon.ico',
+          });
         }
       }
     });

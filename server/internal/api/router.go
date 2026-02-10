@@ -44,6 +44,13 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
+	// Public features endpoint — tells clients which optional features are available
+	r.Get("/api/features", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]bool{
+			"gifSearch": cfg.TenorAPIKey != "",
+		})
+	})
+
 	// Create services
 	fileStorage := storage.NewFileStorage(&cfg.Upload)
 	var emailSvc *email.Service
@@ -66,6 +73,8 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 	moderationHandler := NewModerationHandler(db, rdb, hub)
 	reactionHandler := NewReactionHandler(db, hub)
 	auditLogHandler := NewAuditLogHandler(db)
+	gifHandler := NewGifHandler(cfg)
+	searchHandler := NewSearchHandler(db)
 
 	// Public routes
 	r.Route("/api/auth", func(r chi.Router) {
@@ -158,6 +167,13 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 
 		// Read states
 		r.Post("/api/channels/{channelID}/ack", readStateHandler.Ack)
+
+		// GIF search
+		r.Get("/api/gifs/search", gifHandler.Search)
+		r.Get("/api/gifs/trending", gifHandler.Trending)
+
+		// Message search
+		r.Get("/api/search", searchHandler.Search)
 
 		// Direct Messages
 		r.Post("/api/dm", dmHandler.CreateOrGet)

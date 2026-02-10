@@ -1,10 +1,13 @@
-import { useState, useRef, useCallback, useEffect, type KeyboardEvent, type DragEvent, type ClipboardEvent } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo, type KeyboardEvent, type DragEvent, type ClipboardEvent } from 'react';
 import { useMessageStore } from '../../stores/messageStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useDMStore } from '../../stores/dmStore';
 import { wsClient } from '../../api/websocket';
 import { apiSendMessageWithFiles, apiGetMembers } from '../../api/client';
 import { MentionAutocomplete } from './MentionAutocomplete';
+import { EmojiInputPicker } from './EmojiInputPicker';
+import { GifPicker } from './GifPicker';
+import { useFeatureStore } from '../../stores/featureStore';
 import type { MemberWithUser } from '../../types';
 
 export function MessageInput() {
@@ -23,6 +26,7 @@ export function MessageInput() {
   const selectedServerId = useServerStore((s) => s.selectedServerId);
   const channels = useServerStore((s) => s.channels);
   const selectedDMId = useDMStore((s) => s.selectedDMId);
+  const gifEnabled = useFeatureStore((s) => s.features.gifSearch);
 
   // Mention autocomplete state
   const [members, setMembers] = useState<MemberWithUser[]>([]);
@@ -33,6 +37,18 @@ export function MessageInput() {
   const activeChannelId = selectedChannelId || selectedDMId;
   const selectedChannel = channels.find((c) => c.id === selectedChannelId);
 
+  // Generate preview URLs for image files
+  const previewUrls = useMemo(() => files.map((f) =>
+    f.type.startsWith('image/') ? URL.createObjectURL(f) : ''
+  ), [files]);
+
+  // Revoke object URLs on cleanup
+  useEffect(() => {
+    return () => {
+      previewUrls.forEach((url) => { if (url) URL.revokeObjectURL(url); });
+    };
+  }, [previewUrls]);
+
   // Fetch members when server changes
   useEffect(() => {
     if (!selectedServerId) {
@@ -40,6 +56,16 @@ export function MessageInput() {
       return;
     }
     apiGetMembers(selectedServerId).then(setMembers).catch(() => {});
+  }, [selectedServerId]);
+
+  // Refresh members when a new member joins
+  useEffect(() => {
+    if (!selectedServerId) return;
+    const handler = () => {
+      apiGetMembers(selectedServerId).then(setMembers).catch(() => {});
+    };
+    window.addEventListener('bastion:member-join', handler);
+    return () => window.removeEventListener('bastion:member-join', handler);
   }, [selectedServerId]);
 
   // Clear reply when switching channels
@@ -120,6 +146,29 @@ export function MessageInput() {
       textarea.selectionEnd = newCursorPos;
     });
   };
+
+  const insertEmoji = (emoji: string) => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    const cursorPos = textarea.selectionStart;
+    const newContent = content.slice(0, cursorPos) + emoji + content.slice(cursorPos);
+    setContent(newContent);
+    const newCursorPos = cursorPos + emoji.length;
+    requestAnimationFrame(() => {
+      textarea.focus();
+      textarea.selectionStart = newCursorPos;
+      textarea.selectionEnd = newCursorPos;
+    });
+  };
+
+  const handleGifSelect = useCallback(async (url: string) => {
+    if (!activeChannelId || isSending) return;
+    setIsSending(true);
+    try {
+      await sendMessage(activeChannelId, url);
+    } catch { /* handled in store */ }
+    finally { setIsSending(false); }
+  }, [activeChannelId, isSending, sendMessage]);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (showMentions) {
@@ -244,26 +293,49 @@ export function MessageInput() {
         </div>
       )}
 
-      {/* File preview chips */}
+      {/* File preview */}
       {files.length > 0 && (
         <div className="mb-2 flex flex-wrap gap-2">
-          {files.map((file, i) => (
-            <div
-              key={i}
-              className="flex items-center gap-2 rounded bg-[var(--bg-secondary)] px-3 py-1.5 text-sm text-[var(--text-secondary)]"
-            >
-              <span className="max-w-[150px] truncate">{file.name}</span>
-              <button
-                onClick={() => removeFile(i)}
-                className="text-[var(--text-muted)] hover:text-[var(--danger)]"
+          {files.map((file, i) => {
+            const isImage = file.type.startsWith('image/');
+            if (isImage) {
+              return (
+                <div key={i} className="group relative h-24 w-24 overflow-hidden rounded-lg bg-[var(--bg-secondary)]">
+                  <img
+                    src={previewUrls[i]}
+                    alt={file.name}
+                    className="h-full w-full object-cover"
+                  />
+                  <button
+                    onClick={() => removeFile(i)}
+                    className="absolute top-1 right-1 flex h-5 w-5 items-center justify-center rounded-full bg-black/60 text-white opacity-0 transition-opacity group-hover:opacity-100 hover:bg-black/80"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <line x1="18" y1="6" x2="6" y2="18" />
+                      <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                  </button>
+                </div>
+              );
+            }
+            return (
+              <div
+                key={i}
+                className="flex items-center gap-2 rounded bg-[var(--bg-secondary)] px-3 py-1.5 text-sm text-[var(--text-secondary)]"
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <line x1="18" y1="6" x2="6" y2="18" />
-                  <line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
-              </button>
-            </div>
-          ))}
+                <span className="max-w-[150px] truncate">{file.name}</span>
+                <button
+                  onClick={() => removeFile(i)}
+                  className="text-[var(--text-muted)] hover:text-[var(--danger)]"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -287,7 +359,7 @@ export function MessageInput() {
         {/* Attachment button */}
         <button
           onClick={() => fileInputRef.current?.click()}
-          className="mb-2.5 ml-3 shrink-0 rounded p-1 text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
+          className="mb-[11px] ml-2 shrink-0 rounded p-1 text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
           title="Attach file"
         >
           <svg
@@ -329,6 +401,12 @@ export function MessageInput() {
           rows={1}
           className="max-h-[300px] min-h-[44px] flex-1 resize-none bg-transparent px-3 py-2.5 text-[var(--text-primary)] placeholder-[var(--text-muted)] outline-none"
         />
+
+        {/* GIF picker — only shown when Tenor API key is configured */}
+        {gifEnabled && <GifPicker onSelect={handleGifSelect} />}
+
+        {/* Emoji picker */}
+        <EmojiInputPicker onSelect={insertEmoji} />
       </div>
     </div>
   );

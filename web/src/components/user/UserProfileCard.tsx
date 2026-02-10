@@ -175,7 +175,7 @@ function ModActions({ serverId, userId, onDone }: { serverId: string; userId: st
   }, [showTimeoutPicker]);
 
   const handleTimeout = async (seconds: number) => {
-    try { await apiTimeoutMember(serverId, userId, seconds); onDone(); } catch {}
+    try { await apiTimeoutMember(serverId, userId, seconds); onDone(); } catch { /* ignored */ }
   };
 
   const btnClass = "flex-1 rounded-[3px] border border-[var(--border)] py-1.5 text-xs font-medium text-[var(--danger)] hover:bg-[var(--danger)]/10";
@@ -186,10 +186,10 @@ function ModActions({ serverId, userId, onDone }: { serverId: string; userId: st
         <button onClick={() => setShowTimeoutPicker(!showTimeoutPicker)} className={btnClass}>
           Timeout
         </button>
-        <button onClick={async () => { try { await apiKickMember(serverId, userId); onDone(); } catch {} }} className={btnClass}>
+        <button onClick={async () => { try { await apiKickMember(serverId, userId); onDone(); } catch { /* ignored */ } }} className={btnClass}>
           Kick
         </button>
-        <button onClick={async () => { try { await apiBanMember(serverId, userId); onDone(); } catch {} }} className={btnClass}>
+        <button onClick={async () => { try { await apiBanMember(serverId, userId); onDone(); } catch { /* ignored */ } }} className={btnClass}>
           Ban
         </button>
       </div>

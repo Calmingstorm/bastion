@@ -450,6 +450,18 @@ func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, a
 		return
 	}
 
+	// Fetch sender username and channel name for notification payload
+	var senderName string
+	_ = h.db.QueryRow(r.Context(), `SELECT username FROM users WHERE id = $1`, authorID).Scan(&senderName)
+	var channelName string
+	_ = h.db.QueryRow(r.Context(), `SELECT name FROM channels WHERE id = $1`, channelID).Scan(&channelName)
+
+	// Truncate content for notification snippet
+	snippet := content
+	if len(snippet) > 100 {
+		snippet = snippet[:100]
+	}
+
 	// Collect unique mentioned usernames
 	mentionedNames := make(map[string]struct{})
 	mentionAll := false
@@ -523,6 +535,9 @@ func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, a
 			Data: map[string]any{
 				"channelId":    channelID.String(),
 				"mentionCount": 1,
+				"senderName":   senderName,
+				"channelName":  channelName,
+				"content":      snippet,
 			},
 		})
 	}
