@@ -52,10 +52,6 @@ export function MessageInput() {
       // Error is handled in the store
     } finally {
       setIsSending(false);
-      // Defer focus until React re-renders and removes the disabled attribute
-      requestAnimationFrame(() => {
-        textareaRef.current?.focus();
-      });
     }
   }, [content, files, activeChannelId, isSending, sendMessage, addMessage]);
 
@@ -188,7 +184,6 @@ export function MessageInput() {
           onPaste={handlePaste}
           placeholder={placeholder}
           rows={1}
-          disabled={isSending}
           className="max-h-[300px] min-h-[44px] flex-1 resize-none bg-transparent px-3 py-2.5 text-[var(--text-primary)] placeholder-[var(--text-muted)] outline-none"
         />
       </div>
