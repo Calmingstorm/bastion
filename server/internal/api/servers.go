@@ -61,9 +61,9 @@ func (h *ServerHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Add creator as member
+	// Add creator as owner member
 	_, err = tx.Exec(r.Context(),
-		`INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)`,
+		`INSERT INTO server_members (server_id, user_id, role) VALUES ($1, $2, 'owner')`,
 		server.ID, userID,
 	)
 	if err != nil {

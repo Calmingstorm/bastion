@@ -19,6 +19,8 @@ RUN apk add --no-cache ca-certificates tzdata \
 COPY --from=builder /bastion /usr/local/bin/bastion
 COPY --from=builder /app/migrations /migrations
 
+RUN mkdir -p /app/uploads && chown bastion:bastion /app/uploads
+
 USER bastion
 
 EXPOSE 8080
