@@ -1,0 +1,45 @@
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Go
+server/bastion
+server/tmp/
+/server/vendor/
+
+# Node / React
+web/node_modules/
+web/dist/
+web/.vite/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Docker
+docker-compose.override.yml
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Test & coverage
+*.out
+coverage/
+.nyc_output/
+
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Caddy
+deploy/Caddyfile

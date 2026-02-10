@@ -1,0 +1,31 @@
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+      target: builder
+    command: go run ./cmd/bastion
+    working_dir: /app
+    volumes:
+      - ../server:/app
+    ports:
+      - "8080:8080"
+    environment:
+      - CGO_ENABLED=0
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+      target: builder
+    command: npm run dev -- --host 0.0.0.0
+    working_dir: /app
+    volumes:
+      - ../web:/app
+      - /app/node_modules
+    ports:
+      - "5173:5173"
+
+  caddy:
+    profiles:
+      - disabled

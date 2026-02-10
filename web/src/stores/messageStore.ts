@@ -1,0 +1,162 @@
+import { create } from 'zustand';
+import type { Message } from '../types';
+import { apiGetMessages, apiSendMessage } from '../api/client';
+
+interface MessageState {
+  messages: Record<string, Message[]>;
+  hasMore: Record<string, boolean>;
+  isLoading: Record<string, boolean>;
+  error: string | null;
+  fetchMessages: (channelId: string, before?: string) => Promise<void>;
+  sendMessage: (channelId: string, content: string) => Promise<void>;
+  addMessage: (channelId: string, message: Message) => void;
+  updateMessage: (channelId: string, message: Message) => void;
+  deleteMessage: (channelId: string, messageId: string) => void;
+  reset: () => void;
+}
+
+const MESSAGE_LIMIT = 50;
+
+export const useMessageStore = create<MessageState>((set, get) => ({
+  messages: {},
+  hasMore: {},
+  isLoading: {},
+  error: null,
+
+  fetchMessages: async (channelId: string, before?: string) => {
+    const state = get();
+
+    // Prevent duplicate loading
+    if (state.isLoading[channelId]) return;
+
+    set((s) => ({
+      isLoading: { ...s.isLoading, [channelId]: true },
+      error: null,
+    }));
+
+    try {
+      const fetched = await apiGetMessages(channelId, before, MESSAGE_LIMIT);
+
+      set((s) => {
+        const existing = s.messages[channelId] || [];
+
+        if (before) {
+          // Loading older messages: prepend
+          const existingIds = new Set(existing.map((m) => m.id));
+          const newMessages = fetched.filter((m) => !existingIds.has(m.id));
+          return {
+            messages: {
+              ...s.messages,
+              [channelId]: [...newMessages, ...existing],
+            },
+            hasMore: {
+              ...s.hasMore,
+              [channelId]: fetched.length === MESSAGE_LIMIT,
+            },
+            isLoading: { ...s.isLoading, [channelId]: false },
+          };
+        }
+
+        // Initial load
+        return {
+          messages: {
+            ...s.messages,
+            [channelId]: fetched,
+          },
+          hasMore: {
+            ...s.hasMore,
+            [channelId]: fetched.length === MESSAGE_LIMIT,
+          },
+          isLoading: { ...s.isLoading, [channelId]: false },
+        };
+      });
+    } catch (err: unknown) {
+      const message = extractErrorMessage(err, 'Failed to load messages.');
+      set((s) => ({
+        isLoading: { ...s.isLoading, [channelId]: false },
+        error: message,
+      }));
+    }
+  },
+
+  sendMessage: async (channelId: string, content: string) => {
+    try {
+      const message = await apiSendMessage(channelId, content);
+      // Add the message optimistically (the WebSocket might also deliver it,
+      // but addMessage deduplicates)
+      get().addMessage(channelId, message);
+    } catch (err: unknown) {
+      const errMsg = extractErrorMessage(err, 'Failed to send message.');
+      set({ error: errMsg });
+      throw new Error(errMsg);
+    }
+  },
+
+  addMessage: (channelId: string, message: Message) => {
+    set((state) => {
+      const existing = state.messages[channelId] || [];
+      // Deduplicate: don't add if message already exists
+      if (existing.some((m) => m.id === message.id)) {
+        return {};
+      }
+      return {
+        messages: {
+          ...state.messages,
+          [channelId]: [...existing, message],
+        },
+      };
+    });
+  },
+
+  updateMessage: (channelId: string, message: Message) => {
+    set((state) => {
+      const existing = state.messages[channelId];
+      if (!existing) return {};
+      return {
+        messages: {
+          ...state.messages,
+          [channelId]: existing.map((m) =>
+            m.id === message.id ? message : m
+          ),
+        },
+      };
+    });
+  },
+
+  deleteMessage: (channelId: string, messageId: string) => {
+    set((state) => {
+      const existing = state.messages[channelId];
+      if (!existing) return {};
+      return {
+        messages: {
+          ...state.messages,
+          [channelId]: existing.filter((m) => m.id !== messageId),
+        },
+      };
+    });
+  },
+
+  reset: () => {
+    set({
+      messages: {},
+      hasMore: {},
+      isLoading: {},
+      error: null,
+    });
+  },
+}));
+
+function extractErrorMessage(err: unknown, fallback: string): string {
+  if (err && typeof err === 'object' && 'response' in err) {
+    const axiosErr = err as {
+      response?: { data?: { message?: string; error?: string } };
+    };
+    if (axiosErr.response?.data?.message) {
+      return axiosErr.response.data.message;
+    }
+    if (axiosErr.response?.data?.error) {
+      return axiosErr.response.data.error;
+    }
+  }
+  return fallback;
+}

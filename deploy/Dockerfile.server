@@ -1,0 +1,26 @@
+FROM golang:1.23-alpine AS builder
+
+RUN apk add --no-cache git
+
+WORKDIR /app
+
+COPY server/go.mod server/go.sum ./
+RUN go mod download
+
+COPY server/ .
+
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bastion ./cmd/bastion
+
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates tzdata \
+    && addgroup -S bastion && adduser -S bastion -G bastion
+
+COPY --from=builder /bastion /usr/local/bin/bastion
+COPY --from=builder /app/migrations /migrations
+
+USER bastion
+
+EXPOSE 8080
+
+CMD ["bastion"]

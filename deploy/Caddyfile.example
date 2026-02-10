@@ -1,0 +1,12 @@
+# Replace YOUR_DOMAIN with your actual domain
+YOUR_DOMAIN {
+	# API and WebSocket — proxy to Go backend
+	handle /api/* {
+		reverse_proxy server:8080
+	}
+
+	# Everything else — serve the web client
+	handle {
+		reverse_proxy web:80
+	}
+}
