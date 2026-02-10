@@ -178,12 +178,12 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
   if (isCompact) {
     return (
       <>
-        <div className="group relative flex items-start gap-4 py-0.5 pr-12 pl-[72px] hover:bg-[var(--bg-secondary)]/30">
+        <div className="group relative py-px pr-12 pl-[72px] hover:bg-[var(--bg-secondary)]/30">
           <MessageActions message={message} onEdit={handleEdit} onDelete={() => setShowDeleteDialog(true)} />
-          <span className="invisible mt-0.5 text-[11px] text-[var(--text-muted)] group-hover:visible shrink-0 w-10 text-right">
+          <span className="invisible absolute left-0 top-0.5 w-[68px] pr-3 text-right text-[11px] text-[var(--text-muted)] group-hover:visible">
             {formatTime(createdAt)}
           </span>
-          <div className="min-w-0 flex-1 -ml-14">
+          <div className="min-w-0">
             {renderContent()}
           </div>
         </div>
@@ -199,7 +199,7 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
 
   return (
     <>
-      <div className="group relative flex gap-4 py-1 pr-12 pl-4 mt-[17px] hover:bg-[var(--bg-secondary)]/30">
+      <div className="group relative flex gap-4 py-1 pr-12 pl-4 mt-4 hover:bg-[var(--bg-secondary)]/30">
         <MessageActions message={message} onEdit={handleEdit} onDelete={() => setShowDeleteDialog(true)} />
         {/* Avatar */}
         {author.avatarUrl ? (

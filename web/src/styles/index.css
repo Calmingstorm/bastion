@@ -1,19 +1,35 @@
 @import "tailwindcss";
 
-:root {
-  /* Bastion dark palette */
-  --bg-primary: #1a1d24;
-  --bg-secondary: #15181e;
-  --bg-tertiary: #101318;
-  --bg-input: #1e222b;
-  --text-primary: #e4e6eb;
-  --text-secondary: #9ea3b0;
-  --text-muted: #6b7084;
+:root,
+[data-theme="dark"] {
+  /* Bastion dark palette — navy/slate */
+  --bg-primary: #1b2332;
+  --bg-secondary: #151c29;
+  --bg-tertiary: #0f1520;
+  --bg-input: #1e2a3a;
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
   --accent: #0ea5e9;
   --accent-hover: #0284c7;
   --danger: #ef4444;
   --success: #22c55e;
-  --border: #252930;
+  --border: #1e293b;
+}
+
+[data-theme="light"] {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f1f5f9;
+  --bg-tertiary: #e2e8f0;
+  --bg-input: #f8fafc;
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
+  --accent: #0ea5e9;
+  --accent-hover: #0284c7;
+  --danger: #ef4444;
+  --success: #22c55e;
+  --border: #cbd5e1;
 }
 
 body {
@@ -22,7 +38,7 @@ body {
     Oxygen, Ubuntu, Cantarell, sans-serif;
 }
 
-/* Scrollbar styling for the dark theme */
+/* Scrollbar styling */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--bg-tertiary) transparent;

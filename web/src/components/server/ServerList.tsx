@@ -6,8 +6,11 @@ import { ServerIcon } from './ServerIcon';
 import { CreateServerDialog } from './CreateServerDialog';
 
 export function ServerList() {
-  const { servers, selectedServerId, selectServer } = useServerStore();
-  const { selectDM } = useDMStore();
+  // Targeted selectors to avoid cascading re-renders
+  const servers = useServerStore((s) => s.servers);
+  const selectedServerId = useServerStore((s) => s.selectedServerId);
+  const selectServer = useServerStore((s) => s.selectServer);
+  const selectDM = useDMStore((s) => s.selectDM);
   const [dialogOpen, setDialogOpen] = useState(false);
 
   const handleHomeClick = () => {

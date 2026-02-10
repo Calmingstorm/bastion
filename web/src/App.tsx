@@ -9,6 +9,9 @@ import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { AppPage } from './pages/AppPage';
 import { InvitePage } from './pages/InvitePage';
 
+// Import theme store so it initializes and applies the saved theme on load
+import './stores/themeStore';
+
 class ErrorBoundary extends Component<
   { children: ReactNode },
   { hasError: boolean; error: Error | null }

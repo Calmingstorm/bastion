@@ -8,11 +8,18 @@ import { useDMStore } from '../stores/dmStore';
 import { AppLayout } from '../components/layout/AppLayout';
 
 export function AppPage() {
-  const { isAuthenticated, accessToken, logout } = useAuthStore();
-  const { fetchServers, reset: resetServers } = useServerStore();
-  const { connect, disconnect } = useWSStore();
-  const { fetchReadStates, reset: resetUnread } = useUnreadStore();
-  const { fetchDMs, reset: resetDMs } = useDMStore();
+  // Targeted selectors to avoid cascading re-renders
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const accessToken = useAuthStore((s) => s.accessToken);
+  const logout = useAuthStore((s) => s.logout);
+  const fetchServers = useServerStore((s) => s.fetchServers);
+  const resetServers = useServerStore((s) => s.reset);
+  const connect = useWSStore((s) => s.connect);
+  const disconnect = useWSStore((s) => s.disconnect);
+  const fetchReadStates = useUnreadStore((s) => s.fetchReadStates);
+  const resetUnread = useUnreadStore((s) => s.reset);
+  const fetchDMs = useDMStore((s) => s.fetchDMs);
+  const resetDMs = useDMStore((s) => s.reset);
   const navigate = useNavigate();
 
   // Redirect to login if not authenticated

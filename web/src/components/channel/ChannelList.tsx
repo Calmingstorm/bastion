@@ -3,25 +3,23 @@ import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { ChannelItem } from './ChannelItem';
 import { InviteDialog } from '../server/InviteDialog';
-import { UserSettingsDialog } from '../user/UserSettingsDialog';
+import { UserPanel } from '../user/UserPanel';
 
 export function ChannelList() {
-  const {
-    servers,
-    selectedServerId,
-    channels,
-    selectedChannelId,
-    selectChannel,
-    createChannel,
-    isLoadingChannels,
-  } = useServerStore();
-  const { user } = useAuthStore();
+  // Targeted selectors to avoid cascading re-renders
+  const servers = useServerStore((s) => s.servers);
+  const selectedServerId = useServerStore((s) => s.selectedServerId);
+  const channels = useServerStore((s) => s.channels);
+  const selectedChannelId = useServerStore((s) => s.selectedChannelId);
+  const selectChannel = useServerStore((s) => s.selectChannel);
+  const createChannel = useServerStore((s) => s.createChannel);
+  const isLoadingChannels = useServerStore((s) => s.isLoadingChannels);
+  const user = useAuthStore((s) => s.user);
 
   const [showCreate, setShowCreate] = useState(false);
   const [newChannelName, setNewChannelName] = useState('');
   const [isCreating, setIsCreating] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const selectedServer = servers.find((s) => s.id === selectedServerId);
   const isOwner = selectedServer && user && selectedServer.ownerId === user.id;
@@ -156,7 +154,7 @@ export function ChannelList() {
       </div>
 
       {/* User panel at bottom */}
-      <UserPanel onSettingsClick={() => setSettingsOpen(true)} />
+      <UserPanel />
 
       {/* Dialogs */}
       {selectedServerId && (
@@ -166,65 +164,6 @@ export function ChannelList() {
           serverId={selectedServerId}
         />
       )}
-      <UserSettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
-    </div>
-  );
-}
-
-function UserPanel({ onSettingsClick }: { onSettingsClick: () => void }) {
-  const { user, logout } = useAuthStore();
-
-  if (!user) return null;
-
-  const initial = (user.displayName || user.username).charAt(0).toUpperCase();
-
-  return (
-    <div className="flex items-center gap-2 border-t border-[var(--border)] bg-[var(--bg-tertiary)]/50 px-2 py-2">
-      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--accent)] text-xs font-semibold text-white">
-        {user.avatarUrl ? (
-          <img src={user.avatarUrl} alt={user.username} className="h-8 w-8 rounded-full object-cover" />
-        ) : (
-          initial
-        )}
-      </div>
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-semibold text-[var(--text-primary)]">
-          {user.displayName || user.username}
-        </p>
-        <p className="truncate text-[11px] text-[var(--text-muted)]">
-          Online
-        </p>
-      </div>
-      <button
-        onClick={onSettingsClick}
-        className="shrink-0 rounded p-1 text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)] hover:text-[var(--text-secondary)]"
-        title="User Settings"
-      >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="12" cy="12" r="3" />
-          <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z" />
-        </svg>
-      </button>
-      <button
-        onClick={logout}
-        className="shrink-0 rounded p-1 text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)] hover:text-[var(--text-secondary)]"
-        title="Log out"
-      >
-        <svg
-          width="16"
-          height="16"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4" />
-          <polyline points="16 17 21 12 16 7" />
-          <line x1="21" y1="12" x2="9" y2="12" />
-        </svg>
-      </button>
     </div>
   );
 }

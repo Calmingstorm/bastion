@@ -3,9 +3,14 @@ import { useDMStore } from '../../stores/dmStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useUnreadStore } from '../../stores/unreadStore';
 import { PresenceDot } from '../user/PresenceDot';
+import { UserPanel } from '../user/UserPanel';
 
 export function DMList() {
-  const { dmChannels, selectedDMId, selectDM, fetchDMs } = useDMStore();
+  // Targeted selectors to avoid cascading re-renders
+  const dmChannels = useDMStore((s) => s.dmChannels);
+  const selectedDMId = useDMStore((s) => s.selectedDMId);
+  const selectDM = useDMStore((s) => s.selectDM);
+  const fetchDMs = useDMStore((s) => s.fetchDMs);
   const selectChannel = useServerStore((s) => s.selectChannel);
   const unreadChannels = useUnreadStore((s) => s.unreadChannels);
 
@@ -88,6 +93,9 @@ export function DMList() {
           </div>
         )}
       </div>
+
+      {/* User panel */}
+      <UserPanel />
     </div>
   );
 }
