@@ -276,11 +276,14 @@ export async function apiGetMessages(
 
 export async function apiSendMessage(
   channelId: string,
-  content: string
+  content: string,
+  replyToId?: string
 ): Promise<Message> {
+  const body: Record<string, string> = { content };
+  if (replyToId) body.replyToId = replyToId;
   const response = await apiClient.post<Message>(
     `/api/channels/${channelId}/messages`,
-    { content }
+    body
   );
   return response.data;
 }
@@ -419,6 +422,15 @@ export async function apiUpdateServer(
   data: { name?: string; description?: string }
 ): Promise<Server> {
   const response = await apiClient.patch<Server>(`/api/servers/${serverId}`, data);
+  return response.data;
+}
+
+export async function apiUploadServerIcon(serverId: string, file: File): Promise<Server> {
+  const formData = new FormData();
+  formData.append('icon', file);
+  const response = await apiClient.post<Server>(`/api/servers/${serverId}/icon`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
   return response.data;
 }
 
@@ -573,6 +585,24 @@ export async function apiGetAuditLog(
     { params }
   );
   return response.data;
+}
+
+// ---- Reactions API ----
+
+export async function apiAddReaction(
+  channelId: string,
+  messageId: string,
+  emoji: string
+): Promise<void> {
+  await apiClient.put(`/api/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`);
+}
+
+export async function apiRemoveReaction(
+  channelId: string,
+  messageId: string,
+  emoji: string
+): Promise<void> {
+  await apiClient.delete(`/api/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`);
 }
 
 export { getAccessToken, getRefreshToken, setTokens, clearTokens };

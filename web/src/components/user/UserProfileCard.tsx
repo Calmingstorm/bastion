@@ -5,14 +5,16 @@ import { useAuthStore } from '../../stores/authStore';
 import { useDMStore } from '../../stores/dmStore';
 import { useServerStore } from '../../stores/serverStore';
 import { PresenceDot } from './PresenceDot';
-import type { User } from '../../types';
+import type { User, RoleInfo } from '../../types';
 
 interface UserProfileCardProps {
   userId: string;
+  roles?: RoleInfo[];
+  joinedAt?: string;
   children: React.ReactNode;
 }
 
-export function UserProfileCard({ userId, children }: UserProfileCardProps) {
+export function UserProfileCard({ userId, roles, joinedAt, children }: UserProfileCardProps) {
   const [user, setUser] = useState<User | null>(null);
   const [open, setOpen] = useState(false);
   const currentUser = useAuthStore((s) => s.user);
@@ -39,6 +41,11 @@ export function UserProfileCard({ userId, children }: UserProfileCardProps) {
   const initial = user
     ? (user.displayName || user.username).charAt(0).toUpperCase()
     : '?';
+
+  const formatJoinDate = (dateStr: string) => {
+    const date = new Date(dateStr);
+    return date.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+  };
 
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
@@ -85,6 +92,34 @@ export function UserProfileCard({ userId, children }: UserProfileCardProps) {
                     </p>
                     <p className="mt-1 text-sm text-[var(--text-secondary)]">
                       {user.aboutMe}
+                    </p>
+                  </div>
+                )}
+                {roles && roles.length > 0 && (
+                  <div className="mt-3 border-t border-[var(--border)] pt-3">
+                    <p className="text-xs font-bold uppercase text-[var(--text-secondary)]">
+                      Roles
+                    </p>
+                    <div className="mt-1.5 flex flex-wrap gap-1">
+                      {roles.map((role) => (
+                        <span
+                          key={role.id}
+                          className="inline-flex items-center gap-1 rounded-full bg-[var(--bg-tertiary)] px-2 py-0.5 text-xs font-medium text-[var(--text-secondary)]"
+                        >
+                          <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: role.color || 'var(--text-muted)' }} />
+                          {role.name}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {joinedAt && (
+                  <div className="mt-3 border-t border-[var(--border)] pt-3">
+                    <p className="text-xs font-bold uppercase text-[var(--text-secondary)]">
+                      Member Since
+                    </p>
+                    <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                      {formatJoinDate(joinedAt)}
                     </p>
                   </div>
                 )}

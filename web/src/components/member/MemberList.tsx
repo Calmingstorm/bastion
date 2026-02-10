@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useServerStore } from '../../stores/serverStore';
 import { usePresenceStore } from '../../stores/presenceStore';
+import { useAuthStore } from '../../stores/authStore';
 import { apiGetMembers } from '../../api/client';
 import { UserProfileCard } from '../user/UserProfileCard';
+import { UserContextMenu } from '../user/UserContextMenu';
 import { PresenceDot } from '../user/PresenceDot';
 import type { MemberWithUser } from '../../types';
 
@@ -11,6 +13,7 @@ export function MemberList() {
   const [members, setMembers] = useState<MemberWithUser[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const presences = usePresenceStore((s) => s.presences);
+  const currentUser = useAuthStore((s) => s.user);
 
   useEffect(() => {
     if (!selectedServerId) return;
@@ -31,6 +34,7 @@ export function MemberList() {
   // Group: Owner first, then by highest role, then members with no custom roles
   const servers = useServerStore.getState().servers;
   const server = servers.find((s) => s.id === selectedServerId);
+  const isCurrentUserOwner = server && currentUser && server.ownerId === currentUser.id;
 
   const owners = members.filter((m) => server && m.userId === server.ownerId);
   const nonOwners = members.filter((m) => !(server && m.userId === server.ownerId));
@@ -95,7 +99,13 @@ export function MemberList() {
         ) : (
           <>
             {owners.length > 0 && (
-              <MemberGroup title={`Owner — ${owners.length}`} members={owners} />
+              <MemberGroup
+                title={`Owner — ${owners.length}`}
+                members={owners}
+                serverId={selectedServerId}
+                canModerate={!!isCurrentUserOwner}
+                serverOwnerId={server?.ownerId}
+              />
             )}
             {sortedRoleGroups.map((group) => (
               <MemberGroup
@@ -103,10 +113,19 @@ export function MemberList() {
                 title={`${group.name} — ${group.members.length}`}
                 members={group.members}
                 color={group.color}
+                serverId={selectedServerId}
+                canModerate={!!isCurrentUserOwner}
+                serverOwnerId={server?.ownerId}
               />
             ))}
             {noRoleMembers.length > 0 && (
-              <MemberGroup title={`Members — ${noRoleMembers.length}`} members={noRoleMembers} />
+              <MemberGroup
+                title={`Members — ${noRoleMembers.length}`}
+                members={noRoleMembers}
+                serverId={selectedServerId}
+                canModerate={!!isCurrentUserOwner}
+                serverOwnerId={server?.ownerId}
+              />
             )}
           </>
         )}
@@ -115,7 +134,14 @@ export function MemberList() {
   );
 }
 
-function MemberGroup({ title, members, color }: { title: string; members: MemberWithUser[]; color?: string }) {
+function MemberGroup({ title, members, color, serverId, canModerate, serverOwnerId }: {
+  title: string;
+  members: MemberWithUser[];
+  color?: string;
+  serverId?: string;
+  canModerate?: boolean;
+  serverOwnerId?: string;
+}) {
   return (
     <div className="mb-4">
       <span
@@ -125,13 +151,24 @@ function MemberGroup({ title, members, color }: { title: string; members: Member
         {title}
       </span>
       {members.map((member) => (
-        <MemberItem key={member.userId} member={member} />
+        <MemberItem
+          key={member.userId}
+          member={member}
+          serverId={serverId}
+          canModerate={canModerate}
+          isOwner={serverOwnerId === member.userId}
+        />
       ))}
     </div>
   );
 }
 
-function MemberItem({ member }: { member: MemberWithUser }) {
+function MemberItem({ member, serverId, canModerate, isOwner }: {
+  member: MemberWithUser;
+  serverId?: string;
+  canModerate?: boolean;
+  isOwner?: boolean;
+}) {
   const status = usePresenceStore((s) => s.presences[member.userId] || member.status);
   const isOffline = status === 'offline';
   const displayName = member.nickname || member.displayName || member.username;
@@ -143,36 +180,44 @@ function MemberItem({ member }: { member: MemberWithUser }) {
     : null;
 
   return (
-    <UserProfileCard userId={member.userId}>
-      <button
-        className={`group flex w-full items-center gap-2 rounded px-2 py-1.5 text-left transition-colors hover:bg-[var(--bg-input)]/50 ${
-          isOffline ? 'opacity-40' : ''
-        }`}
-      >
-        <div className="relative shrink-0">
-          {member.avatarUrl ? (
-            <img
-              src={member.avatarUrl}
-              alt={displayName}
-              className="h-8 w-8 rounded-full object-cover"
-            />
-          ) : (
-            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--accent)] text-xs font-semibold text-white">
-              {initial}
-            </div>
-          )}
-          <PresenceDot
-            userId={member.userId}
-            className="absolute -bottom-0.5 -right-0.5"
-          />
-        </div>
-        <span
-          className="truncate text-sm font-medium"
-          style={{ color: highestRole?.color || 'var(--text-secondary)' }}
+    <UserContextMenu
+      userId={member.userId}
+      username={member.username}
+      serverId={serverId}
+      isOwner={isOwner}
+      canModerate={canModerate}
+    >
+      <UserProfileCard userId={member.userId} roles={member.roles} joinedAt={member.joinedAt}>
+        <button
+          className={`group flex w-full items-center gap-2 rounded px-2 py-1.5 text-left transition-colors hover:bg-[var(--bg-input)]/50 ${
+            isOffline ? 'opacity-40' : ''
+          }`}
         >
-          {displayName}
-        </span>
-      </button>
-    </UserProfileCard>
+          <div className="relative shrink-0">
+            {member.avatarUrl ? (
+              <img
+                src={member.avatarUrl}
+                alt={displayName}
+                className="h-8 w-8 rounded-full object-cover"
+              />
+            ) : (
+              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--accent)] text-xs font-semibold text-white">
+                {initial}
+              </div>
+            )}
+            <PresenceDot
+              userId={member.userId}
+              className="absolute -bottom-0.5 -right-0.5"
+            />
+          </div>
+          <span
+            className="truncate text-sm font-medium"
+            style={{ color: highestRole?.color || 'var(--text-secondary)' }}
+          >
+            {displayName}
+          </span>
+        </button>
+      </UserProfileCard>
+    </UserContextMenu>
   );
 }

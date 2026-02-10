@@ -1,4 +1,5 @@
-import { useState, useRef, useEffect, type MouseEvent, type KeyboardEvent } from 'react';
+import { useState, useRef, useEffect, type KeyboardEvent } from 'react';
+import * as ContextMenu from '@radix-ui/react-context-menu';
 import type { Channel } from '../../types';
 import { useUnreadStore } from '../../stores/unreadStore';
 import { apiUpdateChannel, apiDeleteChannel } from '../../api/client';
@@ -15,32 +16,10 @@ interface ChannelItemProps {
 export function ChannelItem({ channel, isSelected, onClick, canManage, serverId }: ChannelItemProps) {
   const hasUnread = useUnreadStore((s) => s.unreadChannels.has(channel.id));
   const mentionCount = useUnreadStore((s) => s.readStates[channel.id]?.mentionCount || 0);
-  const [showMenu, setShowMenu] = useState(false);
-  const [menuPos, setMenuPos] = useState({ x: 0, y: 0 });
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(channel.name);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const editRef = useRef<HTMLInputElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  const handleContextMenu = (e: MouseEvent) => {
-    if (!canManage) return;
-    e.preventDefault();
-    setMenuPos({ x: e.clientX, y: e.clientY });
-    setShowMenu(true);
-  };
-
-  // Close menu on outside click
-  useEffect(() => {
-    if (!showMenu) return;
-    const handler = (e: globalThis.MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setShowMenu(false);
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [showMenu]);
 
   useEffect(() => {
     if (isEditing && editRef.current) {
@@ -98,74 +77,105 @@ export function ChannelItem({ channel, isSelected, onClick, canManage, serverId 
     );
   }
 
-  return (
-    <>
-      <button
-        onClick={onClick}
-        onContextMenu={handleContextMenu}
-        className={`group flex w-full items-center gap-1.5 rounded-[4px] px-2 py-1.5 text-left transition-colors ${
-          isSelected
-            ? 'bg-[var(--bg-input)] text-[var(--text-primary)]'
-            : hasUnread
-              ? 'text-[var(--text-primary)] hover:bg-[var(--bg-input)]/50'
-              : 'text-[var(--text-muted)] hover:bg-[var(--bg-input)]/50 hover:text-[var(--text-secondary)]'
+  const channelButton = (
+    <button
+      onClick={onClick}
+      className={`group flex w-full items-center gap-1.5 rounded-[4px] px-2 py-1.5 text-left transition-colors ${
+        isSelected
+          ? 'bg-[var(--bg-input)] text-[var(--text-primary)]'
+          : hasUnread
+            ? 'text-[var(--text-primary)] hover:bg-[var(--bg-input)]/50'
+            : 'text-[var(--text-muted)] hover:bg-[var(--bg-input)]/50 hover:text-[var(--text-secondary)]'
+      }`}
+    >
+      <svg
+        width="20"
+        height="20"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className="shrink-0 opacity-60"
+      >
+        <path d="M4 9h16M4 15h16M10 3l-2 18M16 3l-2 18" />
+      </svg>
+      <span
+        className={`min-w-0 flex-1 truncate text-sm ${
+          hasUnread && !isSelected ? 'font-bold' : 'font-medium'
         }`}
       >
-        <svg
-          width="20"
-          height="20"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className="shrink-0 opacity-60"
-        >
-          <path d="M4 9h16M4 15h16M10 3l-2 18M16 3l-2 18" />
-        </svg>
-        <span
-          className={`min-w-0 flex-1 truncate text-sm ${
-            hasUnread && !isSelected ? 'font-bold' : 'font-medium'
-          }`}
-        >
-          {channel.name}
+        {channel.name}
+      </span>
+      {mentionCount > 0 && (
+        <span className="flex h-4 min-w-[16px] shrink-0 items-center justify-center rounded-full bg-[var(--danger)] px-1 text-[10px] font-bold text-white">
+          {mentionCount}
         </span>
-        {mentionCount > 0 && (
-          <span className="flex h-4 min-w-[16px] shrink-0 items-center justify-center rounded-full bg-[var(--danger)] px-1 text-[10px] font-bold text-white">
-            {mentionCount}
-          </span>
-        )}
-      </button>
-
-      {/* Context menu */}
-      {showMenu && (
-        <div
-          ref={menuRef}
-          className="fixed z-50 min-w-[160px] rounded-md border border-[var(--border)] bg-[var(--bg-tertiary)] py-1 shadow-lg"
-          style={{ left: menuPos.x, top: menuPos.y }}
-        >
-          <button
-            onClick={() => {
-              setShowMenu(false);
-              setEditName(channel.name);
-              setIsEditing(true);
-            }}
-            className="flex w-full items-center px-3 py-1.5 text-sm text-[var(--text-secondary)] hover:bg-[var(--accent)] hover:text-white"
-          >
-            Edit Channel
-          </button>
-          <button
-            onClick={() => {
-              setShowMenu(false);
-              setShowDeleteConfirm(true);
-            }}
-            className="flex w-full items-center px-3 py-1.5 text-sm text-[var(--danger)] hover:bg-[var(--danger)] hover:text-white"
-          >
-            Delete Channel
-          </button>
-        </div>
       )}
+    </button>
+  );
+
+  if (!canManage) {
+    return (
+      <>
+        {channelButton}
+        {/* Delete confirmation */}
+        {showDeleteConfirm && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
+            <div className="w-full max-w-sm rounded-md bg-[var(--bg-primary)] p-6 shadow-xl">
+              <h3 className="mb-2 text-lg font-bold text-[var(--text-primary)]">Delete Channel</h3>
+              <p className="mb-4 text-sm text-[var(--text-secondary)]">
+                Are you sure you want to delete <strong>#{channel.name}</strong>? This cannot be undone.
+              </p>
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => setShowDeleteConfirm(false)}
+                  className="rounded-[3px] px-4 py-2 text-sm font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleDelete}
+                  className="rounded-[3px] bg-[var(--danger)] px-4 py-2 text-sm font-medium text-white hover:opacity-90"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </>
+    );
+  }
+
+  return (
+    <>
+      <ContextMenu.Root>
+        <ContextMenu.Trigger asChild>
+          {channelButton}
+        </ContextMenu.Trigger>
+        <ContextMenu.Portal>
+          <ContextMenu.Content className="z-50 min-w-[180px] rounded-lg border border-[var(--border)] bg-[var(--bg-tertiary)] p-1.5 shadow-xl">
+            <ContextMenu.Item
+              onSelect={() => {
+                setEditName(channel.name);
+                setIsEditing(true);
+              }}
+              className="flex w-full cursor-default items-center rounded px-2.5 py-1.5 text-sm outline-none text-[var(--text-secondary)] hover:bg-[var(--accent)] hover:text-white"
+            >
+              Edit Channel
+            </ContextMenu.Item>
+            <ContextMenu.Separator className="my-1 h-px bg-[var(--border)]" />
+            <ContextMenu.Item
+              onSelect={() => setShowDeleteConfirm(true)}
+              className="flex w-full cursor-default items-center rounded px-2.5 py-1.5 text-sm outline-none text-[var(--danger)] hover:bg-[var(--danger)] hover:text-white"
+            >
+              Delete Channel
+            </ContextMenu.Item>
+          </ContextMenu.Content>
+        </ContextMenu.Portal>
+      </ContextMenu.Root>
 
       {/* Delete confirmation */}
       {showDeleteConfirm && (

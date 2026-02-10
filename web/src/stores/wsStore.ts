@@ -128,6 +128,20 @@ export const useWSStore = create<WSState>((set) => ({
       }
     });
 
+    wsClient.on('REACTION_ADD', (data: unknown) => {
+      const payload = data as { channelId: string; messageId: string; userId: string; emoji: string };
+      if (payload.channelId && payload.messageId && payload.emoji) {
+        useMessageStore.getState().addReaction(payload.channelId, payload.messageId, payload.emoji, payload.userId);
+      }
+    });
+
+    wsClient.on('REACTION_REMOVE', (data: unknown) => {
+      const payload = data as { channelId: string; messageId: string; userId: string; emoji: string };
+      if (payload.channelId && payload.messageId && payload.emoji) {
+        useMessageStore.getState().removeReaction(payload.channelId, payload.messageId, payload.emoji, payload.userId);
+      }
+    });
+
     wsClient.on('MEMBER_BAN', (data: unknown) => {
       const payload = data as { serverId: string; userId: string };
       if (payload.serverId && payload.userId) {

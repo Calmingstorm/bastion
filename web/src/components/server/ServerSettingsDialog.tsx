@@ -1,7 +1,8 @@
-import { useState, useEffect, type FormEvent } from 'react';
+import { useState, useEffect, useRef, type FormEvent } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import {
   apiUpdateServer,
+  apiUploadServerIcon,
   apiGetRoles,
   apiCreateRole,
   apiUpdateRole,
@@ -138,18 +139,36 @@ function OverviewTab({ serverId }: { serverId: string }) {
   const [description, setDescription] = useState(server?.description || '');
   const [isSaving, setIsSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [iconPreview, setIconPreview] = useState<string | null>(null);
+  const [iconFile, setIconFile] = useState<File | null>(null);
+  const iconInputRef = useRef<HTMLInputElement>(null);
+
+  const currentIcon = iconPreview || server?.iconUrl;
+  const serverInitial = (server?.name || '?').charAt(0).toUpperCase();
+
+  const handleIconChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setIconFile(file);
+    setIconPreview(URL.createObjectURL(file));
+  };
 
   const handleSave = async (e: FormEvent) => {
     e.preventDefault();
     setIsSaving(true);
     try {
+      // Upload icon first if changed
+      if (iconFile) {
+        const updated = await apiUploadServerIcon(serverId, iconFile);
+        useServerStore.getState().updateServer(updated);
+        setIconFile(null);
+        setIconPreview(null);
+      }
       const updated = await apiUpdateServer(serverId, {
         name: name.trim(),
         description: description.trim() || undefined,
       });
-      useServerStore.setState((state) => ({
-        servers: state.servers.map((s) => (s.id === serverId ? { ...s, ...updated } : s)),
-      }));
+      useServerStore.getState().updateServer(updated);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch { /* handled */ } finally {
@@ -160,6 +179,32 @@ function OverviewTab({ serverId }: { serverId: string }) {
   return (
     <form onSubmit={handleSave} className="max-w-lg space-y-4">
       <h2 className="text-lg font-bold text-[var(--text-primary)]">Server Overview</h2>
+
+      {/* Icon upload */}
+      <div className="space-y-1">
+        <label className="block text-xs font-bold uppercase tracking-wide text-[var(--text-secondary)]">Server Icon</label>
+        <div
+          onClick={() => iconInputRef.current?.click()}
+          className="group relative h-16 w-16 cursor-pointer overflow-hidden rounded-xl"
+        >
+          {currentIcon ? (
+            <img src={currentIcon} alt="Server icon" className="h-full w-full object-cover" />
+          ) : (
+            <div className="flex h-full w-full items-center justify-center bg-[var(--accent)] text-2xl font-bold text-white">
+              {serverInitial}
+            </div>
+          )}
+          <div className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 transition-opacity group-hover:opacity-100">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z" />
+              <circle cx="12" cy="13" r="4" />
+            </svg>
+          </div>
+        </div>
+        <input ref={iconInputRef} type="file" accept="image/*" className="hidden" onChange={handleIconChange} />
+        <p className="text-xs text-[var(--text-muted)]">Click to change. Max 2MB.</p>
+      </div>
+
       <div className="space-y-1">
         <label className="block text-xs font-bold uppercase tracking-wide text-[var(--text-secondary)]">Server Name</label>
         <input type="text" value={name} onChange={(e) => setName(e.target.value)}

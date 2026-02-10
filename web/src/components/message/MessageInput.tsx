@@ -17,6 +17,8 @@ export function MessageInput() {
   const lastTypingSentRef = useRef(0);
   const sendMessage = useMessageStore((s) => s.sendMessage);
   const addMessage = useMessageStore((s) => s.addMessage);
+  const replyingTo = useMessageStore((s) => s.replyingTo);
+  const setReplyingTo = useMessageStore((s) => s.setReplyingTo);
   const selectedChannelId = useServerStore((s) => s.selectedChannelId);
   const selectedServerId = useServerStore((s) => s.selectedServerId);
   const channels = useServerStore((s) => s.channels);
@@ -40,6 +42,11 @@ export function MessageInput() {
     apiGetMembers(selectedServerId).then(setMembers).catch(() => {});
   }, [selectedServerId]);
 
+  // Clear reply when switching channels
+  useEffect(() => {
+    setReplyingTo(null);
+  }, [activeChannelId, setReplyingTo]);
+
   const sendTyping = useCallback(() => {
     if (!activeChannelId) return;
     const now = Date.now();
@@ -59,11 +66,12 @@ export function MessageInput() {
         const msg = await apiSendMessageWithFiles(activeChannelId, trimmed, files);
         addMessage(activeChannelId, msg);
       } else {
-        await sendMessage(activeChannelId, trimmed);
+        await sendMessage(activeChannelId, trimmed, replyingTo?.id);
       }
       setContent('');
       setFiles([]);
       setShowMentions(false);
+      setReplyingTo(null);
       if (textareaRef.current) {
         textareaRef.current.style.height = 'auto';
       }
@@ -72,7 +80,7 @@ export function MessageInput() {
     } finally {
       setIsSending(false);
     }
-  }, [content, files, activeChannelId, isSending, sendMessage, addMessage]);
+  }, [content, files, activeChannelId, isSending, sendMessage, addMessage, replyingTo, setReplyingTo]);
 
   // Detect @mention context from text before cursor
   const checkMentionContext = (text: string, cursorPos: number) => {
@@ -210,6 +218,32 @@ export function MessageInput() {
 
   return (
     <div className="shrink-0 px-4 pb-6">
+      {/* Reply bar */}
+      {replyingTo && (
+        <div className="mb-2 flex items-center gap-2 rounded bg-[var(--bg-secondary)] px-3 py-2 text-sm">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-[var(--text-muted)]">
+            <polyline points="9 17 4 12 9 7" />
+            <path d="M20 18v-2a4 4 0 00-4-4H4" />
+          </svg>
+          <span className="text-[var(--text-muted)]">Replying to</span>
+          <span className="font-medium text-[var(--text-primary)]">
+            {replyingTo.author.displayName || replyingTo.author.username}
+          </span>
+          <span className="min-w-0 flex-1 truncate text-[var(--text-muted)]">
+            {replyingTo.content.length > 80 ? replyingTo.content.slice(0, 80) + '...' : replyingTo.content}
+          </span>
+          <button
+            onClick={() => setReplyingTo(null)}
+            className="shrink-0 text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+      )}
+
       {/* File preview chips */}
       {files.length > 0 && (
         <div className="mb-2 flex flex-wrap gap-2">

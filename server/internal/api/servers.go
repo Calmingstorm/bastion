@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -10,16 +11,20 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/Calmingstorm/bastion/server/internal/auth"
+	"github.com/Calmingstorm/bastion/server/internal/config"
 	"github.com/Calmingstorm/bastion/server/internal/models"
 	"github.com/Calmingstorm/bastion/server/internal/permissions"
+	"github.com/Calmingstorm/bastion/server/internal/storage"
 )
 
 type ServerHandler struct {
-	db *pgxpool.Pool
+	db      *pgxpool.Pool
+	storage *storage.FileStorage
+	cfg     *config.Config
 }
 
-func NewServerHandler(db *pgxpool.Pool) *ServerHandler {
-	return &ServerHandler{db: db}
+func NewServerHandler(db *pgxpool.Pool, storage *storage.FileStorage, cfg *config.Config) *ServerHandler {
+	return &ServerHandler{db: db, storage: storage, cfg: cfg}
 }
 
 type createServerRequest struct {
@@ -339,6 +344,68 @@ func (h *ServerHandler) Update(w http.ResponseWriter, r *http.Request) {
 		&s.ID, &s.Name, &s.IconURL, &s.Description, &s.OwnerID, &s.CreatedAt)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, errorBody("server not found"))
+		return
+	}
+
+	writeAuditLog(h.db, r.Context(), serverID, userID, models.AuditServerUpdate, "server", serverID, nil, nil)
+
+	writeJSON(w, http.StatusOK, s)
+}
+
+func (h *ServerHandler) UploadIcon(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromContext(r.Context())
+	serverID, err := parseUUID(chi.URLParam(r, "id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		return
+	}
+
+	if _, ok := requirePermission(h.db, w, r, serverID, userID, permissions.ManageServer); !ok {
+		return
+	}
+
+	// Limit to 2MB for icons
+	r.Body = http.MaxBytesReader(w, r.Body, 2*1024*1024)
+	if err := r.ParseMultipartForm(2 * 1024 * 1024); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("file too large (max 2MB)"))
+		return
+	}
+
+	file, header, err := r.FormFile("icon")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("missing icon file"))
+		return
+	}
+	defer file.Close()
+
+	// Validate content type
+	contentType := header.Header.Get("Content-Type")
+	if !strings.HasPrefix(contentType, "image/") {
+		writeJSON(w, http.StatusBadRequest, errorBody("file must be an image"))
+		return
+	}
+
+	ext := filepath.Ext(header.Filename)
+	if ext == "" {
+		ext = ".png"
+	}
+
+	_, url, err := h.storage.Save(file, ext)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to save server icon")
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+
+	var s models.Server
+	err = h.db.QueryRow(r.Context(),
+		`UPDATE servers SET icon_url = $1 WHERE id = $2
+		 RETURNING id, name, icon_url, description, owner_id, created_at`,
+		url, serverID,
+	).Scan(&s.ID, &s.Name, &s.IconURL, &s.Description, &s.OwnerID, &s.CreatedAt)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to update server icon")
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
 		return
 	}
 

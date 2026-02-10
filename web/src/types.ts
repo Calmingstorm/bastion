@@ -52,7 +52,16 @@ export interface Message {
   content: string;
   createdAt: string;
   editedAt?: string;
+  replyToId?: string;
+  replyTo?: { id: string; content: string; author: MessageAuthor };
   attachments?: Attachment[];
+  reactions?: Reaction[];
+}
+
+export interface Reaction {
+  emoji: string;
+  count: number;
+  users: string[];
 }
 
 export interface AuthTokens {
@@ -185,7 +194,9 @@ export type WSEventType =
   | 'PRESENCE_UPDATE'
   | 'TYPING_START'
   | 'SERVER_MEMBER_JOIN'
-  | 'NOTIFICATION';
+  | 'NOTIFICATION'
+  | 'REACTION_ADD'
+  | 'REACTION_REMOVE';
 
 export interface WSMessage {
   type: WSEventType;

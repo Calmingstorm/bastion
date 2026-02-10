@@ -20,6 +20,7 @@ interface ServerState {
   selectChannel: (id: string) => void;
   createServer: (name: string) => Promise<void>;
   createChannel: (serverId: string, name: string, topic?: string) => Promise<void>;
+  updateServer: (server: Server) => void;
   addChannel: (channel: Channel) => void;
   updateChannel: (channel: Channel) => void;
   removeChannel: (channelId: string) => void;
@@ -131,6 +132,12 @@ export const useServerStore = create<ServerState>((set, get) => ({
       set({ error: message });
       throw new Error(message);
     }
+  },
+
+  updateServer: (server: Server) => {
+    set((state) => ({
+      servers: state.servers.map((s) => (s.id === server.id ? { ...s, ...server } : s)),
+    }));
   },
 
   addChannel: (channel: Channel) => {

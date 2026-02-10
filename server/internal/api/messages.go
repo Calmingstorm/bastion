@@ -31,7 +31,8 @@ func NewMessageHandler(db *pgxpool.Pool, hub *realtime.Hub) *MessageHandler {
 }
 
 type sendMessageRequest struct {
-	Content string `json:"content"`
+	Content   string     `json:"content"`
+	ReplyToID *uuid.UUID `json:"replyToId,omitempty"`
 }
 
 type editMessageRequest struct {
@@ -73,9 +74,12 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 	var rows pgx.Rows
 
 	baseQuery := `SELECT m.id, m.channel_id, m.content, m.edited_at, m.created_at,
-		 u.id, u.username, u.display_name, u.avatar_url
+		 u.id, u.username, u.display_name, u.avatar_url,
+		 m.reply_to_id, rm.id, rm.content, ru.id, ru.username, ru.display_name, ru.avatar_url
 		 FROM messages m
 		 INNER JOIN users u ON u.id = m.author_id
+		 LEFT JOIN messages rm ON rm.id = m.reply_to_id
+		 LEFT JOIN users ru ON ru.id = rm.author_id
 		 WHERE m.channel_id = $1`
 
 	if beforeParam != "" {
@@ -118,16 +122,41 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	messages := make([]models.Message, 0)
+	messageIDs := make([]uuid.UUID, 0)
 	for rows.Next() {
 		var msg models.Message
 		var author models.Author
+		var replyToID *uuid.UUID
+		var replyID, replyAuthorID *uuid.UUID
+		var replyContent, replyUsername *string
+		var replyDisplayName, replyAvatarURL *string
 		if err := rows.Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.CreatedAt,
-			&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL); err != nil {
+			&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL,
+			&replyToID, &replyID, &replyContent, &replyAuthorID, &replyUsername, &replyDisplayName, &replyAvatarURL); err != nil {
 			log.Error().Err(err).Msg("failed to scan message")
 			writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
 			return
 		}
 		msg.Author = &author
+		msg.ReplyToID = replyToID
+		if replyID != nil && replyContent != nil && replyAuthorID != nil && replyUsername != nil {
+			// Truncate reply content to 100 chars
+			content := *replyContent
+			if len(content) > 100 {
+				content = content[:100] + "..."
+			}
+			msg.ReplyTo = &models.ReplyInfo{
+				ID:      *replyID,
+				Content: content,
+				Author: models.Author{
+					ID:          *replyAuthorID,
+					Username:    *replyUsername,
+					DisplayName: replyDisplayName,
+					AvatarURL:   replyAvatarURL,
+				},
+			}
+		}
+		messageIDs = append(messageIDs, msg.ID)
 		messages = append(messages, msg)
 	}
 
@@ -135,6 +164,38 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 		log.Error().Err(err).Msg("rows iteration error")
 		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
 		return
+	}
+
+	// Bulk-fetch reactions for all messages
+	if len(messageIDs) > 0 {
+		reactionRows, err := h.db.Query(r.Context(),
+			`SELECT message_id, emoji, array_agg(user_id::text), COUNT(*)
+			 FROM message_reactions WHERE message_id = ANY($1)
+			 GROUP BY message_id, emoji ORDER BY MIN(created_at)`,
+			messageIDs,
+		)
+		if err == nil {
+			defer reactionRows.Close()
+			reactionMap := make(map[uuid.UUID][]models.Reaction)
+			for reactionRows.Next() {
+				var messageID uuid.UUID
+				var emoji string
+				var users []string
+				var count int
+				if err := reactionRows.Scan(&messageID, &emoji, &users, &count); err == nil {
+					reactionMap[messageID] = append(reactionMap[messageID], models.Reaction{
+						Emoji: emoji,
+						Count: count,
+						Users: users,
+					})
+				}
+			}
+			for i := range messages {
+				if reactions, ok := reactionMap[messages[i].ID]; ok {
+					messages[i].Reactions = reactions
+				}
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, messages)
@@ -184,20 +245,33 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate reply reference if provided
+	if req.ReplyToID != nil {
+		var replyExists bool
+		err := h.db.QueryRow(r.Context(),
+			`SELECT EXISTS(SELECT 1 FROM messages WHERE id = $1 AND channel_id = $2)`,
+			*req.ReplyToID, channelID,
+		).Scan(&replyExists)
+		if err != nil || !replyExists {
+			writeJSON(w, http.StatusBadRequest, errorBody("referenced message not found in this channel"))
+			return
+		}
+	}
+
 	var msg models.Message
 	var author models.Author
 	err = h.db.QueryRow(r.Context(),
 		`WITH new_msg AS (
-			INSERT INTO messages (channel_id, author_id, content)
-			VALUES ($1, $2, $3)
-			RETURNING id, channel_id, author_id, content, edited_at, created_at
+			INSERT INTO messages (channel_id, author_id, content, reply_to_id)
+			VALUES ($1, $2, $3, $4)
+			RETURNING id, channel_id, author_id, content, edited_at, reply_to_id, created_at
 		)
-		SELECT m.id, m.channel_id, m.content, m.edited_at, m.created_at,
+		SELECT m.id, m.channel_id, m.content, m.edited_at, m.reply_to_id, m.created_at,
 			   u.id, u.username, u.display_name, u.avatar_url
 		FROM new_msg m
 		INNER JOIN users u ON u.id = m.author_id`,
-		channelID, userID, req.Content,
-	).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.CreatedAt,
+		channelID, userID, req.Content, req.ReplyToID,
+	).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.ReplyToID, &msg.CreatedAt,
 		&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to insert message")
@@ -205,6 +279,22 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	msg.Author = &author
+
+	// Populate reply info if this is a reply
+	if msg.ReplyToID != nil {
+		var reply models.ReplyInfo
+		err := h.db.QueryRow(r.Context(),
+			`SELECT m.id, m.content, u.id, u.username, u.display_name, u.avatar_url
+			 FROM messages m INNER JOIN users u ON u.id = m.author_id WHERE m.id = $1`,
+			*msg.ReplyToID,
+		).Scan(&reply.ID, &reply.Content, &reply.Author.ID, &reply.Author.Username, &reply.Author.DisplayName, &reply.Author.AvatarURL)
+		if err == nil {
+			if len(reply.Content) > 100 {
+				reply.Content = reply.Content[:100] + "..."
+			}
+			msg.ReplyTo = &reply
+		}
+	}
 
 	// Broadcast to WebSocket subscribers
 	h.hub.BroadcastToChannel(channelID, realtime.Event{

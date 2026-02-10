@@ -3,7 +3,12 @@ import type { Message } from '../../types';
 import { MessageActions } from './MessageActions';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { AttachmentPreview } from './AttachmentPreview';
+import { MarkdownRenderer } from './MarkdownRenderer';
+import { ReactionBar } from './ReactionBar';
+import { UserContextMenu } from '../user/UserContextMenu';
+import { UserProfileCard } from '../user/UserProfileCard';
 import { useMessageStore } from '../../stores/messageStore';
+import { useServerStore } from '../../stores/serverStore';
 
 interface MessageItemProps {
   message: Message;
@@ -68,6 +73,9 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
   const displayName = author.displayName || author.username;
   const initial = displayName.charAt(0).toUpperCase();
   const avatarColor = getAvatarColor(author.id);
+  const selectedServerId = useServerStore((s) => s.selectedServerId);
+  const servers = useServerStore((s) => s.servers);
+  const server = servers.find((s) => s.id === selectedServerId);
 
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState(content);
@@ -75,6 +83,7 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
   const [isDeleting, setIsDeleting] = useState(false);
   const editRef = useRef<HTMLTextAreaElement>(null);
   const { editMessage, requestDeleteMessage } = useMessageStore();
+  const setReplyingTo = useMessageStore((s) => s.setReplyingTo);
 
   useEffect(() => {
     if (isEditing && editRef.current) {
@@ -124,26 +133,8 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
     }
   };
 
-  const renderMessageContent = (text: string) => {
-    const parts = text.split(/(@[a-zA-Z0-9_-]+)/g);
-    return parts.map((part, i) => {
-      if (part.match(/^@[a-zA-Z0-9_-]+$/)) {
-        const isBastion = part.toLowerCase() === '@bastion';
-        return (
-          <span
-            key={i}
-            className={`rounded px-0.5 font-medium ${
-              isBastion
-                ? 'bg-[var(--accent)]/20 text-[var(--accent)]'
-                : 'bg-[var(--accent)]/10 text-[var(--accent)]'
-            }`}
-          >
-            {part}
-          </span>
-        );
-      }
-      return part;
-    });
+  const handleReply = () => {
+    setReplyingTo(message);
   };
 
   const renderContent = () => {
@@ -178,14 +169,27 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
 
     return (
       <>
-        <p className="whitespace-pre-wrap break-words text-[15px] text-[var(--text-secondary)]">
-          {renderMessageContent(content)}
+        {/* Reply reference */}
+        {message.replyTo && (
+          <div className="mb-1 flex items-center gap-1.5 text-xs text-[var(--text-muted)]">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+              <polyline points="9 17 4 12 9 7" />
+              <path d="M20 18v-2a4 4 0 00-4-4H4" />
+            </svg>
+            <span className="font-medium text-[var(--text-secondary)]">
+              {message.replyTo.author.displayName || message.replyTo.author.username}
+            </span>
+            <span className="truncate max-w-xs">{message.replyTo.content}</span>
+          </div>
+        )}
+        <div className="text-[15px] text-[var(--text-secondary)]">
+          <MarkdownRenderer content={content} />
           {editedAt && (
             <span className="ml-1 text-[10px] text-[var(--text-muted)]">
               (edited)
             </span>
           )}
-        </p>
+        </div>
         {attachments && attachments.length > 0 && (
           <div className="flex flex-col gap-1">
             {attachments.map((att) => (
@@ -193,6 +197,7 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
             ))}
           </div>
         )}
+        <ReactionBar message={message} />
       </>
     );
   };
@@ -201,7 +206,7 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
     return (
       <>
         <div className="group relative py-px pr-12 pl-[72px] hover:bg-[var(--bg-secondary)]/30">
-          <MessageActions message={message} onEdit={handleEdit} onDelete={() => setShowDeleteDialog(true)} />
+          <MessageActions message={message} onEdit={handleEdit} onDelete={() => setShowDeleteDialog(true)} onReply={handleReply} />
           <span className="invisible absolute left-0 top-0.5 w-[68px] pr-3 text-right text-[11px] text-[var(--text-muted)] group-hover:visible">
             {formatTime(createdAt)}
           </span>
@@ -222,22 +227,28 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
   return (
     <>
       <div className="group relative flex gap-4 py-1 pr-12 pl-4 mt-4 hover:bg-[var(--bg-secondary)]/30">
-        <MessageActions message={message} onEdit={handleEdit} onDelete={() => setShowDeleteDialog(true)} />
+        <MessageActions message={message} onEdit={handleEdit} onDelete={() => setShowDeleteDialog(true)} onReply={handleReply} />
         {/* Avatar */}
-        {author.avatarUrl ? (
-          <img
-            src={author.avatarUrl}
-            alt={displayName}
-            className="mt-0.5 h-10 w-10 shrink-0 rounded-full object-cover"
-          />
-        ) : (
-          <div
-            className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-semibold text-white"
-            style={{ backgroundColor: avatarColor }}
-          >
-            {initial}
-          </div>
-        )}
+        <UserContextMenu userId={author.id} username={author.username} serverId={selectedServerId || undefined} isOwner={server?.ownerId === author.id}>
+          <UserProfileCard userId={author.id}>
+            <div className="cursor-pointer">
+              {author.avatarUrl ? (
+                <img
+                  src={author.avatarUrl}
+                  alt={displayName}
+                  className="mt-0.5 h-10 w-10 shrink-0 rounded-full object-cover"
+                />
+              ) : (
+                <div
+                  className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-semibold text-white"
+                  style={{ backgroundColor: avatarColor }}
+                >
+                  {initial}
+                </div>
+              )}
+            </div>
+          </UserProfileCard>
+        </UserContextMenu>
 
         {/* Content */}
         <div className="min-w-0 flex-1">

@@ -13,6 +13,8 @@ const (
 	EventMemberKick       = "MEMBER_KICK"
 	EventMemberBan        = "MEMBER_BAN"
 	EventNotification     = "NOTIFICATION"
+	EventReactionAdd      = "REACTION_ADD"
+	EventReactionRemove   = "REACTION_REMOVE"
 )
 
 type Event struct {

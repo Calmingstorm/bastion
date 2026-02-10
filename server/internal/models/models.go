@@ -47,8 +47,23 @@ type Message struct {
 	Author      *Author      `json:"author"`
 	Content     string       `json:"content"`
 	EditedAt    *time.Time   `json:"editedAt,omitempty"`
+	ReplyToID   *uuid.UUID   `json:"replyToId,omitempty"`
+	ReplyTo     *ReplyInfo   `json:"replyTo,omitempty"`
 	Attachments []Attachment `json:"attachments,omitempty"`
+	Reactions   []Reaction   `json:"reactions,omitempty"`
 	CreatedAt   time.Time    `json:"createdAt"`
+}
+
+type ReplyInfo struct {
+	ID      uuid.UUID `json:"id"`
+	Content string    `json:"content"`
+	Author  Author    `json:"author"`
+}
+
+type Reaction struct {
+	Emoji string   `json:"emoji"`
+	Count int      `json:"count"`
+	Users []string `json:"users"`
 }
 
 type Author struct {

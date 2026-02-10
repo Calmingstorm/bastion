@@ -7,13 +7,17 @@ interface MessageState {
   hasMore: Record<string, boolean>;
   isLoading: Record<string, boolean>;
   error: string | null;
+  replyingTo: Message | null;
+  setReplyingTo: (msg: Message | null) => void;
   fetchMessages: (channelId: string, before?: string) => Promise<void>;
-  sendMessage: (channelId: string, content: string) => Promise<void>;
+  sendMessage: (channelId: string, content: string, replyToId?: string) => Promise<void>;
   editMessage: (channelId: string, messageId: string, content: string) => Promise<void>;
   requestDeleteMessage: (channelId: string, messageId: string) => Promise<void>;
   addMessage: (channelId: string, message: Message) => void;
   updateMessage: (channelId: string, message: Message) => void;
   deleteMessage: (channelId: string, messageId: string) => void;
+  addReaction: (channelId: string, messageId: string, emoji: string, userId: string) => void;
+  removeReaction: (channelId: string, messageId: string, emoji: string, userId: string) => void;
   reset: () => void;
 }
 
@@ -24,6 +28,9 @@ export const useMessageStore = create<MessageState>((set, get) => ({
   hasMore: {},
   isLoading: {},
   error: null,
+  replyingTo: null,
+
+  setReplyingTo: (msg: Message | null) => set({ replyingTo: msg }),
 
   fetchMessages: async (channelId: string, before?: string) => {
     const state = get();
@@ -103,9 +110,9 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     }
   },
 
-  sendMessage: async (channelId: string, content: string) => {
+  sendMessage: async (channelId: string, content: string, replyToId?: string) => {
     try {
-      const message = await apiSendMessage(channelId, content);
+      const message = await apiSendMessage(channelId, content, replyToId);
       // Add the message optimistically (the WebSocket might also deliver it,
       // but addMessage deduplicates)
       get().addMessage(channelId, message);
@@ -160,12 +167,65 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     });
   },
 
+  addReaction: (channelId: string, messageId: string, emoji: string, userId: string) => {
+    set((state) => {
+      const existing = state.messages[channelId];
+      if (!existing) return {};
+      return {
+        messages: {
+          ...state.messages,
+          [channelId]: existing.map((m) => {
+            if (m.id !== messageId) return m;
+            const reactions = [...(m.reactions || [])];
+            const idx = reactions.findIndex((r) => r.emoji === emoji);
+            if (idx >= 0) {
+              if (!reactions[idx].users.includes(userId)) {
+                reactions[idx] = {
+                  ...reactions[idx],
+                  count: reactions[idx].count + 1,
+                  users: [...reactions[idx].users, userId],
+                };
+              }
+            } else {
+              reactions.push({ emoji, count: 1, users: [userId] });
+            }
+            return { ...m, reactions };
+          }),
+        },
+      };
+    });
+  },
+
+  removeReaction: (channelId: string, messageId: string, emoji: string, userId: string) => {
+    set((state) => {
+      const existing = state.messages[channelId];
+      if (!existing) return {};
+      return {
+        messages: {
+          ...state.messages,
+          [channelId]: existing.map((m) => {
+            if (m.id !== messageId) return m;
+            const reactions = (m.reactions || [])
+              .map((r) => {
+                if (r.emoji !== emoji) return r;
+                const users = r.users.filter((u) => u !== userId);
+                return { ...r, count: users.length, users };
+              })
+              .filter((r) => r.count > 0);
+            return { ...m, reactions };
+          }),
+        },
+      };
+    });
+  },
+
   reset: () => {
     set({
       messages: {},
       hasMore: {},
       isLoading: {},
       error: null,
+      replyingTo: null,
     });
   },
 }));

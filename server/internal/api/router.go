@@ -53,7 +53,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 
 	// Create handlers
 	authHandler := NewAuthHandler(db, cfg, rdb, emailSvc)
-	serverHandler := NewServerHandler(db)
+	serverHandler := NewServerHandler(db, fileStorage, cfg)
 	channelHandler := NewChannelHandler(db, hub)
 	messageHandler := NewMessageHandler(db, hub)
 	inviteHandler := NewInviteHandler(db, hub)
@@ -64,6 +64,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 	roleHandler := NewRoleHandler(db, rdb, hub)
 	categoryHandler := NewCategoryHandler(db)
 	moderationHandler := NewModerationHandler(db, rdb, hub)
+	reactionHandler := NewReactionHandler(db, hub)
 	auditLogHandler := NewAuditLogHandler(db)
 
 	// Public routes
@@ -96,6 +97,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 			r.Get("/", serverHandler.List)
 			r.Get("/{id}", serverHandler.Get)
 			r.Patch("/{id}", serverHandler.Update)
+			r.Post("/{id}/icon", serverHandler.UploadIcon)
 			r.Post("/{id}/join", serverHandler.Join)
 
 			// Channels (nested under servers)
@@ -150,6 +152,8 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 			r.Post("/upload", uploadHandler.SendWithAttachments)
 			r.Put("/{messageID}", messageHandler.Edit)
 			r.Delete("/{messageID}", messageHandler.Delete)
+			r.Put("/{messageID}/reactions/{emoji}", reactionHandler.AddReaction)
+			r.Delete("/{messageID}/reactions/{emoji}", reactionHandler.RemoveReaction)
 		})
 
 		// Read states
