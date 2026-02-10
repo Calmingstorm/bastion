@@ -11,15 +11,17 @@ import (
 	"github.com/go-chi/cors"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
 	"github.com/Calmingstorm/bastion/server/internal/auth"
 	"github.com/Calmingstorm/bastion/server/internal/config"
 	"github.com/Calmingstorm/bastion/server/internal/realtime"
+	"github.com/Calmingstorm/bastion/server/internal/storage"
 )
 
-func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub) http.Handler {
+func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *redis.Client) http.Handler {
 	r := chi.NewRouter()
 
 	// Global middleware
@@ -42,11 +44,19 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub) http.Han
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
+	// Create services
+	fileStorage := storage.NewFileStorage(&cfg.Upload)
+
 	// Create handlers
 	authHandler := NewAuthHandler(db, cfg)
 	serverHandler := NewServerHandler(db)
 	channelHandler := NewChannelHandler(db)
 	messageHandler := NewMessageHandler(db, hub)
+	inviteHandler := NewInviteHandler(db, hub)
+	userHandler := NewUserHandler(db, rdb, fileStorage, cfg)
+	uploadHandler := NewUploadHandler(db, hub, fileStorage, cfg)
+	dmHandler := NewDMHandler(db)
+	readStateHandler := NewReadStateHandler(db)
 
 	// Public routes
 	r.Route("/api/auth", func(r chi.Router) {
@@ -55,12 +65,19 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub) http.Han
 		r.Post("/refresh", authHandler.Refresh)
 	})
 
+	// Serve uploaded files (public, UUID-named so unguessable)
+	r.Get("/api/uploads/*", userHandler.ServeUpload)
+
 	// Protected routes
 	r.Group(func(r chi.Router) {
 		r.Use(auth.Middleware(cfg.JWT.Secret))
 
 		// Users
 		r.Get("/api/users/me", authHandler.GetMe)
+		r.Patch("/api/users/me", userHandler.UpdateProfile)
+		r.Post("/api/users/me/avatar", userHandler.UploadAvatar)
+		r.Get("/api/users/me/read-states", readStateHandler.ListReadStates)
+		r.Get("/api/users/{userID}", userHandler.GetUser)
 
 		// Servers
 		r.Route("/api/servers", func(r chi.Router) {
@@ -72,18 +89,40 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub) http.Han
 			// Channels (nested under servers)
 			r.Get("/{serverID}/channels", channelHandler.List)
 			r.Post("/{serverID}/channels", channelHandler.Create)
+
+			// Invites (nested under servers)
+			r.Post("/{serverID}/invites", inviteHandler.Create)
+			r.Get("/{serverID}/invites", inviteHandler.List)
+
+			// Members
+			r.Get("/{serverID}/members", userHandler.GetMembers)
 		})
+
+		// Invites (top-level for join/delete)
+		r.Delete("/api/invites/{inviteID}", inviteHandler.Delete)
+		r.Post("/api/invites/{code}/join", inviteHandler.Join)
 
 		// Messages
 		r.Route("/api/channels/{channelID}/messages", func(r chi.Router) {
 			r.Get("/", messageHandler.List)
 			r.Post("/", messageHandler.Send)
+			r.Post("/upload", uploadHandler.SendWithAttachments)
+			r.Put("/{messageID}", messageHandler.Edit)
+			r.Delete("/{messageID}", messageHandler.Delete)
 		})
+
+		// Read states
+		r.Post("/api/channels/{channelID}/ack", readStateHandler.Ack)
+
+		// Direct Messages
+		r.Post("/api/dm", dmHandler.CreateOrGet)
+		r.Get("/api/dm", dmHandler.List)
+		r.Get("/api/dm/{channelID}", dmHandler.Get)
 
 		// WebSocket
 		r.Get("/api/ws", func(w http.ResponseWriter, r *http.Request) {
 			userID := auth.UserIDFromContext(r.Context())
-			realtime.ServeWS(hub, w, r, userID, db)
+			realtime.ServeWS(hub, w, r, userID, db, rdb)
 		})
 	})
 

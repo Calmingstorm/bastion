@@ -3,15 +3,17 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
 type Config struct {
-	Host  string
-	Port  string
-	DB    DBConfig
-	JWT   JWTConfig
-	Redis RedisConfig
+	Host   string
+	Port   string
+	DB     DBConfig
+	JWT    JWTConfig
+	Redis  RedisConfig
+	Upload UploadConfig
 }
 
 type DBConfig struct {
@@ -31,6 +33,12 @@ type JWTConfig struct {
 type RedisConfig struct {
 	Host string
 	Port string
+}
+
+type UploadConfig struct {
+	Dir         string
+	MaxFileSize int64
+	BaseURL     string
 }
 
 func (c *DBConfig) DSN() string {
@@ -62,6 +70,11 @@ func Load() *Config {
 			Host: getEnvMulti("localhost", "BASTION_REDIS_HOST", "REDIS_HOST"),
 			Port: getEnvMulti("6379", "BASTION_REDIS_PORT", "REDIS_PORT"),
 		},
+		Upload: UploadConfig{
+			Dir:         getEnvMulti("./uploads", "BASTION_UPLOAD_DIR"),
+			MaxFileSize: parseFileSize(getEnvMulti("10MB", "BASTION_UPLOAD_MAX_SIZE")),
+			BaseURL:     getEnvMulti("/api/uploads", "BASTION_UPLOAD_BASE_URL"),
+		},
 	}
 }
 
@@ -72,6 +85,31 @@ func getEnvMulti(fallback string, keys ...string) string {
 		}
 	}
 	return fallback
+}
+
+func parseFileSize(s string) int64 {
+	s = strings.TrimSpace(strings.ToUpper(s))
+	var multiplier int64 = 1
+	if strings.HasSuffix(s, "MB") {
+		multiplier = 1024 * 1024
+		s = strings.TrimSuffix(s, "MB")
+	} else if strings.HasSuffix(s, "KB") {
+		multiplier = 1024
+		s = strings.TrimSuffix(s, "KB")
+	} else if strings.HasSuffix(s, "GB") {
+		multiplier = 1024 * 1024 * 1024
+		s = strings.TrimSuffix(s, "GB")
+	}
+	val := int64(0)
+	for _, c := range s {
+		if c >= '0' && c <= '9' {
+			val = val*10 + int64(c-'0')
+		}
+	}
+	if val == 0 {
+		return 10 * 1024 * 1024 // default 10MB
+	}
+	return val * multiplier
 }
 
 func parseDuration(s string) time.Duration {

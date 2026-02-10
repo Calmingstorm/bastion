@@ -51,7 +51,7 @@ func (h *ChannelHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := h.db.Query(r.Context(),
-		`SELECT id, server_id, name, topic, position, created_at
+		`SELECT id, server_id, name, topic, type, position, created_at
 		 FROM channels
 		 WHERE server_id = $1
 		 ORDER BY position ASC, created_at ASC`, serverID,
@@ -66,7 +66,7 @@ func (h *ChannelHandler) List(w http.ResponseWriter, r *http.Request) {
 	channels := make([]models.Channel, 0)
 	for rows.Next() {
 		var ch models.Channel
-		if err := rows.Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Topic, &ch.Position, &ch.CreatedAt); err != nil {
+		if err := rows.Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Topic, &ch.Type, &ch.Position, &ch.CreatedAt); err != nil {
 			log.Error().Err(err).Msg("failed to scan channel")
 			writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
 			return
@@ -134,9 +134,9 @@ func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 	err = h.db.QueryRow(r.Context(),
 		`INSERT INTO channels (server_id, name, topic, position)
 		 VALUES ($1, $2, $3, $4)
-		 RETURNING id, server_id, name, topic, position, created_at`,
+		 RETURNING id, server_id, name, topic, type, position, created_at`,
 		serverID, req.Name, req.Topic, maxPos+1,
-	).Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Topic, &ch.Position, &ch.CreatedAt)
+	).Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Topic, &ch.Type, &ch.Position, &ch.CreatedAt)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create channel")
 		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))

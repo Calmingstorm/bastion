@@ -6,6 +6,10 @@ import type {
   Message,
   LoginResponse,
   RegisterResponse,
+  ServerInvite,
+  DMChannel,
+  ReadState,
+  MemberWithUser,
 } from '../types';
 
 const apiClient = axios.create({
@@ -166,6 +170,31 @@ export async function apiGetMe(): Promise<User> {
   return response.data;
 }
 
+// ---- User API ----
+
+export async function apiUpdateProfile(data: {
+  displayName?: string;
+  aboutMe?: string;
+  status?: string;
+}): Promise<User> {
+  const response = await apiClient.patch<User>('/api/users/me', data);
+  return response.data;
+}
+
+export async function apiUploadAvatar(file: File): Promise<User> {
+  const formData = new FormData();
+  formData.append('avatar', file);
+  const response = await apiClient.post<User>('/api/users/me/avatar', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+  return response.data;
+}
+
+export async function apiGetUser(userId: string): Promise<User> {
+  const response = await apiClient.get<User>(`/api/users/${userId}`);
+  return response.data;
+}
+
 // ---- Server API ----
 
 export async function apiGetServers(): Promise<Server[]> {
@@ -179,9 +208,7 @@ export async function apiCreateServer(name: string): Promise<Server> {
 }
 
 export async function apiJoinServer(inviteCode: string): Promise<Server> {
-  const response = await apiClient.post<Server>(`/api/servers/join`, {
-    inviteCode,
-  });
+  const response = await apiClient.post<Server>(`/api/invites/${inviteCode}/join`);
   return response.data;
 }
 
@@ -231,6 +258,110 @@ export async function apiSendMessage(
   const response = await apiClient.post<Message>(
     `/api/channels/${channelId}/messages`,
     { content }
+  );
+  return response.data;
+}
+
+export async function apiEditMessage(
+  channelId: string,
+  messageId: string,
+  content: string
+): Promise<Message> {
+  const response = await apiClient.put<Message>(
+    `/api/channels/${channelId}/messages/${messageId}`,
+    { content }
+  );
+  return response.data;
+}
+
+export async function apiDeleteMessage(
+  channelId: string,
+  messageId: string
+): Promise<void> {
+  await apiClient.delete(`/api/channels/${channelId}/messages/${messageId}`);
+}
+
+export async function apiSendMessageWithFiles(
+  channelId: string,
+  content: string,
+  files: File[]
+): Promise<Message> {
+  const formData = new FormData();
+  formData.append('content', content);
+  files.forEach((file) => formData.append('files', file));
+  const response = await apiClient.post<Message>(
+    `/api/channels/${channelId}/messages/upload`,
+    formData,
+    { headers: { 'Content-Type': 'multipart/form-data' } }
+  );
+  return response.data;
+}
+
+// ---- Invite API ----
+
+export async function apiCreateInvite(
+  serverId: string,
+  options?: { maxUses?: number; expiresIn?: number }
+): Promise<ServerInvite> {
+  const response = await apiClient.post<ServerInvite>(
+    `/api/servers/${serverId}/invites`,
+    options || {}
+  );
+  return response.data;
+}
+
+export async function apiGetInvites(serverId: string): Promise<ServerInvite[]> {
+  const response = await apiClient.get<ServerInvite[]>(
+    `/api/servers/${serverId}/invites`
+  );
+  return response.data;
+}
+
+export async function apiDeleteInvite(inviteId: string): Promise<void> {
+  await apiClient.delete(`/api/invites/${inviteId}`);
+}
+
+export async function apiJoinViaInvite(code: string): Promise<Server> {
+  const response = await apiClient.post<Server>(`/api/invites/${code}/join`);
+  return response.data;
+}
+
+// ---- DM API ----
+
+export async function apiCreateDM(recipientIds: string[]): Promise<DMChannel> {
+  const response = await apiClient.post<DMChannel>('/api/dm', { recipientIds });
+  return response.data;
+}
+
+export async function apiGetDMs(): Promise<DMChannel[]> {
+  const response = await apiClient.get<DMChannel[]>('/api/dm');
+  return response.data;
+}
+
+export async function apiGetDM(channelId: string): Promise<DMChannel> {
+  const response = await apiClient.get<DMChannel>(`/api/dm/${channelId}`);
+  return response.data;
+}
+
+// ---- Read State API ----
+
+export async function apiAckChannel(
+  channelId: string,
+  messageId: string
+): Promise<void> {
+  await apiClient.post(`/api/channels/${channelId}/ack`, { messageId });
+}
+
+export async function apiGetReadStates(): Promise<ReadState[]> {
+  const response = await apiClient.get<ReadState[]>('/api/users/me/read-states');
+  return response.data;
+}
+
+// ---- Members API ----
+
+export async function apiGetMembers(serverId: string): Promise<MemberWithUser[]> {
+  const response = await apiClient.get<MemberWithUser[]>(
+    `/api/servers/${serverId}/members`
   );
   return response.data;
 }

@@ -1,0 +1,10 @@
+-- Rollback Phase 2
+
+ALTER TABLE server_members DROP COLUMN IF EXISTS role;
+DROP TABLE IF EXISTS read_states;
+ALTER TABLE users DROP COLUMN IF EXISTS about_me;
+DROP TABLE IF EXISTS attachments;
+DROP TABLE IF EXISTS dm_members;
+ALTER TABLE channels DROP COLUMN IF EXISTS type;
+ALTER TABLE channels ALTER COLUMN server_id SET NOT NULL;
+DROP TABLE IF EXISTS server_invites;

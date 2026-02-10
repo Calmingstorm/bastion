@@ -4,6 +4,7 @@ import { useAuthStore } from './stores/authStore';
 import { LoginPage } from './pages/LoginPage';
 import { RegisterPage } from './pages/RegisterPage';
 import { AppPage } from './pages/AppPage';
+import { InvitePage } from './pages/InvitePage';
 
 export default function App() {
   const { loadFromStorage } = useAuthStore();
@@ -31,6 +32,7 @@ export default function App() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
+        <Route path="/invite/:code" element={<InvitePage />} />
         <Route path="/app" element={<AppPage />} />
         <Route path="*" element={<Navigate to="/app" replace />} />
       </Routes>

@@ -47,13 +47,20 @@ func main() {
 		log.Fatal().Err(err).Msg("failed to run migrations")
 	}
 
+	// Connect to Redis
+	rdb, err := database.NewRedis(cfg)
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to connect to redis")
+	}
+	defer rdb.Close()
+
 	// Start WebSocket hub
 	hub := realtime.NewHub()
 	go hub.Run()
 	defer hub.Stop()
 
 	// Create router
-	handler := api.NewRouter(pool, cfg, hub)
+	handler := api.NewRouter(pool, cfg, hub, rdb)
 
 	// Create HTTP server
 	addr := fmt.Sprintf("%s:%s", cfg.Host, cfg.Port)

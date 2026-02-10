@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { Message } from '../types';
-import { apiGetMessages, apiSendMessage } from '../api/client';
+import { apiGetMessages, apiSendMessage, apiEditMessage, apiDeleteMessage } from '../api/client';
 
 interface MessageState {
   messages: Record<string, Message[]>;
@@ -9,6 +9,8 @@ interface MessageState {
   error: string | null;
   fetchMessages: (channelId: string, before?: string) => Promise<void>;
   sendMessage: (channelId: string, content: string) => Promise<void>;
+  editMessage: (channelId: string, messageId: string, content: string) => Promise<void>;
+  requestDeleteMessage: (channelId: string, messageId: string) => Promise<void>;
   addMessage: (channelId: string, message: Message) => void;
   updateMessage: (channelId: string, message: Message) => void;
   deleteMessage: (channelId: string, messageId: string) => void;
@@ -76,6 +78,28 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         isLoading: { ...s.isLoading, [channelId]: false },
         error: message,
       }));
+    }
+  },
+
+  editMessage: async (channelId: string, messageId: string, content: string) => {
+    try {
+      const updated = await apiEditMessage(channelId, messageId, content);
+      get().updateMessage(channelId, updated);
+    } catch (err: unknown) {
+      const errMsg = extractErrorMessage(err, 'Failed to edit message.');
+      set({ error: errMsg });
+      throw new Error(errMsg);
+    }
+  },
+
+  requestDeleteMessage: async (channelId: string, messageId: string) => {
+    try {
+      await apiDeleteMessage(channelId, messageId);
+      get().deleteMessage(channelId, messageId);
+    } catch (err: unknown) {
+      const errMsg = extractErrorMessage(err, 'Failed to delete message.');
+      set({ error: errMsg });
+      throw new Error(errMsg);
     }
   },
 

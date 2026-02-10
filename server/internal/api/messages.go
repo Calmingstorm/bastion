@@ -30,6 +30,25 @@ type sendMessageRequest struct {
 	Content string `json:"content"`
 }
 
+type editMessageRequest struct {
+	Content string `json:"content"`
+}
+
+func (h *MessageHandler) checkChannelAccess(r *http.Request, channelID, userID uuid.UUID) bool {
+	var isMember bool
+	err := h.db.QueryRow(r.Context(),
+		`SELECT EXISTS(
+			SELECT 1 FROM server_members sm
+			INNER JOIN channels c ON c.server_id = sm.server_id
+			WHERE c.id = $1 AND sm.user_id = $2
+			UNION ALL
+			SELECT 1 FROM dm_members dm
+			WHERE dm.channel_id = $1 AND dm.user_id = $2
+		)`, channelID, userID,
+	).Scan(&isMember)
+	return err == nil && isMember
+}
+
 func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	channelID, err := parseUUID(chi.URLParam(r, "channelID"))
@@ -38,21 +57,7 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify the user is a member of the server that owns this channel
-	var isMember bool
-	err = h.db.QueryRow(r.Context(),
-		`SELECT EXISTS(
-			SELECT 1 FROM server_members sm
-			INNER JOIN channels c ON c.server_id = sm.server_id
-			WHERE c.id = $1 AND sm.user_id = $2
-		)`, channelID, userID,
-	).Scan(&isMember)
-	if err != nil {
-		log.Error().Err(err).Msg("failed to check channel membership")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
-		return
-	}
-	if !isMember {
+	if !h.checkChannelAccess(r, channelID, userID) {
 		writeJSON(w, http.StatusForbidden, errorBody("you do not have access to this channel"))
 		return
 	}
@@ -139,21 +144,7 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify the user is a member of the server that owns this channel
-	var isMember bool
-	err = h.db.QueryRow(r.Context(),
-		`SELECT EXISTS(
-			SELECT 1 FROM server_members sm
-			INNER JOIN channels c ON c.server_id = sm.server_id
-			WHERE c.id = $1 AND sm.user_id = $2
-		)`, channelID, userID,
-	).Scan(&isMember)
-	if err != nil {
-		log.Error().Err(err).Msg("failed to check channel membership")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
-		return
-	}
-	if !isMember {
+	if !h.checkChannelAccess(r, channelID, userID) {
 		writeJSON(w, http.StatusForbidden, errorBody("you do not have access to this channel"))
 		return
 	}
@@ -203,4 +194,140 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeJSON(w, http.StatusCreated, msg)
+}
+
+func (h *MessageHandler) Edit(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromContext(r.Context())
+	channelID, err := parseUUID(chi.URLParam(r, "channelID"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid channel ID"))
+		return
+	}
+	messageID, err := parseUUID(chi.URLParam(r, "messageID"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid message ID"))
+		return
+	}
+
+	// Verify message exists and user is the author
+	var authorID uuid.UUID
+	err = h.db.QueryRow(r.Context(),
+		`SELECT author_id FROM messages WHERE id = $1 AND channel_id = $2`,
+		messageID, channelID,
+	).Scan(&authorID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorBody("message not found"))
+		return
+	}
+	if authorID != userID {
+		writeJSON(w, http.StatusForbidden, errorBody("you can only edit your own messages"))
+		return
+	}
+
+	var req editMessageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		return
+	}
+
+	req.Content = strings.TrimSpace(req.Content)
+	if req.Content == "" {
+		writeJSON(w, http.StatusBadRequest, errorBody("message content cannot be empty"))
+		return
+	}
+	if len(req.Content) > 4000 {
+		writeJSON(w, http.StatusBadRequest, errorBody("message content cannot exceed 4000 characters"))
+		return
+	}
+
+	var msg models.Message
+	var author models.Author
+	err = h.db.QueryRow(r.Context(),
+		`UPDATE messages SET content = $1, edited_at = NOW()
+		 WHERE id = $2
+		 RETURNING id, channel_id, content, edited_at, created_at,
+			(SELECT u.id FROM users u WHERE u.id = author_id),
+			(SELECT u.username FROM users u WHERE u.id = author_id),
+			(SELECT u.display_name FROM users u WHERE u.id = author_id),
+			(SELECT u.avatar_url FROM users u WHERE u.id = author_id)`,
+		req.Content, messageID,
+	).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.CreatedAt,
+		&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to update message")
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+	msg.Author = &author
+
+	h.hub.BroadcastToChannel(channelID, realtime.Event{
+		Type: realtime.EventMessageUpdate,
+		Data: msg,
+	})
+
+	writeJSON(w, http.StatusOK, msg)
+}
+
+func (h *MessageHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromContext(r.Context())
+	channelID, err := parseUUID(chi.URLParam(r, "channelID"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid channel ID"))
+		return
+	}
+	messageID, err := parseUUID(chi.URLParam(r, "messageID"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid message ID"))
+		return
+	}
+
+	// Verify message exists, get author and channel's server
+	var authorID uuid.UUID
+	var serverID *uuid.UUID
+	err = h.db.QueryRow(r.Context(),
+		`SELECT m.author_id, c.server_id
+		 FROM messages m
+		 INNER JOIN channels c ON c.id = m.channel_id
+		 WHERE m.id = $1 AND m.channel_id = $2`,
+		messageID, channelID,
+	).Scan(&authorID, &serverID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorBody("message not found"))
+		return
+	}
+
+	// Allow deletion if author OR server owner
+	if authorID != userID {
+		if serverID == nil {
+			writeJSON(w, http.StatusForbidden, errorBody("you can only delete your own messages"))
+			return
+		}
+		var ownerID uuid.UUID
+		err = h.db.QueryRow(r.Context(),
+			`SELECT owner_id FROM servers WHERE id = $1`, *serverID,
+		).Scan(&ownerID)
+		if err != nil || ownerID != userID {
+			writeJSON(w, http.StatusForbidden, errorBody("you can only delete your own messages"))
+			return
+		}
+	}
+
+	_, err = h.db.Exec(r.Context(),
+		`DELETE FROM messages WHERE id = $1`, messageID,
+	)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to delete message")
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+
+	h.hub.BroadcastToChannel(channelID, realtime.Event{
+		Type: realtime.EventMessageDelete,
+		Data: map[string]string{
+			"channelId": channelID.String(),
+			"messageId": messageID.String(),
+		},
+	})
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

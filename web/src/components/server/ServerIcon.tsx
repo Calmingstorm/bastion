@@ -1,5 +1,7 @@
 import * as Tooltip from '@radix-ui/react-tooltip';
 import type { Server } from '../../types';
+import { useServerStore } from '../../stores/serverStore';
+import { useUnreadStore } from '../../stores/unreadStore';
 
 interface ServerIconProps {
   server: Server;
@@ -31,24 +33,40 @@ function getColorForId(id: string): string {
 export function ServerIcon({ server, isSelected, onClick }: ServerIconProps) {
   const initial = server.name.charAt(0).toUpperCase();
   const bgColor = getColorForId(server.id);
+  const channels = useServerStore((s) =>
+    s.selectedServerId === server.id ? s.channels : []
+  );
+  const isUnread = useUnreadStore((s) => s.isUnread);
+  const getMentionCount = useUnreadStore((s) => s.getMentionCount);
+
+  // Check if any channel in this server has unreads/mentions
+  // We can only check channels that are loaded (for the selected server)
+  // For other servers, we check all known unread channels
+  const hasUnread = channels.some((c) => isUnread(c.id));
+  const totalMentions = channels.reduce(
+    (sum, c) => sum + getMentionCount(c.id),
+    0
+  );
 
   return (
     <Tooltip.Provider delayDuration={0}>
       <Tooltip.Root>
         <Tooltip.Trigger asChild>
           <div className="group relative flex items-center justify-center">
-            {/* Selection indicator pill */}
+            {/* Selection / unread indicator pill */}
             <div
               className={`absolute left-0 w-1 rounded-r-full bg-white transition-all duration-200 ${
                 isSelected
                   ? 'h-10'
-                  : 'h-0 group-hover:h-5'
+                  : hasUnread
+                    ? 'h-2'
+                    : 'h-0 group-hover:h-5'
               }`}
             />
 
             <button
               onClick={onClick}
-              className={`flex h-12 w-12 items-center justify-center text-lg font-semibold text-white transition-all duration-200 ${
+              className={`relative flex h-12 w-12 items-center justify-center text-lg font-semibold text-white transition-all duration-200 ${
                 isSelected
                   ? 'rounded-2xl'
                   : 'rounded-[24px] hover:rounded-2xl'
@@ -67,6 +85,13 @@ export function ServerIcon({ server, isSelected, onClick }: ServerIconProps) {
                 />
               ) : (
                 initial
+              )}
+
+              {/* Mention count badge */}
+              {totalMentions > 0 && (
+                <span className="absolute -bottom-1 -right-1 flex h-5 min-w-[20px] items-center justify-center rounded-full bg-[var(--danger)] px-1 text-[11px] font-bold text-white ring-2 ring-[var(--bg-tertiary)]">
+                  {totalMentions > 99 ? '99+' : totalMentions}
+                </span>
               )}
             </button>
           </div>

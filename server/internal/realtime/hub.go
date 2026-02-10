@@ -20,7 +20,9 @@ type broadcastMessage struct {
 type Hub struct {
 	// channelID -> set of clients
 	channels map[uuid.UUID]map[*Client]struct{}
-	mu       sync.RWMutex
+	// userID -> set of clients (for direct user notifications)
+	users map[uuid.UUID]map[*Client]struct{}
+	mu    sync.RWMutex
 
 	registerCh   chan subscription
 	unregisterCh chan subscription
@@ -31,6 +33,7 @@ type Hub struct {
 func NewHub() *Hub {
 	return &Hub{
 		channels:     make(map[uuid.UUID]map[*Client]struct{}),
+		users:        make(map[uuid.UUID]map[*Client]struct{}),
 		registerCh:   make(chan subscription, 256),
 		unregisterCh: make(chan subscription, 256),
 		broadcastCh:  make(chan broadcastMessage, 256),
@@ -109,6 +112,40 @@ func (h *Hub) UnsubscribeAll(client *Client) {
 		delete(clients, client)
 		if len(clients) == 0 {
 			delete(h.channels, chID)
+		}
+	}
+	// Also remove from user mapping
+	if userClients, ok := h.users[client.userID]; ok {
+		delete(userClients, client)
+		if len(userClients) == 0 {
+			delete(h.users, client.userID)
+		}
+	}
+}
+
+func (h *Hub) RegisterUser(client *Client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	clients, ok := h.users[client.userID]
+	if !ok {
+		clients = make(map[*Client]struct{})
+		h.users[client.userID] = clients
+	}
+	clients[client] = struct{}{}
+}
+
+func (h *Hub) BroadcastToUser(userID uuid.UUID, event Event) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if clients, ok := h.users[userID]; ok {
+		for client := range clients {
+			select {
+			case client.send <- event:
+			default:
+				log.Warn().
+					Str("userID", client.userID.String()).
+					Msg("dropping event, client send buffer full")
+			}
 		}
 	}
 }

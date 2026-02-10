@@ -2,6 +2,9 @@ import { create } from 'zustand';
 import { wsClient } from '../api/websocket';
 import { useMessageStore } from './messageStore';
 import { useServerStore } from './serverStore';
+import { usePresenceStore } from './presenceStore';
+import { useTypingStore } from './typingStore';
+import { useUnreadStore } from './unreadStore';
 import type { Message, Channel } from '../types';
 
 interface WSState {
@@ -9,6 +12,8 @@ interface WSState {
   connect: (token: string) => void;
   disconnect: () => void;
 }
+
+let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 
 export const useWSStore = create<WSState>((set) => ({
   isConnected: false,
@@ -22,6 +27,17 @@ export const useWSStore = create<WSState>((set) => ({
       const message = 'message' in payload ? payload.message : payload;
       if (message && message.channelId) {
         useMessageStore.getState().addMessage(message.channelId, message);
+
+        // Mark as unread if not the active channel
+        const selectedChannelId = useServerStore.getState().selectedChannelId;
+        if (message.channelId !== selectedChannelId) {
+          useUnreadStore.getState().markUnread(message.channelId);
+        }
+
+        // Clear typing indicator for this user
+        if (message.author) {
+          useTypingStore.getState().removeTyping(message.channelId, message.author.id);
+        }
       }
     });
 
@@ -53,11 +69,47 @@ export const useWSStore = create<WSState>((set) => ({
       }
     });
 
+    wsClient.on('PRESENCE_UPDATE', (data: unknown) => {
+      const payload = data as { userId: string; status: string };
+      if (payload.userId && payload.status) {
+        usePresenceStore.getState().setPresence(payload.userId, payload.status);
+      }
+    });
+
+    wsClient.on('TYPING_START', (data: unknown) => {
+      const payload = data as { channelId: string; userId: string };
+      if (payload.channelId && payload.userId) {
+        useTypingStore.getState().addTyping(payload.channelId, payload.userId);
+      }
+    });
+
+    wsClient.on('NOTIFICATION', (data: unknown) => {
+      const payload = data as { channelId: string; mentionCount?: number };
+      if (payload.channelId) {
+        useUnreadStore.getState().markUnread(payload.channelId);
+        if (payload.mentionCount) {
+          useUnreadStore.getState().incrementMention(payload.channelId);
+        }
+      }
+    });
+
     wsClient.connect(token);
     set({ isConnected: true });
+
+    // Start heartbeat for presence (every 60s)
+    if (heartbeatInterval) {
+      clearInterval(heartbeatInterval);
+    }
+    heartbeatInterval = setInterval(() => {
+      wsClient.send('HEARTBEAT');
+    }, 60000);
   },
 
   disconnect: () => {
+    if (heartbeatInterval) {
+      clearInterval(heartbeatInterval);
+      heartbeatInterval = null;
+    }
     wsClient.disconnect();
     set({ isConnected: false });
   },

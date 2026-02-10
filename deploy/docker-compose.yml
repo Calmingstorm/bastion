@@ -4,6 +4,8 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.server
     env_file: .env
+    volumes:
+      - uploads_data:/app/uploads
     depends_on:
       postgres:
         condition: service_healthy
@@ -62,6 +64,7 @@ services:
 
 volumes:
   postgres_data:
+  uploads_data:
   caddy_data:
   caddy_config:
 

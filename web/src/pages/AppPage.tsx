@@ -3,12 +3,16 @@ import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
 import { useServerStore } from '../stores/serverStore';
 import { useWSStore } from '../stores/wsStore';
+import { useUnreadStore } from '../stores/unreadStore';
+import { useDMStore } from '../stores/dmStore';
 import { AppLayout } from '../components/layout/AppLayout';
 
 export function AppPage() {
   const { isAuthenticated, accessToken, logout } = useAuthStore();
   const { fetchServers, reset: resetServers } = useServerStore();
   const { connect, disconnect } = useWSStore();
+  const { fetchReadStates, reset: resetUnread } = useUnreadStore();
+  const { fetchDMs, reset: resetDMs } = useDMStore();
   const navigate = useNavigate();
 
   // Redirect to login if not authenticated
@@ -22,11 +26,15 @@ export function AppPage() {
   useEffect(() => {
     if (isAuthenticated && accessToken) {
       fetchServers();
+      fetchReadStates();
+      fetchDMs();
       connect(accessToken);
 
       return () => {
         disconnect();
         resetServers();
+        resetUnread();
+        resetDMs();
       };
     }
     return undefined;

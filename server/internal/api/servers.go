@@ -204,9 +204,9 @@ func (h *ServerHandler) Join(w http.ResponseWriter, r *http.Request) {
 	var member models.ServerMember
 	err = h.db.QueryRow(r.Context(),
 		`INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)
-		 RETURNING server_id, user_id, nickname, joined_at`,
+		 RETURNING server_id, user_id, nickname, role, joined_at`,
 		serverID, userID,
-	).Scan(&member.ServerID, &member.UserID, &member.Nickname, &member.JoinedAt)
+	).Scan(&member.ServerID, &member.UserID, &member.Nickname, &member.Role, &member.JoinedAt)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to join server")
 		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))

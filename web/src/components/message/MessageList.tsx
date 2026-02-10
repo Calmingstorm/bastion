@@ -1,8 +1,10 @@
-import { useEffect, useCallback, useRef } from 'react';
+import { useEffect, useCallback, useRef, useMemo } from 'react';
 import { useMessageStore } from '../../stores/messageStore';
 import { useServerStore } from '../../stores/serverStore';
+import { useUnreadStore } from '../../stores/unreadStore';
 import { useAutoScroll } from '../../hooks/useAutoScroll';
 import { MessageItem, DateSeparator } from './MessageItem';
+import { TypingIndicator } from './TypingIndicator';
 import type { Message } from '../../types';
 
 function isSameDay(a: string, b: string): boolean {
@@ -24,9 +26,14 @@ function shouldGroupWithPrevious(
   return true;
 }
 
-export function MessageList() {
+interface MessageListProps {
+  onToggleMembers?: () => void;
+}
+
+export function MessageList({ onToggleMembers }: MessageListProps) {
   const { selectedChannelId, channels } = useServerStore();
   const { messages, hasMore, isLoading, fetchMessages } = useMessageStore();
+  const { ackChannel } = useUnreadStore();
 
   const channelMessages = selectedChannelId
     ? messages[selectedChannelId] || []
@@ -46,6 +53,17 @@ export function MessageList() {
 
   const loadingOlderRef = useRef(false);
 
+  // Build a username map for typing indicators
+  const usernameMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    channelMessages.forEach((msg) => {
+      if (!map[msg.author.id]) {
+        map[msg.author.id] = msg.author.displayName || msg.author.username;
+      }
+    });
+    return map;
+  }, [channelMessages]);
+
   // Fetch messages when channel changes
   useEffect(() => {
     if (selectedChannelId && !messages[selectedChannelId]) {
@@ -55,6 +73,14 @@ export function MessageList() {
       });
     }
   }, [selectedChannelId, messages, fetchMessages, scrollToBottom]);
+
+  // Auto-ack when channel is selected and has messages
+  useEffect(() => {
+    if (selectedChannelId && channelMessages.length > 0) {
+      const lastMsg = channelMessages[channelMessages.length - 1];
+      ackChannel(selectedChannelId, lastMsg.id);
+    }
+  }, [selectedChannelId, channelMessages, ackChannel]);
 
   // Infinite scroll - load older messages
   const handleScroll = useCallback(() => {
@@ -80,6 +106,14 @@ export function MessageList() {
         });
       }
     }
+
+    // Ack when scrolled to bottom
+    const isAtBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight < 50;
+    if (isAtBottom && channelMessages.length > 0) {
+      const lastMsg = channelMessages[channelMessages.length - 1];
+      ackChannel(selectedChannelId, lastMsg.id);
+    }
   }, [
     containerRef,
     selectedChannelId,
@@ -87,6 +121,7 @@ export function MessageList() {
     channelHasMore,
     channelMessages,
     fetchMessages,
+    ackChannel,
   ]);
 
   if (!selectedChannelId) {
@@ -122,30 +157,55 @@ export function MessageList() {
   return (
     <div className="flex flex-1 flex-col bg-[var(--bg-primary)]">
       {/* Channel header */}
-      <div className="flex h-12 shrink-0 items-center border-b border-[var(--border)] px-4">
-        <svg
-          width="20"
-          height="20"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className="mr-2 shrink-0 text-[var(--text-muted)]"
-        >
-          <path d="M4 9h16M4 15h16M10 3l-2 18M16 3l-2 18" />
-        </svg>
-        <h3 className="font-semibold text-[var(--text-primary)]">
-          {selectedChannel?.name || 'Unknown Channel'}
-        </h3>
-        {selectedChannel?.topic && (
-          <>
-            <div className="mx-3 h-6 w-[1px] bg-[var(--border)]" />
-            <span className="truncate text-sm text-[var(--text-muted)]">
-              {selectedChannel.topic}
-            </span>
-          </>
+      <div className="flex h-12 shrink-0 items-center justify-between border-b border-[var(--border)] px-4">
+        <div className="flex min-w-0 items-center">
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="mr-2 shrink-0 text-[var(--text-muted)]"
+          >
+            <path d="M4 9h16M4 15h16M10 3l-2 18M16 3l-2 18" />
+          </svg>
+          <h3 className="font-semibold text-[var(--text-primary)]">
+            {selectedChannel?.name || 'Unknown Channel'}
+          </h3>
+          {selectedChannel?.topic && (
+            <>
+              <div className="mx-3 h-6 w-[1px] bg-[var(--border)]" />
+              <span className="truncate text-sm text-[var(--text-muted)]">
+                {selectedChannel.topic}
+              </span>
+            </>
+          )}
+        </div>
+        {onToggleMembers && (
+          <button
+            onClick={onToggleMembers}
+            className="shrink-0 rounded p-1 text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)] hover:text-[var(--text-secondary)]"
+            title="Toggle Member List"
+          >
+            <svg
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2" />
+              <circle cx="9" cy="7" r="4" />
+              <path d="M23 21v-2a4 4 0 00-3-3.87" />
+              <path d="M16 3.13a4 4 0 010 7.75" />
+            </svg>
+          </button>
         )}
       </div>
 
@@ -215,6 +275,14 @@ export function MessageList() {
           </div>
         )}
       </div>
+
+      {/* Typing indicator */}
+      {selectedChannelId && (
+        <TypingIndicator
+          channelId={selectedChannelId}
+          usernames={usernameMap}
+        />
+      )}
     </div>
   );
 }

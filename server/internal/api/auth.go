@@ -92,10 +92,10 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	err = h.db.QueryRow(r.Context(),
 		`INSERT INTO users (username, email, password_hash, display_name, status)
 		 VALUES ($1, $2, $3, $4, 'online')
-		 RETURNING id, username, email, password_hash, display_name, avatar_url, status, created_at, updated_at`,
+		 RETURNING id, username, email, password_hash, display_name, avatar_url, status, about_me, created_at, updated_at`,
 		req.Username, req.Email, hash, req.Username,
 	).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash,
-		&user.DisplayName, &user.AvatarURL, &user.Status, &user.CreatedAt, &user.UpdatedAt)
+		&user.DisplayName, &user.AvatarURL, &user.Status, &user.AboutMe, &user.CreatedAt, &user.UpdatedAt)
 
 	if err != nil {
 		errMsg := err.Error()
@@ -146,10 +146,10 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	// Find user by email
 	var user models.User
 	err := h.db.QueryRow(r.Context(),
-		`SELECT id, username, email, password_hash, display_name, avatar_url, status, created_at, updated_at
+		`SELECT id, username, email, password_hash, display_name, avatar_url, status, about_me, created_at, updated_at
 		 FROM users WHERE email = $1`, req.Email,
 	).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash,
-		&user.DisplayName, &user.AvatarURL, &user.Status, &user.CreatedAt, &user.UpdatedAt)
+		&user.DisplayName, &user.AvatarURL, &user.Status, &user.AboutMe, &user.CreatedAt, &user.UpdatedAt)
 
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, errorBody("invalid email or password"))
@@ -232,10 +232,10 @@ func (h *AuthHandler) GetMe(w http.ResponseWriter, r *http.Request) {
 
 	var user models.User
 	err := h.db.QueryRow(r.Context(),
-		`SELECT id, username, email, password_hash, display_name, avatar_url, status, created_at, updated_at
+		`SELECT id, username, email, password_hash, display_name, avatar_url, status, about_me, created_at, updated_at
 		 FROM users WHERE id = $1`, userID,
 	).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash,
-		&user.DisplayName, &user.AvatarURL, &user.Status, &user.CreatedAt, &user.UpdatedAt)
+		&user.DisplayName, &user.AvatarURL, &user.Status, &user.AboutMe, &user.CreatedAt, &user.UpdatedAt)
 
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, errorBody("user not found"))

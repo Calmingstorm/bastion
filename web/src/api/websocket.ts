@@ -152,6 +152,12 @@ export class WebSocketClient {
     }
   }
 
+  send(type: string, data?: unknown): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type, data }));
+    }
+  }
+
   get isConnected(): boolean {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
   }

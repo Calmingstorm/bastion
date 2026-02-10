@@ -9,6 +9,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
 )
 
@@ -25,9 +26,20 @@ type Client struct {
 	conn   *websocket.Conn
 	userID uuid.UUID
 	send   chan Event
+	db     *pgxpool.Pool
+	rdb    *redis.Client
 }
 
-func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, userID uuid.UUID, db *pgxpool.Pool) {
+type incomingMessage struct {
+	Type string          `json:"type"`
+	Data json.RawMessage `json:"data"`
+}
+
+type typingData struct {
+	ChannelID string `json:"channelId"`
+}
+
+func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, userID uuid.UUID, db *pgxpool.Pool, rdb *redis.Client) {
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true, // Allow all origins for now (CORS handled separately)
 	})
@@ -43,6 +55,8 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, userID uuid.UUID,
 		conn:   conn,
 		userID: userID,
 		send:   make(chan Event, sendBufferSize),
+		db:     db,
+		rdb:    rdb,
 	}
 
 	// Subscribe to all channels the user has access to
@@ -57,26 +71,61 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, userID uuid.UUID,
 		hub.Subscribe(chID, client)
 	}
 
+	// Register this client for user-targeted events
+	hub.RegisterUser(client)
+
 	log.Info().
 		Str("userID", userID.String()).
 		Int("channels", len(channelIDs)).
 		Msg("websocket client connected")
 
+	// Set presence to online
+	if rdb != nil {
+		rdb.Set(r.Context(), "presence:"+userID.String(), "online", 90*time.Second)
+		// Broadcast presence to all subscribed channels
+		for _, chID := range channelIDs {
+			hub.BroadcastToChannel(chID, Event{
+				Type: EventPresenceUpdate,
+				Data: map[string]string{
+					"userId": userID.String(),
+					"status": "online",
+				},
+			})
+		}
+	}
+
 	ctx, cancel := context.WithCancel(r.Context())
 
 	go client.writePump(ctx, cancel)
-	go client.readPump(ctx, cancel)
+	go client.readPump(ctx, cancel, channelIDs)
 }
 
-func (c *Client) readPump(ctx context.Context, cancel context.CancelFunc) {
+func (c *Client) readPump(ctx context.Context, cancel context.CancelFunc, channelIDs []uuid.UUID) {
 	defer func() {
 		c.hub.UnsubscribeAll(c)
+
+		// Set presence to offline
+		if c.rdb != nil {
+			bgCtx := context.Background()
+			c.rdb.Del(bgCtx, "presence:"+c.userID.String())
+			// Broadcast offline to channels
+			for _, chID := range channelIDs {
+				c.hub.BroadcastToChannel(chID, Event{
+					Type: EventPresenceUpdate,
+					Data: map[string]string{
+						"userId": c.userID.String(),
+						"status": "offline",
+					},
+				})
+			}
+		}
+
 		c.conn.Close(websocket.StatusNormalClosure, "connection closed")
 		cancel()
 	}()
 
 	for {
-		_, _, err := c.conn.Read(ctx)
+		_, data, err := c.conn.Read(ctx)
 		if err != nil {
 			if websocket.CloseStatus(err) == websocket.StatusNormalClosure ||
 				websocket.CloseStatus(err) == websocket.StatusGoingAway {
@@ -86,8 +135,67 @@ func (c *Client) readPump(ctx context.Context, cancel context.CancelFunc) {
 			}
 			return
 		}
-		// For now we just consume messages (heartbeat pings are handled by the library).
-		// Future: handle typing indicators, etc.
+
+		// Parse incoming message
+		var msg incomingMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			continue
+		}
+
+		switch msg.Type {
+		case "HEARTBEAT":
+			// Refresh presence TTL
+			if c.rdb != nil {
+				c.rdb.Expire(ctx, "presence:"+c.userID.String(), 90*time.Second)
+			}
+
+		case "PRESENCE_UPDATE":
+			// Client setting their own status
+			var statusData struct {
+				Status string `json:"status"`
+			}
+			if err := json.Unmarshal(msg.Data, &statusData); err == nil && statusData.Status != "" {
+				if c.rdb != nil {
+					c.rdb.Set(ctx, "presence:"+c.userID.String(), statusData.Status, 90*time.Second)
+					// Broadcast to all channels
+					for _, chID := range channelIDs {
+						c.hub.BroadcastToChannel(chID, Event{
+							Type: EventPresenceUpdate,
+							Data: map[string]string{
+								"userId": c.userID.String(),
+								"status": statusData.Status,
+							},
+						})
+					}
+				}
+			}
+
+		case "TYPING_START":
+			var td typingData
+			if err := json.Unmarshal(msg.Data, &td); err == nil && td.ChannelID != "" {
+				chID, err := uuid.Parse(td.ChannelID)
+				if err != nil {
+					continue
+				}
+
+				// Debounce with Redis: only broadcast if key doesn't exist
+				if c.rdb != nil {
+					key := "typing:" + td.ChannelID + ":" + c.userID.String()
+					set, _ := c.rdb.SetNX(ctx, key, "1", 8*time.Second).Result()
+					if !set {
+						continue // already typing, skip broadcast
+					}
+				}
+
+				c.hub.BroadcastToChannel(chID, Event{
+					Type: EventTypingStart,
+					Data: map[string]string{
+						"channelId": td.ChannelID,
+						"userId":    c.userID.String(),
+					},
+				})
+			}
+		}
 	}
 }
 
@@ -142,6 +250,10 @@ func getUserChannelIDs(ctx context.Context, db *pgxpool.Pool, userID uuid.UUID) 
 		FROM channels c
 		INNER JOIN server_members sm ON sm.server_id = c.server_id
 		WHERE sm.user_id = $1
+		UNION
+		SELECT dm.channel_id
+		FROM dm_members dm
+		WHERE dm.user_id = $1
 	`
 
 	rows, err := db.Query(ctx, query, userID)
