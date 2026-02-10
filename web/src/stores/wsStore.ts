@@ -70,6 +70,21 @@ export const useWSStore = create<WSState>((set) => ({
       }
     });
 
+    wsClient.on('CHANNEL_UPDATE', (data: unknown) => {
+      const payload = data as { channel: Channel } | Channel;
+      const channel = 'channel' in payload ? payload.channel : payload;
+      if (channel) {
+        useServerStore.getState().updateChannel(channel);
+      }
+    });
+
+    wsClient.on('CHANNEL_DELETE', (data: unknown) => {
+      const payload = data as { channelId: string; serverId: string };
+      if (payload.channelId) {
+        useServerStore.getState().removeChannel(payload.channelId);
+      }
+    });
+
     wsClient.on('PRESENCE_UPDATE', (data: unknown) => {
       const payload = data as { userId: string; status: string };
       if (payload.userId && payload.status) {

@@ -54,7 +54,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 	// Create handlers
 	authHandler := NewAuthHandler(db, cfg, rdb, emailSvc)
 	serverHandler := NewServerHandler(db)
-	channelHandler := NewChannelHandler(db)
+	channelHandler := NewChannelHandler(db, hub)
 	messageHandler := NewMessageHandler(db, hub)
 	inviteHandler := NewInviteHandler(db, hub)
 	userHandler := NewUserHandler(db, rdb, fileStorage, cfg)
@@ -101,6 +101,8 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 			// Channels (nested under servers)
 			r.Get("/{serverID}/channels", channelHandler.List)
 			r.Post("/{serverID}/channels", channelHandler.Create)
+			r.Patch("/{serverID}/channels/{channelID}", channelHandler.Update)
+			r.Delete("/{serverID}/channels/{channelID}", channelHandler.Delete)
 
 			// Channel categories
 			r.Get("/{serverID}/categories", categoryHandler.List)

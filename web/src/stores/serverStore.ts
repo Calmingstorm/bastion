@@ -21,6 +21,8 @@ interface ServerState {
   createServer: (name: string) => Promise<void>;
   createChannel: (serverId: string, name: string, topic?: string) => Promise<void>;
   addChannel: (channel: Channel) => void;
+  updateChannel: (channel: Channel) => void;
+  removeChannel: (channelId: string) => void;
   reset: () => void;
 }
 
@@ -144,6 +146,26 @@ export const useServerStore = create<ServerState>((set, get) => ({
         }
       }
       return {};
+    });
+  },
+
+  updateChannel: (channel: Channel) => {
+    set((state) => ({
+      channels: state.channels.map((c) =>
+        c.id === channel.id ? { ...c, ...channel } : c
+      ),
+    }));
+  },
+
+  removeChannel: (channelId: string) => {
+    set((state) => {
+      const remaining = state.channels.filter((c) => c.id !== channelId);
+      const updates: Partial<ServerState> = { channels: remaining };
+      // Auto-select next channel if the deleted one was selected
+      if (state.selectedChannelId === channelId) {
+        updates.selectedChannelId = remaining.length > 0 ? remaining[0].id : null;
+      }
+      return updates;
     });
   },
 

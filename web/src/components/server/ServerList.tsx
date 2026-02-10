@@ -4,6 +4,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { useDMStore } from '../../stores/dmStore';
 import { ServerIcon } from './ServerIcon';
 import { CreateServerDialog } from './CreateServerDialog';
+import bastionLogo from '../../assets/bastion-logo.svg';
 
 export function ServerList() {
   // Targeted selectors to avoid cascading re-renders
@@ -36,13 +37,13 @@ export function ServerList() {
           <Tooltip.Trigger asChild>
             <button
               onClick={handleHomeClick}
-              className={`mb-1 flex h-12 w-12 items-center justify-center rounded-xl text-xl font-bold text-white transition-all duration-200 ${
+              className={`mb-1 flex h-12 w-12 items-center justify-center rounded-xl transition-all duration-200 ${
                 !selectedServerId
                   ? 'bg-[var(--accent)]'
                   : 'bg-[var(--accent)] hover:bg-[var(--accent-hover)]'
               }`}
             >
-              B
+              <img src={bastionLogo} alt="Bastion" className="h-8 w-8" />
             </button>
           </Tooltip.Trigger>
           <Tooltip.Portal>

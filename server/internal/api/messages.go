@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -17,6 +18,8 @@ import (
 	"github.com/Calmingstorm/bastion/server/internal/permissions"
 	"github.com/Calmingstorm/bastion/server/internal/realtime"
 )
+
+var mentionRegex = regexp.MustCompile(`@([a-zA-Z0-9_-]+)`)
 
 type MessageHandler struct {
 	db  *pgxpool.Pool
@@ -209,6 +212,11 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 		Data: msg,
 	})
 
+	// Process @mentions (only for server channels, not DMs)
+	if serverID != nil {
+		h.processMentions(r, *serverID, channelID, userID, req.Content)
+	}
+
 	writeJSON(w, http.StatusCreated, msg)
 }
 
@@ -343,4 +351,89 @@ func (h *MessageHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// processMentions parses @mentions from message content and sends notifications.
+func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, authorID uuid.UUID, content string) {
+	matches := mentionRegex.FindAllStringSubmatch(content, -1)
+	if len(matches) == 0 {
+		return
+	}
+
+	// Collect unique mentioned usernames
+	mentionedNames := make(map[string]struct{})
+	mentionAll := false
+	for _, m := range matches {
+		name := strings.ToLower(m[1])
+		if name == "bastion" {
+			mentionAll = true
+		} else {
+			mentionedNames[name] = struct{}{}
+		}
+	}
+
+	// Get all server members
+	rows, err := h.db.Query(r.Context(),
+		`SELECT sm.user_id, u.username FROM server_members sm
+		 INNER JOIN users u ON u.id = sm.user_id
+		 WHERE sm.server_id = $1`, serverID,
+	)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to query members for mentions")
+		return
+	}
+	defer rows.Close()
+
+	type memberInfo struct {
+		id       uuid.UUID
+		username string
+	}
+	var members []memberInfo
+	for rows.Next() {
+		var m memberInfo
+		if err := rows.Scan(&m.id, &m.username); err != nil {
+			continue
+		}
+		members = append(members, m)
+	}
+
+	// Determine who to notify
+	notifySet := make(map[uuid.UUID]struct{})
+	if mentionAll {
+		// @bastion: notify all server members except author
+		for _, m := range members {
+			if m.id != authorID {
+				notifySet[m.id] = struct{}{}
+			}
+		}
+	}
+	// Individual @username mentions
+	for _, m := range members {
+		if _, ok := mentionedNames[strings.ToLower(m.username)]; ok && m.id != authorID {
+			notifySet[m.id] = struct{}{}
+		}
+	}
+
+	// Send notifications
+	for uid := range notifySet {
+		// Increment mention count in read_states
+		_, err := h.db.Exec(r.Context(),
+			`INSERT INTO read_states (user_id, channel_id, mention_count)
+			 VALUES ($1, $2, 1)
+			 ON CONFLICT (user_id, channel_id) DO UPDATE SET mention_count = read_states.mention_count + 1`,
+			uid, channelID,
+		)
+		if err != nil {
+			log.Error().Err(err).Msg("failed to increment mention count")
+		}
+
+		// Notify via WebSocket
+		h.hub.BroadcastToUser(uid, realtime.Event{
+			Type: realtime.EventNotification,
+			Data: map[string]any{
+				"channelId":    channelID.String(),
+				"mentionCount": 1,
+			},
+		})
+	}
 }

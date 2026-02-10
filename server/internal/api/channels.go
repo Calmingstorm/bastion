@@ -6,25 +6,50 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
 
 	"github.com/Calmingstorm/bastion/server/internal/auth"
 	"github.com/Calmingstorm/bastion/server/internal/models"
 	"github.com/Calmingstorm/bastion/server/internal/permissions"
+	"github.com/Calmingstorm/bastion/server/internal/realtime"
 )
 
 type ChannelHandler struct {
-	db *pgxpool.Pool
+	db  *pgxpool.Pool
+	hub *realtime.Hub
 }
 
-func NewChannelHandler(db *pgxpool.Pool) *ChannelHandler {
-	return &ChannelHandler{db: db}
+func NewChannelHandler(db *pgxpool.Pool, hub *realtime.Hub) *ChannelHandler {
+	return &ChannelHandler{db: db, hub: hub}
 }
 
 type createChannelRequest struct {
 	Name  string  `json:"name"`
 	Topic *string `json:"topic,omitempty"`
+}
+
+type updateChannelRequest struct {
+	Name  *string `json:"name,omitempty"`
+	Topic *string `json:"topic,omitempty"`
+}
+
+// broadcastToServer sends an event to all channels in a server so all connected users see it.
+func (h *ChannelHandler) broadcastToServer(r *http.Request, serverID uuid.UUID, event realtime.Event) {
+	rows, err := h.db.Query(r.Context(), `SELECT id FROM channels WHERE server_id = $1`, serverID)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to query server channels for broadcast")
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var chID uuid.UUID
+		if err := rows.Scan(&chID); err != nil {
+			continue
+		}
+		h.hub.BroadcastToChannel(chID, event)
+	}
 }
 
 func (h *ChannelHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -135,5 +160,157 @@ func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Broadcast to all server channels so every connected user sees the new channel
+	h.broadcastToServer(r, serverID, realtime.Event{
+		Type: realtime.EventChannelCreate,
+		Data: ch,
+	})
+
 	writeJSON(w, http.StatusCreated, ch)
+}
+
+func (h *ChannelHandler) Update(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromContext(r.Context())
+	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		return
+	}
+	channelID, err := parseUUID(chi.URLParam(r, "channelID"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid channel ID"))
+		return
+	}
+
+	if _, ok := requirePermission(h.db, w, r, serverID, userID, permissions.ManageChannels); !ok {
+		return
+	}
+
+	var req updateChannelRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		return
+	}
+
+	// Normalize name if provided
+	if req.Name != nil {
+		name := strings.TrimSpace(strings.ToLower(*req.Name))
+		name = strings.ReplaceAll(name, " ", "-")
+		if name == "" || len(name) > 100 {
+			writeJSON(w, http.StatusBadRequest, errorBody("channel name must be 1-100 characters"))
+			return
+		}
+		req.Name = &name
+	}
+
+	// Build dynamic update
+	var ch models.Channel
+	if req.Name != nil && req.Topic != nil {
+		err = h.db.QueryRow(r.Context(),
+			`UPDATE channels SET name = $1, topic = $2 WHERE id = $3 AND server_id = $4
+			 RETURNING id, server_id, name, topic, type, position, category_id, created_at`,
+			*req.Name, *req.Topic, channelID, serverID,
+		).Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Topic, &ch.Type, &ch.Position, &ch.CategoryID, &ch.CreatedAt)
+	} else if req.Name != nil {
+		err = h.db.QueryRow(r.Context(),
+			`UPDATE channels SET name = $1 WHERE id = $2 AND server_id = $3
+			 RETURNING id, server_id, name, topic, type, position, category_id, created_at`,
+			*req.Name, channelID, serverID,
+		).Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Topic, &ch.Type, &ch.Position, &ch.CategoryID, &ch.CreatedAt)
+	} else if req.Topic != nil {
+		err = h.db.QueryRow(r.Context(),
+			`UPDATE channels SET topic = $1 WHERE id = $2 AND server_id = $3
+			 RETURNING id, server_id, name, topic, type, position, category_id, created_at`,
+			*req.Topic, channelID, serverID,
+		).Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Topic, &ch.Type, &ch.Position, &ch.CategoryID, &ch.CreatedAt)
+	} else {
+		writeJSON(w, http.StatusBadRequest, errorBody("nothing to update"))
+		return
+	}
+
+	if err != nil {
+		log.Error().Err(err).Msg("failed to update channel")
+		writeJSON(w, http.StatusNotFound, errorBody("channel not found"))
+		return
+	}
+
+	// Broadcast to all server channels
+	h.broadcastToServer(r, serverID, realtime.Event{
+		Type: realtime.EventChannelUpdate,
+		Data: ch,
+	})
+
+	// Audit log
+	writeAuditLog(h.db, r.Context(), serverID, userID, "CHANNEL_UPDATE", "channel", channelID, map[string]any{
+		"name":  ch.Name,
+		"topic": ch.Topic,
+	}, nil)
+
+	writeJSON(w, http.StatusOK, ch)
+}
+
+func (h *ChannelHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromContext(r.Context())
+	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		return
+	}
+	channelID, err := parseUUID(chi.URLParam(r, "channelID"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid channel ID"))
+		return
+	}
+
+	if _, ok := requirePermission(h.db, w, r, serverID, userID, permissions.ManageChannels); !ok {
+		return
+	}
+
+	// Prevent deleting the last channel
+	var channelCount int
+	err = h.db.QueryRow(r.Context(),
+		`SELECT COUNT(*) FROM channels WHERE server_id = $1`, serverID,
+	).Scan(&channelCount)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to count channels")
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+	if channelCount <= 1 {
+		writeJSON(w, http.StatusBadRequest, errorBody("cannot delete the last channel"))
+		return
+	}
+
+	// Get channel name for audit log before deleting
+	var channelName string
+	h.db.QueryRow(r.Context(), `SELECT name FROM channels WHERE id = $1 AND server_id = $2`, channelID, serverID).Scan(&channelName)
+
+	// Broadcast BEFORE delete so clients still have the channel context
+	h.broadcastToServer(r, serverID, realtime.Event{
+		Type: realtime.EventChannelDelete,
+		Data: map[string]string{
+			"channelId": channelID.String(),
+			"serverId":  serverID.String(),
+		},
+	})
+
+	result, err := h.db.Exec(r.Context(),
+		`DELETE FROM channels WHERE id = $1 AND server_id = $2`, channelID, serverID,
+	)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to delete channel")
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+	if result.RowsAffected() == 0 {
+		writeJSON(w, http.StatusNotFound, errorBody("channel not found"))
+		return
+	}
+
+	// Audit log
+	writeAuditLog(h.db, r.Context(), serverID, userID, "CHANNEL_DELETE", "channel", channelID, map[string]any{
+		"name": channelName,
+	}, nil)
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

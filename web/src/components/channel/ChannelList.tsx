@@ -184,6 +184,8 @@ export function ChannelList() {
                         channel={channel}
                         isSelected={channel.id === selectedChannelId}
                         onClick={() => selectChannel(channel.id)}
+                        canManage={!!isOwner}
+                        serverId={selectedServerId || undefined}
                       />
                     ))}
                   </div>
@@ -221,6 +223,8 @@ export function ChannelList() {
                           channel={channel}
                           isSelected={channel.id === selectedChannelId}
                           onClick={() => selectChannel(channel.id)}
+                          canManage={!!isOwner}
+                          serverId={selectedServerId || undefined}
                         />
                       ))}
                     </div>

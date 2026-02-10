@@ -237,6 +237,25 @@ export async function apiCreateChannel(
   return response.data;
 }
 
+export async function apiUpdateChannel(
+  serverId: string,
+  channelId: string,
+  data: { name?: string; topic?: string }
+): Promise<Channel> {
+  const response = await apiClient.patch<Channel>(
+    `/api/servers/${serverId}/channels/${channelId}`,
+    data
+  );
+  return response.data;
+}
+
+export async function apiDeleteChannel(
+  serverId: string,
+  channelId: string
+): Promise<void> {
+  await apiClient.delete(`/api/servers/${serverId}/channels/${channelId}`);
+}
+
 // ---- Message API ----
 
 export async function apiGetMessages(

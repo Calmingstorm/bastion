@@ -15,9 +15,13 @@ import {
   apiKickMember,
   apiBanMember,
   apiTimeoutMember,
+  apiGetChannels,
+  apiCreateChannel,
+  apiUpdateChannel,
+  apiDeleteChannel,
 } from '../../api/client';
 import { useServerStore } from '../../stores/serverStore';
-import type { Role, ServerBan, AuditLogEntry, MemberWithUser } from '../../types';
+import type { Role, ServerBan, AuditLogEntry, MemberWithUser, Channel } from '../../types';
 
 // Permission bitfield constants — must match server/internal/permissions/permissions.go
 const PERMISSIONS = {
@@ -56,7 +60,7 @@ const PERMISSION_LABELS: { key: keyof typeof PERMISSIONS; label: string; desc: s
   { key: 'Administrator', label: 'Administrator', desc: 'Full access — bypasses all checks' },
 ];
 
-type Tab = 'overview' | 'roles' | 'members' | 'bans' | 'audit';
+type Tab = 'overview' | 'channels' | 'roles' | 'members' | 'bans' | 'audit';
 
 interface ServerSettingsDialogProps {
   open: boolean;
@@ -69,6 +73,7 @@ export function ServerSettingsDialog({ open, onOpenChange, serverId }: ServerSet
 
   const TAB_LABELS: Record<Tab, string> = {
     overview: 'Overview',
+    channels: 'Channels',
     roles: 'Roles',
     members: 'Members',
     bans: 'Bans',
@@ -79,9 +84,9 @@ export function ServerSettingsDialog({ open, onOpenChange, serverId }: ServerSet
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/70" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 flex h-[80vh] w-full max-w-3xl -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-md bg-[var(--bg-primary)] shadow-xl">
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 flex h-[80vh] w-full max-w-5xl -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-md bg-[var(--bg-primary)] shadow-xl">
           {/* Sidebar */}
-          <div className="flex w-48 shrink-0 flex-col bg-[var(--bg-secondary)] p-3">
+          <div className="flex w-52 shrink-0 flex-col border-r border-[var(--border)] bg-[var(--bg-secondary)] p-3">
             <Dialog.Title className="mb-3 px-2 text-xs font-bold uppercase tracking-wide text-[var(--text-muted)]">
               Server Settings
             </Dialog.Title>
@@ -101,8 +106,9 @@ export function ServerSettingsDialog({ open, onOpenChange, serverId }: ServerSet
           </div>
 
           {/* Content */}
-          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-6">
+          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-8">
             {tab === 'overview' && <OverviewTab serverId={serverId} />}
+            {tab === 'channels' && <ChannelsTab serverId={serverId} />}
             {tab === 'roles' && <RolesTab serverId={serverId} />}
             {tab === 'members' && <MembersTab serverId={serverId} />}
             {tab === 'bans' && <BansTab serverId={serverId} />}
@@ -170,6 +176,140 @@ function OverviewTab({ serverId }: { serverId: string }) {
         {saved ? 'Saved!' : isSaving ? 'Saving...' : 'Save Changes'}
       </button>
     </form>
+  );
+}
+
+/* ---- Channels ---- */
+
+function ChannelsTab({ serverId }: { serverId: string }) {
+  const [channels, setChannels] = useState<Channel[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editTopic, setEditTopic] = useState('');
+  const [newName, setNewName] = useState('');
+  const [newTopic, setNewTopic] = useState('');
+  const [isCreating, setIsCreating] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+
+  useEffect(() => {
+    apiGetChannels(serverId)
+      .then((chs) => setChannels(chs.sort((a, b) => a.position - b.position)))
+      .catch(() => {})
+      .finally(() => setIsLoading(false));
+  }, [serverId]);
+
+  const handleCreate = async () => {
+    const name = newName.trim().toLowerCase().replace(/\s+/g, '-');
+    if (!name) return;
+    setIsCreating(true);
+    try {
+      const ch = await apiCreateChannel(serverId, name, newTopic.trim() || undefined);
+      setChannels((prev) => [...prev, ch].sort((a, b) => a.position - b.position));
+      setNewName('');
+      setNewTopic('');
+    } catch { /* handled */ } finally {
+      setIsCreating(false);
+    }
+  };
+
+  const handleSaveEdit = async (channelId: string) => {
+    const name = editName.trim().toLowerCase().replace(/\s+/g, '-');
+    if (!name) return;
+    try {
+      const updated = await apiUpdateChannel(serverId, channelId, { name, topic: editTopic.trim() || undefined });
+      setChannels((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
+      useServerStore.getState().updateChannel(updated);
+    } catch { /* handled */ }
+    setEditingId(null);
+  };
+
+  const handleDelete = async (channelId: string) => {
+    try {
+      await apiDeleteChannel(serverId, channelId);
+      setChannels((prev) => prev.filter((c) => c.id !== channelId));
+    } catch { /* handled */ }
+    setDeleteConfirm(null);
+  };
+
+  if (isLoading) return <Spinner />;
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-lg font-bold text-[var(--text-primary)]">Channels — {channels.length}</h2>
+
+      <div className="space-y-1">
+        {channels.map((ch) => (
+          <div key={ch.id}>
+            {editingId === ch.id ? (
+              <div className="flex items-center gap-2 rounded bg-[var(--bg-secondary)] px-3 py-2">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-[var(--text-muted)]">
+                  <path d="M4 9h16M4 15h16M10 3l-2 18M16 3l-2 18" />
+                </svg>
+                <input type="text" value={editName} onChange={(e) => setEditName(e.target.value)}
+                  className="min-w-0 flex-1 rounded-[3px] bg-[var(--bg-tertiary)] px-2 py-1.5 text-sm text-[var(--text-primary)] outline-none focus:ring-1 focus:ring-[var(--accent)]"
+                  placeholder="Channel name" autoFocus
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSaveEdit(ch.id); } if (e.key === 'Escape') setEditingId(null); }} />
+                <input type="text" value={editTopic} onChange={(e) => setEditTopic(e.target.value)}
+                  className="min-w-0 flex-1 rounded-[3px] bg-[var(--bg-tertiary)] px-2 py-1.5 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] outline-none focus:ring-1 focus:ring-[var(--accent)]"
+                  placeholder="Topic (optional)"
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSaveEdit(ch.id); } if (e.key === 'Escape') setEditingId(null); }} />
+                <button onClick={() => handleSaveEdit(ch.id)}
+                  className="shrink-0 rounded-[3px] bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white hover:bg-[var(--accent-hover)]">Save</button>
+                <button onClick={() => setEditingId(null)}
+                  className="shrink-0 rounded-[3px] px-3 py-1.5 text-xs font-medium text-[var(--text-muted)] hover:text-[var(--text-primary)]">Cancel</button>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between rounded px-3 py-2 transition-colors hover:bg-[var(--bg-secondary)]">
+                <div className="flex items-center gap-2">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-[var(--text-muted)]">
+                    <path d="M4 9h16M4 15h16M10 3l-2 18M16 3l-2 18" />
+                  </svg>
+                  <span className="text-sm font-medium text-[var(--text-primary)]">{ch.name}</span>
+                  {ch.topic && <span className="text-xs text-[var(--text-muted)]">— {ch.topic}</span>}
+                </div>
+                <div className="flex gap-1">
+                  <button onClick={() => { setEditingId(ch.id); setEditName(ch.name); setEditTopic(ch.topic || ''); }}
+                    className="rounded px-2 py-1 text-xs text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)] hover:text-[var(--text-primary)]">Edit</button>
+                  {channels.length > 1 && (
+                    deleteConfirm === ch.id ? (
+                      <div className="flex gap-1">
+                        <button onClick={() => handleDelete(ch.id)}
+                          className="rounded px-2 py-1 text-xs font-medium text-[var(--danger)] hover:bg-[var(--danger)]/10">Confirm</button>
+                        <button onClick={() => setDeleteConfirm(null)}
+                          className="rounded px-2 py-1 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)]">Cancel</button>
+                      </div>
+                    ) : (
+                      <button onClick={() => setDeleteConfirm(ch.id)}
+                        className="rounded px-2 py-1 text-xs text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)] hover:text-[var(--danger)]">Delete</button>
+                    )
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Create form */}
+      <div className="rounded-md border border-[var(--border)] bg-[var(--bg-secondary)] p-4">
+        <h3 className="mb-3 text-sm font-bold text-[var(--text-primary)]">Create Channel</h3>
+        <div className="flex gap-2">
+          <input type="text" value={newName} onChange={(e) => setNewName(e.target.value)}
+            placeholder="channel-name"
+            className="min-w-0 flex-1 rounded-[3px] bg-[var(--bg-tertiary)] px-3 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] outline-none focus:ring-1 focus:ring-[var(--accent)]"
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleCreate(); } }} />
+          <input type="text" value={newTopic} onChange={(e) => setNewTopic(e.target.value)}
+            placeholder="Topic (optional)"
+            className="min-w-0 flex-1 rounded-[3px] bg-[var(--bg-tertiary)] px-3 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] outline-none focus:ring-1 focus:ring-[var(--accent)]"
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleCreate(); } }} />
+          <button onClick={handleCreate} disabled={isCreating || !newName.trim()}
+            className="shrink-0 rounded-[3px] bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--accent-hover)] disabled:opacity-50">
+            Create
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

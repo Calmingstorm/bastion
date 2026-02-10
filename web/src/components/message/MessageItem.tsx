@@ -124,6 +124,28 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
     }
   };
 
+  const renderMessageContent = (text: string) => {
+    const parts = text.split(/(@[a-zA-Z0-9_-]+)/g);
+    return parts.map((part, i) => {
+      if (part.match(/^@[a-zA-Z0-9_-]+$/)) {
+        const isBastion = part.toLowerCase() === '@bastion';
+        return (
+          <span
+            key={i}
+            className={`rounded px-0.5 font-medium ${
+              isBastion
+                ? 'bg-[var(--accent)]/20 text-[var(--accent)]'
+                : 'bg-[var(--accent)]/10 text-[var(--accent)]'
+            }`}
+          >
+            {part}
+          </span>
+        );
+      }
+      return part;
+    });
+  };
+
   const renderContent = () => {
     if (isEditing) {
       return (
@@ -157,7 +179,7 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
     return (
       <>
         <p className="whitespace-pre-wrap break-words text-[15px] text-[var(--text-secondary)]">
-          {content}
+          {renderMessageContent(content)}
           {editedAt && (
             <span className="ml-1 text-[10px] text-[var(--text-muted)]">
               (edited)
