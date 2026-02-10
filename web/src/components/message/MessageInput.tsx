@@ -26,6 +26,7 @@ export function MessageInput() {
   const selectedServerId = useServerStore((s) => s.selectedServerId);
   const channels = useServerStore((s) => s.channels);
   const selectedDMId = useDMStore((s) => s.selectedDMId);
+  const dmChannels = useDMStore((s) => s.dmChannels);
   const gifEnabled = useFeatureStore((s) => s.features.gifSearch);
 
   // Mention autocomplete state
@@ -263,7 +264,6 @@ export function MessageInput() {
   if (!activeChannelId) return null;
 
   // Compute placeholder text
-  const dmChannels = useDMStore((s) => s.dmChannels);
   const dmChannel = selectedDMId ? dmChannels.find((d) => d.id === selectedDMId) : null;
   const dmRecipient = dmChannel?.recipients?.[0];
 
