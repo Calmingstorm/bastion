@@ -12,7 +12,7 @@ export function GifPicker({ onSelect }: GifPickerProps) {
   const [gifs, setGifs] = useState<GifResult[]>([]);
   const [loading, setLoading] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   // Close on outside click
   useEffect(() => {

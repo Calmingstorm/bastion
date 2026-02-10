@@ -145,7 +145,6 @@ md.core.ruler.after('inline', 'image_embed', (state: StateCore) => {
     if (!children) continue;
 
     // Check if inline contains exactly one link with no other text
-    const linkTokens = children.filter((t: Token) => t.type !== 'softbreak' && t.content?.trim() !== '');
     const linkOpens = children.filter((t: Token) => t.type === 'link_open');
     const linkCloses = children.filter((t: Token) => t.type === 'link_close');
 
