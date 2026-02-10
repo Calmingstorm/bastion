@@ -357,20 +357,22 @@ export function MessageInput() {
         )}
 
         {/* Attachment button */}
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          className="mb-[11px] ml-2 shrink-0 rounded p-1 text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
-          title="Attach file"
-        >
-          <svg
-            width="24"
-            height="24"
-            viewBox="0 0 24 24"
-            fill="currentColor"
+        <div className="flex h-[44px] shrink-0 items-center self-end ml-2">
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="shrink-0 rounded p-1 text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
+            title="Attach file"
           >
-            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 11h-4v4h-2v-4H7v-2h4V7h2v4h4v2z" />
-          </svg>
-        </button>
+            <svg
+              width="24"
+              height="24"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+            >
+              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 11h-4v4h-2v-4H7v-2h4V7h2v4h4v2z" />
+            </svg>
+          </button>
+        </div>
         <input
           ref={fileInputRef}
           type="file"
@@ -402,11 +404,11 @@ export function MessageInput() {
           className="max-h-[300px] min-h-[44px] flex-1 resize-none bg-transparent px-3 py-2.5 text-[var(--text-primary)] placeholder-[var(--text-muted)] outline-none"
         />
 
-        {/* GIF picker — only shown when Tenor API key is configured */}
-        {gifEnabled && <GifPicker onSelect={handleGifSelect} />}
-
-        {/* Emoji picker */}
-        <EmojiInputPicker onSelect={insertEmoji} />
+        {/* GIF + Emoji buttons */}
+        <div className="flex h-[44px] shrink-0 items-center self-end mr-1">
+          {gifEnabled && <GifPicker onSelect={handleGifSelect} />}
+          <EmojiInputPicker onSelect={insertEmoji} />
+        </div>
       </div>
     </div>
   );

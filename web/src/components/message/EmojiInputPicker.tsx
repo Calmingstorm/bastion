@@ -31,7 +31,7 @@ export function EmojiInputPicker({ onSelect }: EmojiInputPickerProps) {
     <div ref={containerRef} className="relative">
       <button
         onClick={() => setOpen((v) => !v)}
-        className="mb-[11px] mr-2 shrink-0 rounded p-1 text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
+        className="shrink-0 rounded p-1 text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
         title="Emoji"
         type="button"
       >

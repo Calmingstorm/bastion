@@ -52,7 +52,7 @@ export function GifPicker({ onSelect }: GifPickerProps) {
     <div ref={containerRef} className="relative">
       <button
         onClick={() => setOpen((v) => !v)}
-        className="mb-[11px] shrink-0 rounded px-1.5 py-0.5 text-xs font-bold text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
+        className="shrink-0 rounded px-1.5 py-0.5 text-xs font-bold text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
         title="GIF"
         type="button"
       >
