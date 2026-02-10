@@ -44,30 +44,32 @@ func (c *RedisConfig) Addr() string {
 
 func Load() *Config {
 	return &Config{
-		Host: getEnv("BASTION_HOST", "0.0.0.0"),
-		Port: getEnv("BASTION_PORT", "8080"),
+		Host: getEnvMulti("0.0.0.0", "BASTION_HOST"),
+		Port: getEnvMulti("8080", "BASTION_PORT"),
 		DB: DBConfig{
-			Host:     getEnv("BASTION_DB_HOST", "localhost"),
-			Port:     getEnv("BASTION_DB_PORT", "5432"),
-			Name:     getEnv("BASTION_DB_NAME", "bastion"),
-			User:     getEnv("BASTION_DB_USER", "bastion"),
-			Password: getEnv("BASTION_DB_PASSWORD", "bastion"),
+			Host:     getEnvMulti("localhost", "BASTION_DB_HOST", "DB_HOST"),
+			Port:     getEnvMulti("5432", "BASTION_DB_PORT", "DB_PORT"),
+			Name:     getEnvMulti("bastion", "BASTION_DB_NAME", "DB_NAME"),
+			User:     getEnvMulti("bastion", "BASTION_DB_USER", "DB_USER"),
+			Password: getEnvMulti("bastion", "BASTION_DB_PASSWORD", "DB_PASSWORD"),
 		},
 		JWT: JWTConfig{
-			Secret:     getEnv("BASTION_JWT_SECRET", "change-me-in-production"),
-			AccessTTL:  parseDuration(getEnv("BASTION_JWT_ACCESS_TTL", "15m")),
-			RefreshTTL: parseDuration(getEnv("BASTION_JWT_REFRESH_TTL", "168h")),
+			Secret:     getEnvMulti("change-me-in-production", "BASTION_JWT_SECRET", "JWT_SECRET"),
+			AccessTTL:  parseDuration(getEnvMulti("15m", "BASTION_JWT_ACCESS_TTL", "JWT_ACCESS_TTL")),
+			RefreshTTL: parseDuration(getEnvMulti("168h", "BASTION_JWT_REFRESH_TTL", "JWT_REFRESH_TTL")),
 		},
 		Redis: RedisConfig{
-			Host: getEnv("BASTION_REDIS_HOST", "localhost"),
-			Port: getEnv("BASTION_REDIS_PORT", "6379"),
+			Host: getEnvMulti("localhost", "BASTION_REDIS_HOST", "REDIS_HOST"),
+			Port: getEnvMulti("6379", "BASTION_REDIS_PORT", "REDIS_PORT"),
 		},
 	}
 }
 
-func getEnv(key, fallback string) string {
-	if val, ok := os.LookupEnv(key); ok && val != "" {
-		return val
+func getEnvMulti(fallback string, keys ...string) string {
+	for _, key := range keys {
+		if val, ok := os.LookupEnv(key); ok && val != "" {
+			return val
+		}
 	}
 	return fallback
 }
