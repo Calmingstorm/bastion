@@ -15,17 +15,18 @@ type Service struct {
 	mailgunCfg *config.MailgunConfig
 }
 
-// New creates an email service. Prefer Mailgun HTTP API; fall back to SMTP.
+// New creates an email service. Configure SMTP or Mailgun HTTP API (or both).
+// When both are configured, SMTP is used first; Mailgun serves as a fallback.
 func New(smtpCfg *config.SMTPConfig, mailgunCfg *config.MailgunConfig) *Service {
 	return &Service{smtpCfg: smtpCfg, mailgunCfg: mailgunCfg}
 }
 
 func (s *Service) Send(to, subject, htmlBody string) error {
-	if s.mailgunCfg != nil && s.mailgunCfg.Enabled() {
-		return s.sendMailgun(to, subject, htmlBody)
-	}
 	if s.smtpCfg != nil && s.smtpCfg.Enabled() {
 		return s.sendSMTP(to, subject, htmlBody)
+	}
+	if s.mailgunCfg != nil && s.mailgunCfg.Enabled() {
+		return s.sendMailgun(to, subject, htmlBody)
 	}
 	return fmt.Errorf("no email backend configured")
 }

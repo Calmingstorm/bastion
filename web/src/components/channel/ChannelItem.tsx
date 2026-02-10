@@ -66,6 +66,7 @@ export function ChannelItem({ channel, isSelected, onClick, canManage, serverId 
     if (!serverId) return;
     try {
       await apiDeleteChannel(serverId, channel.id);
+      useServerStore.getState().removeChannel(channel.id);
     } catch { /* handled */ }
     setShowDeleteConfirm(false);
   };

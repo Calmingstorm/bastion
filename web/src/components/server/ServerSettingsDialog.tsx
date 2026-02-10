@@ -228,6 +228,7 @@ function ChannelsTab({ serverId }: { serverId: string }) {
     try {
       await apiDeleteChannel(serverId, channelId);
       setChannels((prev) => prev.filter((c) => c.id !== channelId));
+      useServerStore.getState().removeChannel(channelId);
     } catch { /* handled */ }
     setDeleteConfirm(null);
   };
