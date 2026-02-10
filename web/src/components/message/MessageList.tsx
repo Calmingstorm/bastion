@@ -86,7 +86,7 @@ export function MessageList({ onToggleMembers, onToggleSidebar }: MessageListPro
     (s) => (activeChannelId ? s.isLoading[activeChannelId] ?? false : false)
   );
 
-  const { containerRef, scrollToBottom } = useAutoScroll([
+  const { containerRef, scrollToBottomPersistent } = useAutoScroll([
     channelMessages.length,
     activeChannelId,
   ]);
@@ -106,17 +106,18 @@ export function MessageList({ onToggleMembers, onToggleSidebar }: MessageListPro
 
   // Always scroll to bottom after the current user sends a message
   useEffect(() => {
-    const handler = () => setTimeout(scrollToBottom, 50);
+    const handler = () => scrollToBottomPersistent();
     window.addEventListener('bastion:message-sent', handler);
     return () => window.removeEventListener('bastion:message-sent', handler);
-  }, [scrollToBottom]);
+  }, [scrollToBottomPersistent]);
 
   // Fetch messages when channel changes
   useEffect(() => {
     if (activeChannelId && channelMessages.length === 0 && !channelIsLoading) {
       fetchMessages(activeChannelId).then(() => {
-        // Scroll to bottom on initial load
-        setTimeout(scrollToBottom, 50);
+        // Scroll to bottom on initial load — use persistent version to
+        // keep re-scrolling as images/GIFs/embeds load asynchronously
+        scrollToBottomPersistent();
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
