@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, useSearchParams, Link } from 'react-router-dom';
 import { useAuthStore } from '../../stores/authStore';
 
 export function LoginForm() {
@@ -7,6 +7,8 @@ export function LoginForm() {
   const [password, setPassword] = useState('');
   const { login, isLoading, error, clearError } = useAuthStore();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const redirect = searchParams.get('redirect');
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -14,7 +16,8 @@ export function LoginForm() {
 
     try {
       await login(email, password);
-      navigate('/app');
+      // Navigate to redirect target (e.g. /invite/:code) or default to /app
+      navigate(redirect && redirect.startsWith('/') ? redirect : '/app');
     } catch {
       // Error is already set in the store
     }
@@ -92,7 +95,7 @@ export function LoginForm() {
       <p className="text-sm text-[var(--text-muted)]">
         Need an account?{' '}
         <Link
-          to="/register"
+          to={redirect ? `/register?redirect=${encodeURIComponent(redirect)}` : '/register'}
           className="text-[var(--accent)] hover:underline"
         >
           Register
