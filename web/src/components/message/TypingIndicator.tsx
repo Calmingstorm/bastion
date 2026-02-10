@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { useTypingStore } from '../../stores/typingStore';
 import { useAuthStore } from '../../stores/authStore';
 
@@ -7,7 +8,13 @@ interface TypingIndicatorProps {
 }
 
 export function TypingIndicator({ channelId, usernames }: TypingIndicatorProps) {
-  const typingUsers = useTypingStore((s) => s.getTypingUsers(channelId));
+  // Select the raw typing record (stable reference) instead of getTypingUsers
+  // which returns a new array on every call and breaks useSyncExternalStore
+  const channelTyping = useTypingStore((s) => s.typing[channelId]);
+  const typingUsers = useMemo(
+    () => (channelTyping ? Object.keys(channelTyping) : []),
+    [channelTyping]
+  );
   const currentUser = useAuthStore((s) => s.user);
 
   // Filter out the current user

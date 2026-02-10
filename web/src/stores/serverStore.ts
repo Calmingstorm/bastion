@@ -37,11 +37,34 @@ export const useServerStore = create<ServerState>((set, get) => ({
     set({ isLoadingServers: true, error: null });
     try {
       const servers = await apiGetServers();
-      set({ servers, isLoadingServers: false });
 
-      // If no server is selected and we have servers, select the first one
+      // If no server is selected and we have servers, merge server list +
+      // initial selection into a single state update to avoid cascading renders.
       if (!get().selectedServerId && servers.length > 0) {
-        await get().selectServer(servers[0].id);
+        set({
+          servers,
+          isLoadingServers: false,
+          selectedServerId: servers[0].id,
+          selectedChannelId: null,
+          channels: [],
+          isLoadingChannels: true,
+          error: null,
+        });
+
+        // Fetch channels for the auto-selected server
+        try {
+          const channels = await apiGetChannels(servers[0].id);
+          const sorted = channels.sort((a, b) => a.position - b.position);
+          set({
+            channels: sorted,
+            isLoadingChannels: false,
+            selectedChannelId: sorted.length > 0 ? sorted[0].id : null,
+          });
+        } catch {
+          set({ isLoadingChannels: false });
+        }
+      } else {
+        set({ servers, isLoadingServers: false });
       }
     } catch (err: unknown) {
       const message = extractErrorMessage(err, 'Failed to load servers.');
@@ -60,15 +83,12 @@ export const useServerStore = create<ServerState>((set, get) => ({
     try {
       const channels = await apiGetChannels(id);
       const sorted = channels.sort((a, b) => a.position - b.position);
+      // Merge channels + auto-select into a single state update
       set({
         channels: sorted,
         isLoadingChannels: false,
+        selectedChannelId: sorted.length > 0 ? sorted[0].id : null,
       });
-
-      // Auto-select first channel
-      if (sorted.length > 0) {
-        set({ selectedChannelId: sorted[0].id });
-      }
     } catch (err: unknown) {
       const message = extractErrorMessage(err, 'Failed to load channels.');
       set({ isLoadingChannels: false, error: message });

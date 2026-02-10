@@ -8,8 +8,8 @@ interface ChannelItemProps {
 }
 
 export function ChannelItem({ channel, isSelected, onClick }: ChannelItemProps) {
-  const hasUnread = useUnreadStore((s) => s.isUnread(channel.id));
-  const mentionCount = useUnreadStore((s) => s.getMentionCount(channel.id));
+  const hasUnread = useUnreadStore((s) => s.unreadChannels.has(channel.id));
+  const mentionCount = useUnreadStore((s) => s.readStates[channel.id]?.mentionCount || 0);
 
   return (
     <button

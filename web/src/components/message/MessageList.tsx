@@ -30,20 +30,25 @@ interface MessageListProps {
   onToggleMembers?: () => void;
 }
 
-export function MessageList({ onToggleMembers }: MessageListProps) {
-  const { selectedChannelId, channels } = useServerStore();
-  const { messages, hasMore, isLoading, fetchMessages } = useMessageStore();
-  const { ackChannel } = useUnreadStore();
+const EMPTY_MESSAGES: Message[] = [];
 
-  const channelMessages = selectedChannelId
-    ? messages[selectedChannelId] || []
-    : [];
-  const channelHasMore = selectedChannelId
-    ? hasMore[selectedChannelId] ?? true
-    : false;
-  const channelIsLoading = selectedChannelId
-    ? isLoading[selectedChannelId] ?? false
-    : false;
+export function MessageList({ onToggleMembers }: MessageListProps) {
+  // Use targeted selectors to avoid re-renders from unrelated store changes
+  const selectedChannelId = useServerStore((s) => s.selectedChannelId);
+  const channels = useServerStore((s) => s.channels);
+  const fetchMessages = useMessageStore((s) => s.fetchMessages);
+  const ackChannel = useUnreadStore((s) => s.ackChannel);
+
+  // Select per-channel data with stable empty fallbacks
+  const channelMessages = useMessageStore(
+    (s) => (selectedChannelId ? s.messages[selectedChannelId] : null) || EMPTY_MESSAGES
+  );
+  const channelHasMore = useMessageStore(
+    (s) => (selectedChannelId ? s.hasMore[selectedChannelId] ?? true : false)
+  );
+  const channelIsLoading = useMessageStore(
+    (s) => (selectedChannelId ? s.isLoading[selectedChannelId] ?? false : false)
+  );
   const selectedChannel = channels.find((c) => c.id === selectedChannelId);
 
   const { containerRef, scrollToBottom } = useAutoScroll([
@@ -66,13 +71,14 @@ export function MessageList({ onToggleMembers }: MessageListProps) {
 
   // Fetch messages when channel changes
   useEffect(() => {
-    if (selectedChannelId && !messages[selectedChannelId]) {
+    if (selectedChannelId && channelMessages.length === 0 && !channelIsLoading) {
       fetchMessages(selectedChannelId).then(() => {
         // Scroll to bottom on initial load
         setTimeout(scrollToBottom, 50);
       });
     }
-  }, [selectedChannelId, messages, fetchMessages, scrollToBottom]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedChannelId]);
 
   // Auto-ack when channel is selected and has messages
   useEffect(() => {
@@ -80,7 +86,9 @@ export function MessageList({ onToggleMembers }: MessageListProps) {
       const lastMsg = channelMessages[channelMessages.length - 1];
       ackChannel(selectedChannelId, lastMsg.id);
     }
-  }, [selectedChannelId, channelMessages, ackChannel]);
+    // Only ack on channel switch or when new messages arrive (length changes)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedChannelId, channelMessages.length]);
 
   // Infinite scroll - load older messages
   const handleScroll = useCallback(() => {

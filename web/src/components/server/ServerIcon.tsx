@@ -36,15 +36,13 @@ export function ServerIcon({ server, isSelected, onClick }: ServerIconProps) {
   const channels = useServerStore((s) =>
     s.selectedServerId === server.id ? s.channels : []
   );
-  const isUnread = useUnreadStore((s) => s.isUnread);
-  const getMentionCount = useUnreadStore((s) => s.getMentionCount);
+  const unreadChannels = useUnreadStore((s) => s.unreadChannels);
+  const readStates = useUnreadStore((s) => s.readStates);
 
   // Check if any channel in this server has unreads/mentions
-  // We can only check channels that are loaded (for the selected server)
-  // For other servers, we check all known unread channels
-  const hasUnread = channels.some((c) => isUnread(c.id));
+  const hasUnread = channels.some((c) => unreadChannels.has(c.id));
   const totalMentions = channels.reduce(
-    (sum, c) => sum + getMentionCount(c.id),
+    (sum, c) => sum + (readStates[c.id]?.mentionCount || 0),
     0
   );
 

@@ -6,8 +6,8 @@ import { PresenceDot } from '../user/PresenceDot';
 
 export function DMList() {
   const { dmChannels, selectedDMId, selectDM, fetchDMs } = useDMStore();
-  const { selectChannel } = useServerStore();
-  const isUnread = useUnreadStore((s) => s.isUnread);
+  const selectChannel = useServerStore((s) => s.selectChannel);
+  const unreadChannels = useUnreadStore((s) => s.unreadChannels);
 
   useEffect(() => {
     fetchDMs();
@@ -41,7 +41,7 @@ export function DMList() {
                 : 'Unknown';
               const initial = name.charAt(0).toUpperCase();
               const isSelected = dm.id === selectedDMId;
-              const hasUnread = isUnread(dm.id);
+              const hasUnread = unreadChannels.has(dm.id);
 
               return (
                 <button
