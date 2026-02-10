@@ -15,8 +15,13 @@ const (
 	EventNotification     = "NOTIFICATION"
 	EventReactionAdd      = "REACTION_ADD"
 	EventReactionRemove   = "REACTION_REMOVE"
-	EventDMCreate         = "DM_CREATE"
-	EventMemberTimeout    = "MEMBER_TIMEOUT"
+	EventDMCreate              = "DM_CREATE"
+	EventMemberTimeout         = "MEMBER_TIMEOUT"
+	EventServerMemberLeave     = "SERVER_MEMBER_LEAVE"
+	EventServerDelete          = "SERVER_DELETE"
+	EventMessagePin            = "MESSAGE_PIN"
+	EventMessageUnpin          = "MESSAGE_UNPIN"
+	EventMemberNicknameUpdate  = "MEMBER_NICKNAME_UPDATE"
 )
 
 type Event struct {

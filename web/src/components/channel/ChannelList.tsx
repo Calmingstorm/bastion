@@ -1,12 +1,70 @@
-import { useState, useEffect, type FormEvent } from 'react';
+import { useState, useEffect, useCallback, type FormEvent } from 'react';
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  verticalListSortingStrategy,
+  useSortable,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { ChannelItem } from './ChannelItem';
 import { InviteDialog } from '../server/InviteDialog';
 import { ServerSettingsDialog } from '../server/ServerSettingsDialog';
 import { UserPanel } from '../user/UserPanel';
-import { apiGetCategories } from '../../api/client';
-import type { ChannelCategory } from '../../types';
+import { apiGetCategories, apiReorderChannels } from '../../api/client';
+import type { Channel, ChannelCategory } from '../../types';
+
+function SortableChannelItem({ channel, isSelected, onClick, canManage, serverId }: {
+  channel: Channel;
+  isSelected: boolean;
+  onClick: () => void;
+  canManage: boolean;
+  serverId?: string;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: channel.id });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : undefined,
+  };
+
+  return (
+    <div ref={setNodeRef} style={style} className="flex items-center">
+      {canManage && (
+        <button
+          {...attributes}
+          {...listeners}
+          className="shrink-0 cursor-grab px-0.5 text-[var(--text-muted)] opacity-0 hover:opacity-100 focus:opacity-100 group-hover:opacity-100"
+          style={{ opacity: isDragging ? 1 : undefined }}
+          tabIndex={-1}
+        >
+          <svg width="10" height="16" viewBox="0 0 10 16" fill="currentColor">
+            <circle cx="3" cy="2" r="1.5" /><circle cx="7" cy="2" r="1.5" />
+            <circle cx="3" cy="8" r="1.5" /><circle cx="7" cy="8" r="1.5" />
+            <circle cx="3" cy="14" r="1.5" /><circle cx="7" cy="14" r="1.5" />
+          </svg>
+        </button>
+      )}
+      <div className="min-w-0 flex-1">
+        <ChannelItem
+          channel={channel}
+          isSelected={isSelected}
+          onClick={onClick}
+          canManage={canManage}
+          serverId={serverId}
+        />
+      </div>
+    </div>
+  );
+}
 
 export function ChannelList() {
   // Targeted selectors to avoid cascading re-renders
@@ -29,6 +87,34 @@ export function ChannelList() {
 
   const selectedServer = servers.find((s) => s.id === selectedServerId);
   const isOwner = selectedServer && user && selectedServer.ownerId === user.id;
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
+  );
+
+  const handleDragEnd = useCallback(async (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id || !selectedServerId) return;
+
+    const oldIndex = channels.findIndex((c) => c.id === active.id);
+    const newIndex = channels.findIndex((c) => c.id === over.id);
+    if (oldIndex === -1 || newIndex === -1) return;
+
+    // Optimistic reorder in store
+    const reordered = [...channels];
+    const [moved] = reordered.splice(oldIndex, 1);
+    reordered.splice(newIndex, 0, moved);
+    useServerStore.setState({ channels: reordered });
+
+    // Persist to backend
+    const positions = reordered.map((c, i) => ({ id: c.id, position: i }));
+    try {
+      await apiReorderChannels(selectedServerId, positions);
+    } catch {
+      // Revert on failure
+      useServerStore.setState({ channels });
+    }
+  }, [channels, selectedServerId]);
 
   // Fetch categories when server changes
   useEffect(() => {
@@ -154,71 +240,33 @@ export function ChannelList() {
             {isOwner && ' Click + to create one.'}
           </p>
         ) : (
-          <>
-            {/* Uncategorized channels */}
-            {(() => {
-              const uncategorized = channels.filter((c) => !c.categoryId);
-              if (uncategorized.length === 0 && categories.length > 0) return null;
-              return (
-                <div className="mb-2">
-                  <div className="mb-1 flex items-center justify-between px-1">
-                    <span className="text-[11px] font-bold uppercase tracking-wide text-[var(--text-muted)]">
-                      Text Channels
-                    </span>
-                    {isOwner && (
-                      <button
-                        onClick={() => setShowCreate(!showCreate)}
-                        className="text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
-                        title="Create Channel"
-                      >
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                          <path d="M13 5h-2v6H5v2h6v6h2v-6h6v-2h-6V5z" />
-                        </svg>
-                      </button>
-                    )}
-                  </div>
-                  <div className="space-y-0.5">
-                    {uncategorized.map((channel) => (
-                      <ChannelItem
-                        key={channel.id}
-                        channel={channel}
-                        isSelected={channel.id === selectedChannelId}
-                        onClick={() => selectChannel(channel.id)}
-                        canManage={!!isOwner}
-                        serverId={selectedServerId || undefined}
-                      />
-                    ))}
-                  </div>
-                </div>
-              );
-            })()}
-
-            {/* Categorized channels */}
-            {categories.map((cat) => {
-              const catChannels = channels.filter((c) => c.categoryId === cat.id);
-              if (catChannels.length === 0) return null;
-              const isCollapsed = collapsedCategories.has(cat.id);
-              return (
-                <div key={cat.id} className="mb-2">
-                  <button
-                    onClick={() => toggleCategory(cat.id)}
-                    className="mb-1 flex w-full items-center gap-1 px-1 text-[11px] font-bold uppercase tracking-wide text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
-                  >
-                    <svg
-                      width="12"
-                      height="12"
-                      viewBox="0 0 24 24"
-                      fill="currentColor"
-                      className={`shrink-0 transition-transform ${isCollapsed ? '-rotate-90' : ''}`}
-                    >
-                      <path d="M7 10l5 5 5-5z" />
-                    </svg>
-                    {cat.name}
-                  </button>
-                  {!isCollapsed && (
+          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+            <SortableContext items={channels.map((c) => c.id)} strategy={verticalListSortingStrategy}>
+              {/* Uncategorized channels */}
+              {(() => {
+                const uncategorized = channels.filter((c) => !c.categoryId);
+                if (uncategorized.length === 0 && categories.length > 0) return null;
+                return (
+                  <div className="mb-2">
+                    <div className="mb-1 flex items-center justify-between px-1">
+                      <span className="text-[11px] font-bold uppercase tracking-wide text-[var(--text-muted)]">
+                        Text Channels
+                      </span>
+                      {isOwner && (
+                        <button
+                          onClick={() => setShowCreate(!showCreate)}
+                          className="text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
+                          title="Create Channel"
+                        >
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M13 5h-2v6H5v2h6v6h2v-6h6v-2h-6V5z" />
+                          </svg>
+                        </button>
+                      )}
+                    </div>
                     <div className="space-y-0.5">
-                      {catChannels.map((channel) => (
-                        <ChannelItem
+                      {uncategorized.map((channel) => (
+                        <SortableChannelItem
                           key={channel.id}
                           channel={channel}
                           isSelected={channel.id === selectedChannelId}
@@ -228,11 +276,51 @@ export function ChannelList() {
                         />
                       ))}
                     </div>
-                  )}
-                </div>
-              );
-            })}
-          </>
+                  </div>
+                );
+              })()}
+
+              {/* Categorized channels */}
+              {categories.map((cat) => {
+                const catChannels = channels.filter((c) => c.categoryId === cat.id);
+                if (catChannels.length === 0) return null;
+                const isCollapsed = collapsedCategories.has(cat.id);
+                return (
+                  <div key={cat.id} className="mb-2">
+                    <button
+                      onClick={() => toggleCategory(cat.id)}
+                      className="mb-1 flex w-full items-center gap-1 px-1 text-[11px] font-bold uppercase tracking-wide text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
+                    >
+                      <svg
+                        width="12"
+                        height="12"
+                        viewBox="0 0 24 24"
+                        fill="currentColor"
+                        className={`shrink-0 transition-transform ${isCollapsed ? '-rotate-90' : ''}`}
+                      >
+                        <path d="M7 10l5 5 5-5z" />
+                      </svg>
+                      {cat.name}
+                    </button>
+                    {!isCollapsed && (
+                      <div className="space-y-0.5">
+                        {catChannels.map((channel) => (
+                          <SortableChannelItem
+                            key={channel.id}
+                            channel={channel}
+                            isSelected={channel.id === selectedChannelId}
+                            onClick={() => selectChannel(channel.id)}
+                            canManage={!!isOwner}
+                            serverId={selectedServerId || undefined}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </SortableContext>
+          </DndContext>
         )}
       </div>
 

@@ -262,9 +262,16 @@ export function MessageInput() {
 
   if (!activeChannelId) return null;
 
+  // Compute placeholder text
+  const dmChannels = useDMStore((s) => s.dmChannels);
+  const dmChannel = selectedDMId ? dmChannels.find((d) => d.id === selectedDMId) : null;
+  const dmRecipient = dmChannel?.recipients?.[0];
+
   const placeholder = selectedChannel
     ? `Message #${selectedChannel.name}`
-    : 'Message';
+    : dmRecipient
+      ? `Message @${dmRecipient.displayName || dmRecipient.username}`
+      : 'Message';
 
   return (
     <div className="shrink-0 px-4 pb-6">

@@ -168,6 +168,25 @@ func (h *Hub) SubscribeUser(userID, channelID uuid.UUID) {
 	}
 }
 
+// UnsubscribeUser unsubscribes all connected clients of a user from a channel.
+func (h *Hub) UnsubscribeUser(userID, channelID uuid.UUID) {
+	h.mu.RLock()
+	clients, ok := h.users[userID]
+	if !ok {
+		h.mu.RUnlock()
+		return
+	}
+	clientList := make([]*Client, 0, len(clients))
+	for c := range clients {
+		clientList = append(clientList, c)
+	}
+	h.mu.RUnlock()
+
+	for _, c := range clientList {
+		h.Unsubscribe(channelID, c)
+	}
+}
+
 func (h *Hub) BroadcastToUser(userID uuid.UUID, event Event) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()

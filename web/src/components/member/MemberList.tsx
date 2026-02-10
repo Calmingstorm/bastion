@@ -101,7 +101,7 @@ export function MemberList() {
     <div className="flex h-full w-60 flex-col bg-[var(--bg-secondary)]">
       <div className="flex h-12 items-center border-b border-[var(--border)] px-4">
         <span className="text-sm font-semibold text-[var(--text-muted)]">
-          Members — {onlineCount} Online
+          Members — {onlineCount} Online / {members.length} Total
         </span>
       </div>
 

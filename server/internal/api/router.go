@@ -77,6 +77,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 	gifHandler := NewGifHandler(cfg)
 	searchHandler := NewSearchHandler(db)
 	unfurlHandler := NewUnfurlHandler(cfg)
+	pinHandler := NewPinHandler(db, hub)
 
 	// Public routes
 	r.Route("/api/auth", func(r chi.Router) {
@@ -101,6 +102,12 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 		r.Post("/api/users/me/avatar", userHandler.UploadAvatar)
 		r.Get("/api/users/me/read-states", readStateHandler.ListReadStates)
 		r.Get("/api/users/{userID}", userHandler.GetUser)
+		r.Get("/api/users/search", userHandler.SearchUsers)
+
+		// Account management
+		r.Post("/api/users/me/change-password", userHandler.ChangePassword)
+		r.Post("/api/users/me/change-email", userHandler.ChangeEmail)
+		r.Delete("/api/users/me", userHandler.DeleteAccount)
 
 		// Servers
 		r.Route("/api/servers", func(r chi.Router) {
@@ -108,8 +115,16 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 			r.Get("/", serverHandler.List)
 			r.Get("/{id}", serverHandler.Get)
 			r.Patch("/{id}", serverHandler.Update)
+			r.Delete("/{serverID}", serverHandler.Delete)
 			r.Post("/{id}/icon", serverHandler.UploadIcon)
 			r.Post("/{id}/join", serverHandler.Join)
+			r.Delete("/{serverID}/leave", serverHandler.Leave)
+
+			// Nicknames
+			r.Patch("/{serverID}/members/{userID}/nickname", serverHandler.UpdateNickname)
+
+			// Channel reordering
+			r.Put("/{serverID}/channels/reorder", channelHandler.Reorder)
 
 			// Channels (nested under servers)
 			r.Get("/{serverID}/channels", channelHandler.List)
@@ -166,6 +181,11 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 			r.Put("/{messageID}/reactions/{emoji}", reactionHandler.AddReaction)
 			r.Delete("/{messageID}/reactions/{emoji}", reactionHandler.RemoveReaction)
 		})
+
+		// Pinned messages
+		r.Put("/api/channels/{channelID}/pins/{messageID}", pinHandler.Pin)
+		r.Delete("/api/channels/{channelID}/pins/{messageID}", pinHandler.Unpin)
+		r.Get("/api/channels/{channelID}/pins", pinHandler.List)
 
 		// Read states
 		r.Post("/api/channels/{channelID}/ack", readStateHandler.Ack)

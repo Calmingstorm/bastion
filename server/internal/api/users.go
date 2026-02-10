@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -287,5 +286,212 @@ func itoa(i int) string {
 	return itoa(i/10) + string(rune('0'+i%10))
 }
 
-// Discard the io import if not needed elsewhere
-var _ = io.Discard
+func (h *UserHandler) SearchUsers(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromContext(r.Context())
+
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if q == "" || len(q) > 100 {
+		writeJSON(w, http.StatusBadRequest, errorBody("query parameter 'q' is required (max 100 chars)"))
+		return
+	}
+
+	// Search users who share at least one server with the requester
+	rows, err := h.db.Query(r.Context(),
+		`SELECT DISTINCT u.id, u.username, u.display_name, u.avatar_url
+		 FROM users u
+		 INNER JOIN server_members sm1 ON sm1.user_id = u.id
+		 INNER JOIN server_members sm2 ON sm2.server_id = sm1.server_id AND sm2.user_id = $1
+		 WHERE u.id != $1 AND (u.username ILIKE $2 OR u.display_name ILIKE $2)
+		 ORDER BY u.username ASC
+		 LIMIT 20`,
+		userID, q+"%",
+	)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to search users")
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+	defer rows.Close()
+
+	users := make([]models.Author, 0)
+	for rows.Next() {
+		var u models.Author
+		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.AvatarURL); err != nil {
+			log.Error().Err(err).Msg("failed to scan user")
+			continue
+		}
+		users = append(users, u)
+	}
+
+	writeJSON(w, http.StatusOK, users)
+}
+
+func (h *UserHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromContext(r.Context())
+
+	var req struct {
+		CurrentPassword string `json:"currentPassword"`
+		NewPassword     string `json:"newPassword"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		return
+	}
+
+	if len(req.NewPassword) < 8 {
+		writeJSON(w, http.StatusBadRequest, errorBody("new password must be at least 8 characters"))
+		return
+	}
+
+	// Fetch current hash
+	var hash string
+	err := h.db.QueryRow(r.Context(),
+		`SELECT password_hash FROM users WHERE id = $1`, userID,
+	).Scan(&hash)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+
+	// Verify current password
+	match, err := auth.VerifyPassword(hash, req.CurrentPassword)
+	if err != nil || !match {
+		writeJSON(w, http.StatusUnauthorized, errorBody("current password is incorrect"))
+		return
+	}
+
+	// Hash new password
+	newHash, err := auth.HashPassword(req.NewPassword)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to hash password")
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+
+	_, err = h.db.Exec(r.Context(),
+		`UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
+		newHash, userID,
+	)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to update password")
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *UserHandler) ChangeEmail(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromContext(r.Context())
+
+	var req struct {
+		NewEmail string `json:"newEmail"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		return
+	}
+
+	req.NewEmail = strings.TrimSpace(strings.ToLower(req.NewEmail))
+	if req.NewEmail == "" || !strings.Contains(req.NewEmail, "@") {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid email address"))
+		return
+	}
+
+	// Verify password
+	var hash string
+	err := h.db.QueryRow(r.Context(),
+		`SELECT password_hash FROM users WHERE id = $1`, userID,
+	).Scan(&hash)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+
+	match, err := auth.VerifyPassword(hash, req.Password)
+	if err != nil || !match {
+		writeJSON(w, http.StatusUnauthorized, errorBody("password is incorrect"))
+		return
+	}
+
+	// Check email not taken
+	var exists bool
+	h.db.QueryRow(r.Context(),
+		`SELECT EXISTS(SELECT 1 FROM users WHERE email = $1 AND id != $2)`,
+		req.NewEmail, userID,
+	).Scan(&exists)
+	if exists {
+		writeJSON(w, http.StatusConflict, errorBody("email is already in use"))
+		return
+	}
+
+	var user models.User
+	err = h.db.QueryRow(r.Context(),
+		`UPDATE users SET email = $1, updated_at = NOW() WHERE id = $2
+		 RETURNING id, username, email, password_hash, display_name, avatar_url, status, about_me, created_at, updated_at`,
+		req.NewEmail, userID,
+	).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash,
+		&user.DisplayName, &user.AvatarURL, &user.Status, &user.AboutMe, &user.CreatedAt, &user.UpdatedAt)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to update email")
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, user)
+}
+
+func (h *UserHandler) DeleteAccount(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromContext(r.Context())
+
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		return
+	}
+
+	// Verify password
+	var hash string
+	err := h.db.QueryRow(r.Context(),
+		`SELECT password_hash FROM users WHERE id = $1`, userID,
+	).Scan(&hash)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+
+	match, err := auth.VerifyPassword(hash, req.Password)
+	if err != nil || !match {
+		writeJSON(w, http.StatusUnauthorized, errorBody("password is incorrect"))
+		return
+	}
+
+	// Check if user owns any servers — must transfer or delete them first
+	var ownsServers bool
+	h.db.QueryRow(r.Context(),
+		`SELECT EXISTS(SELECT 1 FROM servers WHERE owner_id = $1)`, userID,
+	).Scan(&ownsServers)
+	if ownsServers {
+		writeJSON(w, http.StatusBadRequest, errorBody("you must delete or transfer all servers you own before deleting your account"))
+		return
+	}
+
+	// Delete user — cascade handles server_members, dm_members, etc.
+	// Messages with dangling author_id will show "[Deleted User]"
+	_, err = h.db.Exec(r.Context(), `DELETE FROM users WHERE id = $1`, userID)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to delete account")
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+
+	// Clear presence from Redis
+	if h.rdb != nil {
+		h.rdb.Del(r.Context(), "presence:"+userID.String())
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}

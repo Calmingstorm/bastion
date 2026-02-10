@@ -10,9 +10,11 @@ interface MessageActionsProps {
   onEdit: () => void;
   onDelete: () => void;
   onReply: () => void;
+  onPin?: () => void;
+  isPinned?: boolean;
 }
 
-export function MessageActions({ message, onEdit, onDelete, onReply }: MessageActionsProps) {
+export function MessageActions({ message, onEdit, onDelete, onReply, onPin, isPinned }: MessageActionsProps) {
   const { user } = useAuthStore();
   const { servers, selectedServerId } = useServerStore();
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -61,6 +63,19 @@ export function MessageActions({ message, onEdit, onDelete, onReply }: MessageAc
           <path d="M20 18v-2a4 4 0 00-4-4H4" />
         </svg>
       </button>
+
+      {onPin && (isOwner || canDelete) && (
+        <button
+          onClick={onPin}
+          className="rounded p-1 text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)] hover:text-[var(--text-secondary)]"
+          title={isPinned ? 'Unpin message' : 'Pin message'}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill={isPinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 17v5" />
+            <path d="M9 2h6l-1 7h4l-7 8V10H7l2-8z" />
+          </svg>
+        </button>
+      )}
 
       {isAuthor && (
         <button

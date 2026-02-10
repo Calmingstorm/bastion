@@ -26,7 +26,16 @@ type Server struct {
 	IconURL     *string   `json:"iconUrl,omitempty"`
 	Description *string   `json:"description,omitempty"`
 	OwnerID     uuid.UUID `json:"ownerId"`
+	MemberCount int       `json:"memberCount,omitempty"`
 	CreatedAt   time.Time `json:"createdAt"`
+}
+
+type MessagePin struct {
+	ID        uuid.UUID `json:"id"`
+	ChannelID uuid.UUID `json:"channelId"`
+	MessageID uuid.UUID `json:"messageId"`
+	PinnedBy  uuid.UUID `json:"pinnedBy"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 type Channel struct {
@@ -209,7 +218,12 @@ const (
 	AuditMemberTimeout    = "MEMBER_TIMEOUT"
 	AuditMemberRoleUpdate = "MEMBER_ROLE_UPDATE"
 	AuditServerUpdate     = "SERVER_UPDATE"
+	AuditServerDelete     = "SERVER_DELETE"
 	AuditInviteCreate     = "INVITE_CREATE"
 	AuditInviteDelete     = "INVITE_DELETE"
 	AuditMessageDelete    = "MESSAGE_DELETE"
+	AuditMemberLeave      = "MEMBER_LEAVE"
+	AuditMessagePin       = "MESSAGE_PIN"
+	AuditMessageUnpin     = "MESSAGE_UNPIN"
+	AuditNicknameUpdate   = "NICKNAME_UPDATE"
 )

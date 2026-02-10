@@ -20,6 +20,7 @@ import {
   apiCreateChannel,
   apiUpdateChannel,
   apiDeleteChannel,
+  apiDeleteServer,
 } from '../../api/client';
 import { useServerStore } from '../../stores/serverStore';
 import type { Role, ServerBan, AuditLogEntry, MemberWithUser, Channel } from '../../types';
@@ -142,6 +143,9 @@ function OverviewTab({ serverId }: { serverId: string }) {
   const [iconPreview, setIconPreview] = useState<string | null>(null);
   const [iconFile, setIconFile] = useState<File | null>(null);
   const iconInputRef = useRef<HTMLInputElement>(null);
+  const [deleteConfirmName, setDeleteConfirmName] = useState('');
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const currentIcon = iconPreview || server?.iconUrl;
   const serverInitial = (server?.name || '?').charAt(0).toUpperCase();
@@ -220,6 +224,50 @@ function OverviewTab({ serverId }: { serverId: string }) {
         className="rounded-[3px] bg-[var(--accent)] px-4 py-2.5 text-sm font-medium text-white hover:bg-[var(--accent-hover)] disabled:opacity-50">
         {saved ? 'Saved!' : isSaving ? 'Saving...' : 'Save Changes'}
       </button>
+
+      {server?.memberCount !== undefined && (
+        <p className="mt-2 text-xs text-[var(--text-muted)]">{server.memberCount} member{server.memberCount !== 1 ? 's' : ''}</p>
+      )}
+
+      {/* Danger Zone */}
+      <div className="mt-8 rounded-md border border-[var(--danger)]/30 p-4">
+        <h3 className="text-sm font-bold text-[var(--danger)]">Danger Zone</h3>
+        <p className="mt-1 text-xs text-[var(--text-muted)]">
+          Deleting a server is permanent and cannot be undone. All channels, messages, and member data will be lost.
+        </p>
+        <div className="mt-3 space-y-2">
+          <label className="block text-xs text-[var(--text-secondary)]">
+            Type <strong>{server?.name}</strong> to confirm
+          </label>
+          <input
+            type="text"
+            value={deleteConfirmName}
+            onChange={(e) => setDeleteConfirmName(e.target.value)}
+            placeholder="Server name"
+            className="w-full rounded-[3px] bg-[var(--bg-tertiary)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:ring-1 focus:ring-[var(--danger)]"
+          />
+          {deleteError && <p className="text-xs text-[var(--danger)]">{deleteError}</p>}
+          <button
+            type="button"
+            disabled={deleteConfirmName !== server?.name || isDeleting}
+            onClick={async () => {
+              setIsDeleting(true);
+              setDeleteError(null);
+              try {
+                await apiDeleteServer(serverId);
+                useServerStore.getState().removeServer(serverId);
+              } catch {
+                setDeleteError('Failed to delete server.');
+              } finally {
+                setIsDeleting(false);
+              }
+            }}
+            className="rounded-[3px] bg-[var(--danger)] px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+          >
+            {isDeleting ? 'Deleting...' : 'Delete Server'}
+          </button>
+        </div>
+      </div>
     </form>
   );
 }

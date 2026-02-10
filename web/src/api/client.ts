@@ -4,6 +4,7 @@ import type {
   Server,
   Channel,
   Message,
+  MessageAuthor,
   LoginResponse,
   RegisterResponse,
   ServerInvite,
@@ -14,6 +15,7 @@ import type {
   ChannelCategory,
   ServerBan,
   AuditLogEntry,
+  PinnedMessage,
 } from '../types';
 
 const apiClient = axios.create({
@@ -660,6 +662,103 @@ export async function apiUnfurl(url: string): Promise<UnfurlResult> {
     params: { url },
   });
   return response.data;
+}
+
+// ---- Leave / Delete Server API ----
+
+export async function apiLeaveServer(serverId: string): Promise<void> {
+  await apiClient.delete(`/api/servers/${serverId}/leave`);
+}
+
+export async function apiDeleteServer(serverId: string): Promise<void> {
+  await apiClient.delete(`/api/servers/${serverId}`);
+}
+
+// ---- Account Management API ----
+
+export async function apiChangePassword(
+  currentPassword: string,
+  newPassword: string
+): Promise<void> {
+  await apiClient.post('/api/users/me/change-password', {
+    currentPassword,
+    newPassword,
+  });
+}
+
+export async function apiChangeEmail(
+  newEmail: string,
+  password: string
+): Promise<User> {
+  const response = await apiClient.post<User>('/api/users/me/change-email', {
+    newEmail,
+    password,
+  });
+  return response.data;
+}
+
+export async function apiDeleteAccount(password: string): Promise<void> {
+  await apiClient.delete('/api/users/me', { data: { password } });
+}
+
+// ---- Nickname API ----
+
+export async function apiUpdateNickname(
+  serverId: string,
+  userId: string,
+  nickname: string
+): Promise<void> {
+  await apiClient.patch(
+    `/api/servers/${serverId}/members/${userId}/nickname`,
+    { nickname }
+  );
+}
+
+// ---- Pin API ----
+
+export async function apiPinMessage(
+  channelId: string,
+  messageId: string
+): Promise<void> {
+  await apiClient.put(
+    `/api/channels/${channelId}/pins/${messageId}`
+  );
+}
+
+export async function apiUnpinMessage(
+  channelId: string,
+  messageId: string
+): Promise<void> {
+  await apiClient.delete(
+    `/api/channels/${channelId}/pins/${messageId}`
+  );
+}
+
+export async function apiGetPinnedMessages(
+  channelId: string
+): Promise<PinnedMessage[]> {
+  const response = await apiClient.get<PinnedMessage[]>(
+    `/api/channels/${channelId}/pins`
+  );
+  return response.data;
+}
+
+// ---- User Search API ----
+
+export async function apiSearchUsers(query: string): Promise<MessageAuthor[]> {
+  const response = await apiClient.get<MessageAuthor[]>('/api/users/search', {
+    params: { q: query },
+  });
+  return response.data;
+}
+
+// ---- Channel Reorder API ----
+
+export async function apiReorderChannels(
+  serverId: string,
+  positions: { id: string; position: number }[]
+): Promise<void> {
+  await apiClient.put(`/api/servers/${serverId}/channels/reorder`, positions);
 }
 
 export { getAccessToken, getRefreshToken, setTokens, clearTokens };

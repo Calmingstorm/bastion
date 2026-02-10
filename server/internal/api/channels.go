@@ -314,3 +314,74 @@ func (h *ChannelHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
+
+type reorderEntry struct {
+	ID       string `json:"id"`
+	Position int    `json:"position"`
+}
+
+func (h *ChannelHandler) Reorder(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromContext(r.Context())
+	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		return
+	}
+
+	if _, ok := requirePermission(h.db, w, r, serverID, userID, permissions.ManageChannels); !ok {
+		return
+	}
+
+	var entries []reorderEntry
+	if err := json.NewDecoder(r.Body).Decode(&entries); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		return
+	}
+
+	if len(entries) == 0 {
+		writeJSON(w, http.StatusBadRequest, errorBody("no channels to reorder"))
+		return
+	}
+
+	tx, err := h.db.Begin(r.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("failed to begin transaction")
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	for _, entry := range entries {
+		chID, err := uuid.Parse(entry.ID)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, errorBody("invalid channel ID: "+entry.ID))
+			return
+		}
+		_, err = tx.Exec(r.Context(),
+			`UPDATE channels SET position = $1 WHERE id = $2 AND server_id = $3`,
+			entry.Position, chID, serverID,
+		)
+		if err != nil {
+			log.Error().Err(err).Str("channelID", chID.String()).Msg("failed to update channel position")
+			writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+			return
+		}
+	}
+
+	if err := tx.Commit(r.Context()); err != nil {
+		log.Error().Err(err).Msg("failed to commit reorder")
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+
+	// Broadcast channel updates to all server channels
+	h.broadcastToServer(r, serverID, realtime.Event{
+		Type: realtime.EventChannelUpdate,
+		Data: map[string]string{
+			"serverId": serverID.String(),
+			"type":     "reorder",
+		},
+	})
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}

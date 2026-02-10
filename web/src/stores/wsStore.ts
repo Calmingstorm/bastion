@@ -32,7 +32,9 @@ export const useWSStore = create<WSState>((set) => ({
 
         // Mark as unread if not the active channel
         const selectedChannelId = useServerStore.getState().selectedChannelId;
-        if (message.channelId !== selectedChannelId) {
+        const selectedDMId = useDMStore.getState().selectedDMId;
+        const activeChannelId = selectedChannelId || selectedDMId;
+        if (message.channelId !== activeChannelId) {
           useUnreadStore.getState().markUnread(message.channelId);
         }
 
@@ -167,6 +169,48 @@ export const useWSStore = create<WSState>((set) => ({
         if (!exists) {
           useDMStore.setState({ dmChannels: [dm, ...dmChannels] });
         }
+      }
+    });
+
+    wsClient.on('SERVER_MEMBER_LEAVE', (data: unknown) => {
+      const payload = data as { serverId: string; userId: string };
+      if (payload.serverId && payload.userId) {
+        const { user } = useAuthStore.getState();
+        if (user && payload.userId === user.id) {
+          // We left (from another session) — remove the server
+          useServerStore.getState().removeServer(payload.serverId);
+        } else {
+          // Someone else left — refresh member list
+          window.dispatchEvent(new CustomEvent('bastion:member-update', { detail: payload }));
+        }
+      }
+    });
+
+    wsClient.on('SERVER_DELETE', (data: unknown) => {
+      const payload = data as { serverId: string };
+      if (payload.serverId) {
+        useServerStore.getState().removeServer(payload.serverId);
+      }
+    });
+
+    wsClient.on('MESSAGE_PIN', (data: unknown) => {
+      const payload = data as { channelId: string; messageId: string };
+      if (payload.channelId) {
+        window.dispatchEvent(new CustomEvent('bastion:pin-update', { detail: payload }));
+      }
+    });
+
+    wsClient.on('MESSAGE_UNPIN', (data: unknown) => {
+      const payload = data as { channelId: string; messageId: string };
+      if (payload.channelId) {
+        window.dispatchEvent(new CustomEvent('bastion:pin-update', { detail: payload }));
+      }
+    });
+
+    wsClient.on('MEMBER_NICKNAME_UPDATE', (data: unknown) => {
+      const payload = data as { serverId: string; userId: string; nickname: string };
+      if (payload.serverId) {
+        window.dispatchEvent(new CustomEvent('bastion:member-update', { detail: payload }));
       }
     });
 

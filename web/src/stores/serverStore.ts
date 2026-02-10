@@ -5,6 +5,8 @@ import {
   apiCreateServer,
   apiGetChannels,
   apiCreateChannel,
+  apiLeaveServer,
+  apiDeleteServer,
 } from '../api/client';
 
 interface ServerState {
@@ -24,6 +26,9 @@ interface ServerState {
   addChannel: (channel: Channel) => void;
   updateChannel: (channel: Channel) => void;
   removeChannel: (channelId: string) => void;
+  leaveServer: (serverId: string) => Promise<void>;
+  deleteServer: (serverId: string) => Promise<void>;
+  removeServer: (serverId: string) => void;
   reset: () => void;
 }
 
@@ -174,6 +179,36 @@ export const useServerStore = create<ServerState>((set, get) => ({
       }
       return updates;
     });
+  },
+
+  leaveServer: async (serverId: string) => {
+    await apiLeaveServer(serverId);
+    get().removeServer(serverId);
+  },
+
+  deleteServer: async (serverId: string) => {
+    await apiDeleteServer(serverId);
+    get().removeServer(serverId);
+  },
+
+  removeServer: (serverId: string) => {
+    set((state) => {
+      const remaining = state.servers.filter((s) => s.id !== serverId);
+      if (state.selectedServerId === serverId) {
+        return {
+          servers: remaining,
+          selectedServerId: remaining[0]?.id || null,
+          channels: [],
+          selectedChannelId: null,
+        };
+      }
+      return { servers: remaining };
+    });
+    // If we just cleared selection, auto-select first available server
+    const { selectedServerId, servers } = get();
+    if (selectedServerId && servers.length > 0) {
+      get().selectServer(selectedServerId);
+    }
   },
 
   reset: () => {

@@ -1,44 +1,85 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { ServerList } from '../server/ServerList';
 import { ChannelList } from '../channel/ChannelList';
 import { MessageList } from '../message/MessageList';
 import { MessageInput } from '../message/MessageInput';
 import { MemberList } from '../member/MemberList';
 import { DMList } from '../dm/DMList';
-import { DMChannelHeader } from '../dm/DMChannelHeader';
 import { useServerStore } from '../../stores/serverStore';
 import { useDMStore } from '../../stores/dmStore';
 import { useNotifications } from '../../hooks/useNotifications';
 import { useFeatureStore } from '../../stores/featureStore';
+import { useBreakpoints } from '../../hooks/useMediaQuery';
 
 export function AppLayout() {
   useNotifications();
   const fetchFeatures = useFeatureStore((s) => s.fetchFeatures);
   useEffect(() => { fetchFeatures(); }, [fetchFeatures]);
   const selectedServerId = useServerStore((s) => s.selectedServerId);
+  const selectedChannelId = useServerStore((s) => s.selectedChannelId);
   const selectedDMId = useDMStore((s) => s.selectedDMId);
+  const { isMobile, isDesktop } = useBreakpoints();
   const [showMembers, setShowMembers] = useState(true);
+  const [showSidebar, setShowSidebar] = useState(false);
 
   const isDMView = !selectedServerId;
   const showChat = isDMView ? !!selectedDMId : true;
 
+  // Auto-close sidebar on mobile when navigating to a channel/DM
+  useEffect(() => {
+    if (isMobile) {
+      setShowSidebar(false);
+    }
+  }, [selectedChannelId, selectedDMId, isMobile]);
+
+  // Hide members on non-desktop by default
+  useEffect(() => {
+    setShowMembers(isDesktop);
+  }, [isDesktop]);
+
+  const handleToggleSidebar = useCallback(() => {
+    setShowSidebar((v) => !v);
+  }, []);
+
+  const handleToggleMembers = useCallback(() => {
+    setShowMembers((v) => !v);
+  }, []);
+
   return (
     <div className="flex h-screen w-screen overflow-hidden">
+      {/* Mobile sidebar overlay */}
+      {isMobile && showSidebar && (
+        <div
+          className="fixed inset-0 z-30 bg-black/50"
+          onClick={() => setShowSidebar(false)}
+        />
+      )}
+
       {/* Server list - narrow left sidebar */}
-      <ServerList />
+      <div className={
+        isMobile
+          ? `fixed left-0 top-0 z-40 h-full transition-transform duration-200 ${showSidebar ? 'translate-x-0' : '-translate-x-full'}`
+          : ''
+      }>
+        <ServerList />
+      </div>
 
       {/* Channel / DM list - secondary sidebar */}
-      {isDMView ? <DMList /> : <ChannelList />}
+      <div className={
+        isMobile
+          ? `fixed left-[72px] top-0 z-40 h-full transition-transform duration-200 ${showSidebar ? 'translate-x-0' : '-translate-x-[calc(100%+72px)]'}`
+          : ''
+      }>
+        {isDMView ? <DMList /> : <ChannelList />}
+      </div>
 
       {/* Main chat area */}
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        {isDMView && selectedDMId && <DMChannelHeader />}
         {showChat ? (
           <>
             <MessageList
-              onToggleMembers={
-                !isDMView ? () => setShowMembers((v) => !v) : undefined
-              }
+              onToggleMembers={!isDMView ? handleToggleMembers : undefined}
+              onToggleSidebar={isMobile ? handleToggleSidebar : undefined}
             />
             <MessageInput />
           </>
@@ -65,7 +106,13 @@ export function AppLayout() {
                 Welcome to Bastion
               </h3>
               <p className="mt-1 text-sm text-[var(--text-muted)]">
-                Select a conversation to start chatting
+                {isMobile ? (
+                  <button onClick={handleToggleSidebar} className="text-[var(--accent)] hover:underline">
+                    Open sidebar
+                  </button>
+                ) : (
+                  'Select a conversation to start chatting'
+                )}
               </p>
             </div>
           </div>
@@ -73,7 +120,20 @@ export function AppLayout() {
       </div>
 
       {/* Member list - right sidebar (server channels only) */}
-      {!isDMView && showMembers && <MemberList />}
+      {!isDMView && showMembers && !isMobile && <MemberList />}
+
+      {/* Mobile member list overlay */}
+      {!isDMView && showMembers && isMobile && (
+        <>
+          <div
+            className="fixed inset-0 z-30 bg-black/50"
+            onClick={() => setShowMembers(false)}
+          />
+          <div className="fixed right-0 top-0 z-40 h-full">
+            <MemberList />
+          </div>
+        </>
+      )}
     </div>
   );
 }

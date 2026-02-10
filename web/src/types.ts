@@ -6,6 +6,7 @@ export interface User {
   avatarUrl?: string;
   status: string;
   aboutMe?: string;
+  createdAt?: string;
 }
 
 export interface Server {
@@ -14,6 +15,7 @@ export interface Server {
   iconUrl?: string;
   description?: string;
   ownerId: string;
+  memberCount?: number;
   createdAt: string;
 }
 
@@ -211,7 +213,22 @@ export type WSEventType =
   | 'NOTIFICATION'
   | 'REACTION_ADD'
   | 'REACTION_REMOVE'
-  | 'DM_CREATE';
+  | 'DM_CREATE'
+  | 'SERVER_MEMBER_LEAVE'
+  | 'SERVER_DELETE'
+  | 'MESSAGE_PIN'
+  | 'MESSAGE_UNPIN'
+  | 'MEMBER_NICKNAME_UPDATE';
+
+export interface PinnedMessage {
+  id: string;
+  channelId: string;
+  content: string;
+  editedAt?: string;
+  createdAt: string;
+  author: MessageAuthor;
+  pinnedAt: string;
+}
 
 export interface WSMessage {
   type: WSEventType;

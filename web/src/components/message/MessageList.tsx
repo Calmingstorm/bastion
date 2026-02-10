@@ -1,11 +1,14 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useMessageStore } from '../../stores/messageStore';
 import { useServerStore } from '../../stores/serverStore';
+import { useDMStore } from '../../stores/dmStore';
 import { useUnreadStore } from '../../stores/unreadStore';
 import { useAutoScroll } from '../../hooks/useAutoScroll';
 import { MessageItem, DateSeparator } from './MessageItem';
 import { TypingIndicator } from './TypingIndicator';
 import { SearchDialog } from '../search/SearchDialog';
+import { PinnedMessages } from './PinnedMessages';
+import { PresenceDot } from '../user/PresenceDot';
 import type { Message } from '../../types';
 
 function isSameDay(a: string, b: string): boolean {
@@ -29,12 +32,14 @@ function shouldGroupWithPrevious(
 
 interface MessageListProps {
   onToggleMembers?: () => void;
+  onToggleSidebar?: () => void;
 }
 
 const EMPTY_MESSAGES: Message[] = [];
 
-export function MessageList({ onToggleMembers }: MessageListProps) {
+export function MessageList({ onToggleMembers, onToggleSidebar }: MessageListProps) {
   const [searchOpen, setSearchOpen] = useState(false);
+  const [pinsOpen, setPinsOpen] = useState(false);
 
   // Ctrl+K keyboard shortcut for search
   useEffect(() => {
@@ -50,25 +55,40 @@ export function MessageList({ onToggleMembers }: MessageListProps) {
 
   // Use targeted selectors to avoid re-renders from unrelated store changes
   const selectedChannelId = useServerStore((s) => s.selectedChannelId);
+  const selectedServerId = useServerStore((s) => s.selectedServerId);
   const channels = useServerStore((s) => s.channels);
+  const selectedDMId = useDMStore((s) => s.selectedDMId);
+  const dmChannels = useDMStore((s) => s.dmChannels);
   const fetchMessages = useMessageStore((s) => s.fetchMessages);
   const ackChannel = useUnreadStore((s) => s.ackChannel);
 
+  // Determine active channel: server channel or DM channel
+  const activeChannelId = selectedChannelId || selectedDMId;
+  const isDM = !selectedServerId && !!selectedDMId;
+
+  // DM recipient info
+  const dmChannel = isDM ? dmChannels.find((d) => d.id === selectedDMId) : null;
+  const dmRecipient = dmChannel?.recipients?.[0];
+  const dmRecipientName = dmRecipient
+    ? dmRecipient.displayName || dmRecipient.username
+    : 'Unknown';
+
+  const selectedChannel = channels.find((c) => c.id === selectedChannelId);
+
   // Select per-channel data with stable empty fallbacks
   const channelMessages = useMessageStore(
-    (s) => (selectedChannelId ? s.messages[selectedChannelId] : null) || EMPTY_MESSAGES
+    (s) => (activeChannelId ? s.messages[activeChannelId] : null) || EMPTY_MESSAGES
   );
   const channelHasMore = useMessageStore(
-    (s) => (selectedChannelId ? s.hasMore[selectedChannelId] ?? true : false)
+    (s) => (activeChannelId ? s.hasMore[activeChannelId] ?? true : false)
   );
   const channelIsLoading = useMessageStore(
-    (s) => (selectedChannelId ? s.isLoading[selectedChannelId] ?? false : false)
+    (s) => (activeChannelId ? s.isLoading[activeChannelId] ?? false : false)
   );
-  const selectedChannel = channels.find((c) => c.id === selectedChannelId);
 
   const { containerRef, scrollToBottom } = useAutoScroll([
     channelMessages.length,
-    selectedChannelId,
+    activeChannelId,
   ]);
 
   const loadingOlderRef = useRef(false);
@@ -93,29 +113,29 @@ export function MessageList({ onToggleMembers }: MessageListProps) {
 
   // Fetch messages when channel changes
   useEffect(() => {
-    if (selectedChannelId && channelMessages.length === 0 && !channelIsLoading) {
-      fetchMessages(selectedChannelId).then(() => {
+    if (activeChannelId && channelMessages.length === 0 && !channelIsLoading) {
+      fetchMessages(activeChannelId).then(() => {
         // Scroll to bottom on initial load
         setTimeout(scrollToBottom, 50);
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedChannelId]);
+  }, [activeChannelId]);
 
   // Auto-ack when channel is selected and has messages
   useEffect(() => {
-    if (selectedChannelId && channelMessages.length > 0) {
+    if (activeChannelId && channelMessages.length > 0) {
       const lastMsg = channelMessages[channelMessages.length - 1];
-      ackChannel(selectedChannelId, lastMsg.id);
+      ackChannel(activeChannelId, lastMsg.id);
     }
     // Only ack on channel switch or when new messages arrive (length changes)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedChannelId, channelMessages.length]);
+  }, [activeChannelId, channelMessages.length]);
 
   // Infinite scroll - load older messages
   const handleScroll = useCallback(() => {
     const container = containerRef.current;
-    if (!container || !selectedChannelId) return;
+    if (!container || !activeChannelId) return;
     if (loadingOlderRef.current || channelIsLoading || !channelHasMore) return;
 
     if (container.scrollTop < 100) {
@@ -124,7 +144,7 @@ export function MessageList({ onToggleMembers }: MessageListProps) {
         loadingOlderRef.current = true;
         const prevScrollHeight = container.scrollHeight;
 
-        fetchMessages(selectedChannelId, oldestMessage.id).then(() => {
+        fetchMessages(activeChannelId, oldestMessage.id).then(() => {
           // Maintain scroll position after prepending
           requestAnimationFrame(() => {
             if (container) {
@@ -142,11 +162,11 @@ export function MessageList({ onToggleMembers }: MessageListProps) {
       container.scrollHeight - container.scrollTop - container.clientHeight < 50;
     if (isAtBottom && channelMessages.length > 0) {
       const lastMsg = channelMessages[channelMessages.length - 1];
-      ackChannel(selectedChannelId, lastMsg.id);
+      ackChannel(activeChannelId, lastMsg.id);
     }
   }, [
     containerRef,
-    selectedChannelId,
+    activeChannelId,
     channelIsLoading,
     channelHasMore,
     channelMessages,
@@ -154,7 +174,7 @@ export function MessageList({ onToggleMembers }: MessageListProps) {
     ackChannel,
   ]);
 
-  if (!selectedChannelId) {
+  if (!activeChannelId) {
     return (
       <div className="flex flex-1 items-center justify-center bg-[var(--bg-primary)]">
         <div className="text-center">
@@ -189,32 +209,86 @@ export function MessageList({ onToggleMembers }: MessageListProps) {
       {/* Channel header */}
       <div className="flex h-12 shrink-0 items-center justify-between border-b border-[var(--border)] px-4">
         <div className="flex min-w-0 items-center">
-          <svg
-            width="20"
-            height="20"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="mr-2 shrink-0 text-[var(--text-muted)]"
-          >
-            <path d="M4 9h16M4 15h16M10 3l-2 18M16 3l-2 18" />
-          </svg>
-          <h3 className="font-semibold text-[var(--text-primary)]">
-            {selectedChannel?.name || 'Unknown Channel'}
-          </h3>
-          {selectedChannel?.topic && (
+          {onToggleSidebar && (
+            <button
+              onClick={onToggleSidebar}
+              className="mr-2 shrink-0 rounded p-1 text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)] hover:text-[var(--text-secondary)]"
+              title="Open sidebar"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="3" y1="6" x2="21" y2="6" />
+                <line x1="3" y1="12" x2="21" y2="12" />
+                <line x1="3" y1="18" x2="21" y2="18" />
+              </svg>
+            </button>
+          )}
+          {isDM ? (
             <>
-              <div className="mx-3 h-6 w-[1px] bg-[var(--border)]" />
-              <span className="truncate text-sm text-[var(--text-muted)]">
-                {selectedChannel.topic}
-              </span>
+              {/* DM header: @ icon + recipient name + presence */}
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="mr-2 shrink-0 text-[var(--text-muted)]"
+              >
+                <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2" />
+                <circle cx="12" cy="7" r="4" />
+              </svg>
+              <h3 className="font-semibold text-[var(--text-primary)]">
+                {dmRecipientName}
+              </h3>
+              {dmRecipient && (
+                <PresenceDot userId={dmRecipient.id} className="ml-2" />
+              )}
+            </>
+          ) : (
+            <>
+              {/* Server channel header: # icon + channel name + topic */}
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="mr-2 shrink-0 text-[var(--text-muted)]"
+              >
+                <path d="M4 9h16M4 15h16M10 3l-2 18M16 3l-2 18" />
+              </svg>
+              <h3 className="font-semibold text-[var(--text-primary)]">
+                {selectedChannel?.name || 'Unknown Channel'}
+              </h3>
+              {selectedChannel?.topic && (
+                <>
+                  <div className="mx-3 h-6 w-[1px] bg-[var(--border)]" />
+                  <span className="truncate text-sm text-[var(--text-muted)]">
+                    {selectedChannel.topic}
+                  </span>
+                </>
+              )}
             </>
           )}
         </div>
         <div className="flex items-center gap-1">
+          {/* Pinned messages button */}
+          <button
+            onClick={() => setPinsOpen(true)}
+            className="shrink-0 rounded p-1 text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)] hover:text-[var(--text-secondary)]"
+            title="Pinned Messages"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 17v5" />
+              <path d="M9 2h6l-1 7h4l-7 8V10H7l2-8z" />
+            </svg>
+          </button>
+
           {/* Search button */}
           <button
             onClick={() => setSearchOpen(true)}
@@ -279,27 +353,58 @@ export function MessageList({ onToggleMembers }: MessageListProps) {
         {!channelHasMore && !channelIsLoading && (
           <div className="px-4 pt-8 pb-4">
             <div className="mb-2 flex h-16 w-16 items-center justify-center rounded-full bg-[var(--bg-input)]">
-              <svg
-                width="32"
-                height="32"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className="text-[var(--text-muted)]"
-              >
-                <path d="M4 9h16M4 15h16M10 3l-2 18M16 3l-2 18" />
-              </svg>
+              {isDM ? (
+                <svg
+                  width="32"
+                  height="32"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="text-[var(--text-muted)]"
+                >
+                  <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2" />
+                  <circle cx="12" cy="7" r="4" />
+                </svg>
+              ) : (
+                <svg
+                  width="32"
+                  height="32"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="text-[var(--text-muted)]"
+                >
+                  <path d="M4 9h16M4 15h16M10 3l-2 18M16 3l-2 18" />
+                </svg>
+              )}
             </div>
-            <h2 className="text-3xl font-bold text-[var(--text-primary)]">
-              Welcome to #{selectedChannel?.name || 'channel'}!
-            </h2>
-            <p className="mt-2 text-sm text-[var(--text-muted)]">
-              This is the start of the #{selectedChannel?.name || 'channel'}{' '}
-              channel.
-            </p>
+            {isDM ? (
+              <>
+                <h2 className="text-3xl font-bold text-[var(--text-primary)]">
+                  {dmRecipientName}
+                </h2>
+                <p className="mt-2 text-sm text-[var(--text-muted)]">
+                  This is the beginning of your direct message history with{' '}
+                  <strong>{dmRecipientName}</strong>.
+                </p>
+              </>
+            ) : (
+              <>
+                <h2 className="text-3xl font-bold text-[var(--text-primary)]">
+                  Welcome to #{selectedChannel?.name || 'channel'}!
+                </h2>
+                <p className="mt-2 text-sm text-[var(--text-muted)]">
+                  This is the start of the #{selectedChannel?.name || 'channel'}{' '}
+                  channel.
+                </p>
+              </>
+            )}
           </div>
         )}
 
@@ -323,22 +428,33 @@ export function MessageList({ onToggleMembers }: MessageListProps) {
         {channelMessages.length === 0 && !channelIsLoading && (
           <div className="flex items-center justify-center py-12">
             <p className="text-sm text-[var(--text-muted)]">
-              No messages yet. Say something!
+              {isDM
+                ? 'Send a message to start the conversation.'
+                : 'No messages yet. Say something!'}
             </p>
           </div>
         )}
       </div>
 
       {/* Typing indicator */}
-      {selectedChannelId && (
+      {activeChannelId && (
         <TypingIndicator
-          channelId={selectedChannelId}
+          channelId={activeChannelId}
           usernames={usernameMap}
         />
       )}
 
       {/* Search dialog */}
       <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} />
+
+      {/* Pinned messages panel */}
+      {activeChannelId && (
+        <PinnedMessages
+          open={pinsOpen}
+          onOpenChange={setPinsOpen}
+          channelId={activeChannelId}
+        />
+      )}
     </div>
   );
 }

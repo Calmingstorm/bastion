@@ -116,14 +116,28 @@ export function UserProfileCard({ userId, roles, joinedAt, serverId, canModerate
                     </div>
                   </div>
                 )}
-                {joinedAt && (
+                {(joinedAt || user.createdAt) && (
                   <div className="mt-3 border-t border-[var(--border)] pt-3">
-                    <p className="text-xs font-bold uppercase text-[var(--text-secondary)]">
-                      Member Since
-                    </p>
-                    <p className="mt-1 text-sm text-[var(--text-secondary)]">
-                      {formatJoinDate(joinedAt)}
-                    </p>
+                    {user.createdAt && (
+                      <>
+                        <p className="text-xs font-bold uppercase text-[var(--text-secondary)]">
+                          Bastion Member Since
+                        </p>
+                        <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                          {formatJoinDate(user.createdAt)}
+                        </p>
+                      </>
+                    )}
+                    {joinedAt && (
+                      <>
+                        <p className={`text-xs font-bold uppercase text-[var(--text-secondary)] ${user.createdAt ? 'mt-2' : ''}`}>
+                          Joined Server
+                        </p>
+                        <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                          {formatJoinDate(joinedAt)}
+                        </p>
+                      </>
+                    )}
                   </div>
                 )}
                 {currentUser?.id !== userId && (

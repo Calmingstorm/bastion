@@ -11,6 +11,7 @@ import { UserProfileCard } from '../user/UserProfileCard';
 import { useMessageStore } from '../../stores/messageStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
+import { apiPinMessage } from '../../api/client';
 
 interface MessageItemProps {
   message: Message;
@@ -150,6 +151,12 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
     setReplyingTo(message);
   };
 
+  const handlePin = async () => {
+    try {
+      await apiPinMessage(message.channelId, message.id);
+    } catch { /* handled */ }
+  };
+
   const renderContent = () => {
     if (isEditing) {
       return (
@@ -223,7 +230,7 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
     return (
       <>
         <div className="group relative py-px pr-12 pl-[72px] hover:bg-[var(--bg-secondary)]/30">
-          <MessageActions message={message} onEdit={handleEdit} onDelete={() => setShowDeleteDialog(true)} onReply={handleReply} />
+          <MessageActions message={message} onEdit={handleEdit} onDelete={() => setShowDeleteDialog(true)} onReply={handleReply} onPin={handlePin} />
           <span className="invisible absolute left-0 top-0.5 w-[68px] pr-3 text-right text-[11px] text-[var(--text-muted)] group-hover:visible">
             {formatTime(createdAt)}
           </span>

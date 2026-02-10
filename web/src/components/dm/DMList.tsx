@@ -1,9 +1,9 @@
-import { useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useDMStore } from '../../stores/dmStore';
-import { useServerStore } from '../../stores/serverStore';
 import { useUnreadStore } from '../../stores/unreadStore';
 import { PresenceDot } from '../user/PresenceDot';
 import { UserPanel } from '../user/UserPanel';
+import { NewDMDialog } from './NewDMDialog';
 
 export function DMList() {
   // Targeted selectors to avoid cascading re-renders
@@ -11,8 +11,8 @@ export function DMList() {
   const selectedDMId = useDMStore((s) => s.selectedDMId);
   const selectDM = useDMStore((s) => s.selectDM);
   const fetchDMs = useDMStore((s) => s.fetchDMs);
-  const selectChannel = useServerStore((s) => s.selectChannel);
   const unreadChannels = useUnreadStore((s) => s.unreadChannels);
+  const [newDMOpen, setNewDMOpen] = useState(false);
 
   useEffect(() => {
     fetchDMs();
@@ -20,16 +20,23 @@ export function DMList() {
 
   const handleSelect = (channelId: string) => {
     selectDM(channelId);
-    // Also set as selected channel for message display
-    selectChannel(channelId);
   };
 
   return (
     <div className="flex h-full w-60 flex-col bg-[var(--bg-secondary)]">
-      <div className="flex h-12 items-center border-b border-[var(--border)] px-4">
+      <div className="flex h-12 items-center justify-between border-b border-[var(--border)] px-4">
         <span className="text-sm font-semibold text-[var(--text-primary)]">
           Direct Messages
         </span>
+        <button
+          onClick={() => setNewDMOpen(true)}
+          className="rounded p-1 text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
+          title="New DM"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M13 5h-2v6H5v2h6v6h2v-6h6v-2h-6V5z" />
+          </svg>
+        </button>
       </div>
 
       <div className="flex-1 overflow-y-auto px-2 py-3">
@@ -96,6 +103,8 @@ export function DMList() {
 
       {/* User panel */}
       <UserPanel />
+
+      <NewDMDialog open={newDMOpen} onOpenChange={setNewDMOpen} />
     </div>
   );
 }
