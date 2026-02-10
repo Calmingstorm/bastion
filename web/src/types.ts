@@ -191,14 +191,14 @@ export type WSEventType =
   | 'MEMBER_LEAVE'
   | 'MEMBER_KICK'
   | 'MEMBER_BAN'
+  | 'MEMBER_TIMEOUT'
   | 'PRESENCE_UPDATE'
   | 'TYPING_START'
   | 'SERVER_MEMBER_JOIN'
   | 'NOTIFICATION'
   | 'REACTION_ADD'
   | 'REACTION_REMOVE'
-  | 'DM_CREATE'
-  | 'SERVER_MEMBER_JOIN';
+  | 'DM_CREATE';
 
 export interface WSMessage {
   type: WSEventType;

@@ -53,7 +53,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 
 	// Create handlers
 	authHandler := NewAuthHandler(db, cfg, rdb, emailSvc)
-	serverHandler := NewServerHandler(db, fileStorage, cfg)
+	serverHandler := NewServerHandler(db, hub, fileStorage, cfg)
 	channelHandler := NewChannelHandler(db, hub)
 	messageHandler := NewMessageHandler(db, hub)
 	inviteHandler := NewInviteHandler(db, hub)

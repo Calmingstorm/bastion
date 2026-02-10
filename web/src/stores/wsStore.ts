@@ -113,18 +113,20 @@ export const useWSStore = create<WSState>((set) => ({
     wsClient.on('MEMBER_KICK', (data: unknown) => {
       const payload = data as { serverId: string; userId: string };
       if (payload.serverId && payload.userId) {
-        // If the kicked user is us, remove the server from our list
         const { user } = useAuthStore.getState();
         if (user && payload.userId === user.id) {
+          // We were kicked — remove the server from our list
           const { servers, selectedServerId } = useServerStore.getState();
           const remaining = servers.filter((s) => s.id !== payload.serverId);
           if (selectedServerId === payload.serverId) {
-            // Reset and select first remaining server if available
             useServerStore.setState({ servers: remaining, selectedServerId: remaining[0]?.id || null, channels: [], selectedChannelId: null });
             if (remaining[0]) useServerStore.getState().selectServer(remaining[0].id);
           } else {
             useServerStore.setState({ servers: remaining });
           }
+        } else {
+          // Someone else was kicked — refresh member list
+          window.dispatchEvent(new CustomEvent('bastion:member-update', { detail: payload }));
         }
       }
     });
@@ -171,6 +173,7 @@ export const useWSStore = create<WSState>((set) => ({
       if (payload.serverId && payload.userId) {
         const { user } = useAuthStore.getState();
         if (user && payload.userId === user.id) {
+          // We were banned — remove the server from our list
           const { servers, selectedServerId } = useServerStore.getState();
           const remaining = servers.filter((s) => s.id !== payload.serverId);
           if (selectedServerId === payload.serverId) {
@@ -179,7 +182,18 @@ export const useWSStore = create<WSState>((set) => ({
           } else {
             useServerStore.setState({ servers: remaining });
           }
+        } else {
+          // Someone else was banned — refresh member list
+          window.dispatchEvent(new CustomEvent('bastion:member-update', { detail: payload }));
         }
+      }
+    });
+
+    wsClient.on('MEMBER_TIMEOUT', (data: unknown) => {
+      const payload = data as { serverId: string; userId: string; timedOutUntil: string };
+      if (payload.serverId) {
+        // Refresh member list so timeout indicator appears
+        window.dispatchEvent(new CustomEvent('bastion:member-update', { detail: payload }));
       }
     });
 

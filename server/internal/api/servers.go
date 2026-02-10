@@ -14,17 +14,19 @@ import (
 	"github.com/Calmingstorm/bastion/server/internal/config"
 	"github.com/Calmingstorm/bastion/server/internal/models"
 	"github.com/Calmingstorm/bastion/server/internal/permissions"
+	"github.com/Calmingstorm/bastion/server/internal/realtime"
 	"github.com/Calmingstorm/bastion/server/internal/storage"
 )
 
 type ServerHandler struct {
 	db      *pgxpool.Pool
+	hub     *realtime.Hub
 	storage *storage.FileStorage
 	cfg     *config.Config
 }
 
-func NewServerHandler(db *pgxpool.Pool, storage *storage.FileStorage, cfg *config.Config) *ServerHandler {
-	return &ServerHandler{db: db, storage: storage, cfg: cfg}
+func NewServerHandler(db *pgxpool.Pool, hub *realtime.Hub, storage *storage.FileStorage, cfg *config.Config) *ServerHandler {
+	return &ServerHandler{db: db, hub: hub, storage: storage, cfg: cfg}
 }
 
 type createServerRequest struct {
@@ -277,6 +279,23 @@ func (h *ServerHandler) Join(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Subscribe new member's WS clients to all server channels
+	channelIDs, _ := getServerChannelIDs(r.Context(), h.db, serverID)
+	for _, chID := range channelIDs {
+		h.hub.SubscribeUser(userID, chID)
+	}
+
+	// Broadcast to all server channels so existing members see the new member
+	for _, chID := range channelIDs {
+		h.hub.BroadcastToChannel(chID, realtime.Event{
+			Type: realtime.EventServerMemberJoin,
+			Data: map[string]string{
+				"serverId": serverID.String(),
+				"userId":   userID.String(),
+			},
+		})
+	}
+
 	writeJSON(w, http.StatusCreated, member)
 }
 
@@ -413,3 +432,5 @@ func (h *ServerHandler) UploadIcon(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, s)
 }
+
+

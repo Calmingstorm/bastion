@@ -16,6 +16,7 @@ const (
 	EventReactionAdd      = "REACTION_ADD"
 	EventReactionRemove   = "REACTION_REMOVE"
 	EventDMCreate         = "DM_CREATE"
+	EventMemberTimeout    = "MEMBER_TIMEOUT"
 )
 
 type Event struct {

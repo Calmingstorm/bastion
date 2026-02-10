@@ -99,19 +99,21 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, userID uuid.UUID,
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go client.writePump(ctx, cancel)
-	go client.readPump(ctx, cancel, channelIDs)
+	go client.readPump(ctx, cancel)
 }
 
-func (c *Client) readPump(ctx context.Context, cancel context.CancelFunc, channelIDs []uuid.UUID) {
+func (c *Client) readPump(ctx context.Context, cancel context.CancelFunc) {
 	defer func() {
+		// Get current subscribed channels BEFORE unsubscribing (not the stale initial list)
+		currentChannels := c.hub.GetClientChannels(c)
 		c.hub.UnsubscribeAll(c)
 
 		// Set presence to offline
 		if c.rdb != nil {
 			bgCtx := context.Background()
 			c.rdb.Del(bgCtx, "presence:"+c.userID.String())
-			// Broadcast offline to channels
-			for _, chID := range channelIDs {
+			// Broadcast offline to all channels we were subscribed to
+			for _, chID := range currentChannels {
 				c.hub.BroadcastToChannel(chID, Event{
 					Type: EventPresenceUpdate,
 					Data: map[string]string{
@@ -159,8 +161,8 @@ func (c *Client) readPump(ctx context.Context, cancel context.CancelFunc, channe
 			if err := json.Unmarshal(msg.Data, &statusData); err == nil && statusData.Status != "" {
 				if c.rdb != nil {
 					c.rdb.Set(ctx, "presence:"+c.userID.String(), statusData.Status, 90*time.Second)
-					// Broadcast to all channels
-					for _, chID := range channelIDs {
+					// Broadcast to all currently subscribed channels
+					for _, chID := range c.hub.GetClientChannels(c) {
 						c.hub.BroadcastToChannel(chID, Event{
 							Type: EventPresenceUpdate,
 							Data: map[string]string{

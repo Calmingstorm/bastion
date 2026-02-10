@@ -84,11 +84,20 @@ func (h *ModerationHandler) Kick(w http.ResponseWriter, r *http.Request) {
 
 	writeAuditLog(h.db, r.Context(), serverID, userID, models.AuditMemberKick, "member", targetID, nil, req.Reason)
 
-	// Notify via WebSocket
+	// Notify kicked user directly
 	h.hub.BroadcastToUser(targetID, realtime.Event{
-		Type: "MEMBER_KICK",
-		Data: map[string]string{"serverId": serverID.String()},
+		Type: realtime.EventMemberKick,
+		Data: map[string]string{"serverId": serverID.String(), "userId": targetID.String()},
 	})
+
+	// Broadcast to server channels so remaining members update their member lists
+	chIDs, _ := getServerChannelIDs(r.Context(), h.db, serverID)
+	for _, chID := range chIDs {
+		h.hub.BroadcastToChannel(chID, realtime.Event{
+			Type: realtime.EventMemberKick,
+			Data: map[string]string{"serverId": serverID.String(), "userId": targetID.String()},
+		})
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "kicked"})
 }
@@ -164,10 +173,20 @@ func (h *ModerationHandler) Ban(w http.ResponseWriter, r *http.Request) {
 
 	writeAuditLog(h.db, r.Context(), serverID, userID, models.AuditMemberBan, "member", targetID, nil, req.Reason)
 
+	// Notify banned user directly
 	h.hub.BroadcastToUser(targetID, realtime.Event{
-		Type: "MEMBER_BAN",
-		Data: map[string]string{"serverId": serverID.String()},
+		Type: realtime.EventMemberBan,
+		Data: map[string]string{"serverId": serverID.String(), "userId": targetID.String()},
 	})
+
+	// Broadcast to server channels so remaining members update their member lists
+	chIDs, _ := getServerChannelIDs(r.Context(), h.db, serverID)
+	for _, chID := range chIDs {
+		h.hub.BroadcastToChannel(chID, realtime.Event{
+			Type: realtime.EventMemberBan,
+			Data: map[string]string{"serverId": serverID.String(), "userId": targetID.String()},
+		})
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "banned"})
 }
@@ -308,6 +327,23 @@ func (h *ModerationHandler) Timeout(w http.ResponseWriter, r *http.Request) {
 
 	writeAuditLog(h.db, r.Context(), serverID, userID, models.AuditMemberTimeout, "member", targetID,
 		map[string]any{"duration": req.Duration}, req.Reason)
+
+	// Broadcast timeout to server channels so all members see the change
+	var timedOutStr string
+	if timedOutUntil != nil {
+		timedOutStr = timedOutUntil.Format(time.RFC3339)
+	}
+	chIDs, _ := getServerChannelIDs(r.Context(), h.db, serverID)
+	for _, chID := range chIDs {
+		h.hub.BroadcastToChannel(chID, realtime.Event{
+			Type: realtime.EventMemberTimeout,
+			Data: map[string]string{
+				"serverId":      serverID.String(),
+				"userId":        targetID.String(),
+				"timedOutUntil": timedOutStr,
+			},
+		})
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":        "timed_out",

@@ -134,6 +134,19 @@ func (h *Hub) RegisterUser(client *Client) {
 	clients[client] = struct{}{}
 }
 
+// GetClientChannels returns all channel IDs a client is currently subscribed to.
+func (h *Hub) GetClientChannels(client *Client) []uuid.UUID {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	var ids []uuid.UUID
+	for chID, clients := range h.channels {
+		if _, ok := clients[client]; ok {
+			ids = append(ids, chID)
+		}
+	}
+	return ids
+}
+
 // SubscribeUser subscribes all connected clients of a user to a channel.
 func (h *Hub) SubscribeUser(userID, channelID uuid.UUID) {
 	h.mu.RLock()

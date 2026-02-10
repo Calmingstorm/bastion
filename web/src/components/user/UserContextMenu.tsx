@@ -39,12 +39,15 @@ export function UserContextMenu({ userId, username, serverId, isOwner, canModera
     try { await apiBanMember(serverId, userId); } catch { /* handled */ }
   };
 
-  const handleTimeout = async () => {
+  const handleTimeout = async (duration: number) => {
     if (!serverId) return;
-    try { await apiTimeoutMember(serverId, userId, 300); } catch { /* handled */ }
+    try { await apiTimeoutMember(serverId, userId, duration); } catch { /* handled */ }
   };
 
   const showModActions = canModerate && !isOwner && !isSelf && serverId;
+
+  const itemClass = "flex w-full cursor-default items-center rounded px-2.5 py-1.5 text-sm outline-none text-[var(--text-secondary)] hover:bg-[var(--accent)] hover:text-white";
+  const dangerClass = "flex w-full cursor-default items-center rounded px-2.5 py-1.5 text-sm outline-none text-[var(--danger)] hover:bg-[var(--danger)] hover:text-white";
 
   return (
     <ContextMenu.Root>
@@ -58,38 +61,51 @@ export function UserContextMenu({ userId, username, serverId, isOwner, canModera
           </ContextMenu.Label>
           <ContextMenu.Separator className="my-1 h-px bg-[var(--border)]" />
           {!isSelf && (
-            <ContextMenu.Item
-              onSelect={handleSendMessage}
-              className="flex w-full cursor-default items-center rounded px-2.5 py-1.5 text-sm outline-none text-[var(--text-secondary)] hover:bg-[var(--accent)] hover:text-white"
-            >
+            <ContextMenu.Item onSelect={handleSendMessage} className={itemClass}>
               Send Message
             </ContextMenu.Item>
           )}
-          <ContextMenu.Item
-            onSelect={handleCopyUsername}
-            className="flex w-full cursor-default items-center rounded px-2.5 py-1.5 text-sm outline-none text-[var(--text-secondary)] hover:bg-[var(--accent)] hover:text-white"
-          >
+          <ContextMenu.Item onSelect={handleCopyUsername} className={itemClass}>
             Copy Username
           </ContextMenu.Item>
           {showModActions && (
             <>
               <ContextMenu.Separator className="my-1 h-px bg-[var(--border)]" />
-              <ContextMenu.Item
-                onSelect={handleTimeout}
-                className="flex w-full cursor-default items-center rounded px-2.5 py-1.5 text-sm outline-none text-[var(--danger)] hover:bg-[var(--danger)] hover:text-white"
-              >
-                Timeout (5min)
-              </ContextMenu.Item>
-              <ContextMenu.Item
-                onSelect={handleKick}
-                className="flex w-full cursor-default items-center rounded px-2.5 py-1.5 text-sm outline-none text-[var(--danger)] hover:bg-[var(--danger)] hover:text-white"
-              >
+              <ContextMenu.Sub>
+                <ContextMenu.SubTrigger className={dangerClass}>
+                  Timeout
+                  <span className="ml-auto text-xs">&#9656;</span>
+                </ContextMenu.SubTrigger>
+                <ContextMenu.SubContent className="z-50 min-w-[140px] rounded-lg border border-[var(--border)] bg-[var(--bg-tertiary)] p-1.5 shadow-xl">
+                  {[
+                    { label: '1 minute', seconds: 60 },
+                    { label: '5 minutes', seconds: 300 },
+                    { label: '10 minutes', seconds: 600 },
+                    { label: '1 hour', seconds: 3600 },
+                    { label: '1 day', seconds: 86400 },
+                    { label: '1 week', seconds: 604800 },
+                  ].map((opt) => (
+                    <ContextMenu.Item
+                      key={opt.seconds}
+                      onSelect={() => handleTimeout(opt.seconds)}
+                      className={dangerClass}
+                    >
+                      {opt.label}
+                    </ContextMenu.Item>
+                  ))}
+                  <ContextMenu.Separator className="my-1 h-px bg-[var(--border)]" />
+                  <ContextMenu.Item
+                    onSelect={() => handleTimeout(0)}
+                    className={itemClass}
+                  >
+                    Remove Timeout
+                  </ContextMenu.Item>
+                </ContextMenu.SubContent>
+              </ContextMenu.Sub>
+              <ContextMenu.Item onSelect={handleKick} className={dangerClass}>
                 Kick
               </ContextMenu.Item>
-              <ContextMenu.Item
-                onSelect={handleBan}
-                className="flex w-full cursor-default items-center rounded px-2.5 py-1.5 text-sm outline-none text-[var(--danger)] hover:bg-[var(--danger)] hover:text-white"
-              >
+              <ContextMenu.Item onSelect={handleBan} className={dangerClass}>
                 Ban
               </ContextMenu.Item>
             </>

@@ -32,11 +32,15 @@ export function MemberList() {
     fetchMemberList();
   }, [fetchMemberList]);
 
-  // Refetch on new member join (via WS event)
+  // Refetch on member changes (join, kick, ban, timeout via WS events)
   useEffect(() => {
     const handler = () => fetchMemberList();
     window.addEventListener('bastion:member-join', handler);
-    return () => window.removeEventListener('bastion:member-join', handler);
+    window.addEventListener('bastion:member-update', handler);
+    return () => {
+      window.removeEventListener('bastion:member-join', handler);
+      window.removeEventListener('bastion:member-update', handler);
+    };
   }, [fetchMemberList]);
 
   if (!selectedServerId) return null;
@@ -183,6 +187,7 @@ function MemberItem({ member, serverId, canModerate, isOwner }: {
   const isOffline = status === 'offline';
   const displayName = member.nickname || member.displayName || member.username;
   const initial = displayName.charAt(0).toUpperCase();
+  const isTimedOut = member.timedOutUntil && new Date(member.timedOutUntil) > new Date();
 
   // Show highest role color on name
   const highestRole = member.roles && member.roles.length > 0
@@ -226,6 +231,14 @@ function MemberItem({ member, serverId, canModerate, isOwner }: {
           >
             {displayName}
           </span>
+          {isTimedOut && (
+            <span title="Timed out" className="ml-auto shrink-0 text-[var(--text-muted)]">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <polyline points="12 6 12 12 16 14" />
+              </svg>
+            </span>
+          )}
         </button>
       </UserProfileCard>
     </UserContextMenu>
