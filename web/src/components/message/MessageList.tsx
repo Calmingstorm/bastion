@@ -163,7 +163,7 @@ export function MessageList({ onToggleMembers }: MessageListProps) {
   }
 
   return (
-    <div className="flex flex-1 flex-col bg-[var(--bg-primary)]">
+    <div className="flex min-h-0 flex-1 flex-col bg-[var(--bg-primary)]">
       {/* Channel header */}
       <div className="flex h-12 shrink-0 items-center justify-between border-b border-[var(--border)] px-4">
         <div className="flex min-w-0 items-center">
