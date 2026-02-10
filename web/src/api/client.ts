@@ -366,6 +366,10 @@ export async function apiGetDMs(): Promise<DMChannel[]> {
   return response.data;
 }
 
+export async function apiCloseDM(channelId: string): Promise<void> {
+  await apiClient.post(`/api/dm/${channelId}/close`);
+}
+
 export async function apiGetDM(channelId: string): Promise<DMChannel> {
   const response = await apiClient.get<DMChannel>(`/api/dm/${channelId}`);
   return response.data;

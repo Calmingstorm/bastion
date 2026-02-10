@@ -62,6 +62,12 @@ func (h *DMHandler) CreateOrGet(w http.ResponseWriter, r *http.Request) {
 		).Scan(&existingChannelID)
 
 		if existingChannelID != nil {
+			// Reopen if closed by current user
+			h.db.Exec(r.Context(),
+				`UPDATE dm_members SET closed_at = NULL
+				 WHERE channel_id = $1 AND user_id = $2 AND closed_at IS NOT NULL`,
+				*existingChannelID, userID,
+			)
 			// Return existing DM channel with recipients
 			ch := h.getDMChannel(r, *existingChannelID, userID)
 			if ch != nil {
@@ -152,6 +158,23 @@ func (h *DMHandler) CreateOrGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, ch)
 }
 
+func (h *DMHandler) Close(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromContext(r.Context())
+	channelID := chi.URLParam(r, "channelID")
+
+	tag, err := h.db.Exec(r.Context(),
+		`UPDATE dm_members SET closed_at = NOW()
+		 WHERE channel_id = $1 AND user_id = $2 AND closed_at IS NULL`,
+		channelID, userID,
+	)
+	if err != nil || tag.RowsAffected() == 0 {
+		writeJSON(w, http.StatusNotFound, errorBody("DM not found"))
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *DMHandler) List(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 
@@ -159,7 +182,7 @@ func (h *DMHandler) List(w http.ResponseWriter, r *http.Request) {
 		`SELECT c.id, c.server_id, c.name, c.topic, c.type, c.position, c.created_at
 		 FROM channels c
 		 INNER JOIN dm_members dm ON dm.channel_id = c.id
-		 WHERE dm.user_id = $1 AND c.type = 'dm'
+		 WHERE dm.user_id = $1 AND c.type = 'dm' AND dm.closed_at IS NULL
 		 ORDER BY c.created_at DESC`, userID,
 	)
 	if err != nil {

@@ -204,6 +204,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 		r.Post("/api/dm", dmHandler.CreateOrGet)
 		r.Get("/api/dm", dmHandler.List)
 		r.Get("/api/dm/{channelID}", dmHandler.Get)
+		r.Post("/api/dm/{channelID}/close", dmHandler.Close)
 	})
 
 	// WebSocket (protected, NO timeout — connection must stay alive)

@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { DMChannel } from '../types';
-import { apiGetDMs, apiCreateDM } from '../api/client';
+import { apiGetDMs, apiCreateDM, apiCloseDM } from '../api/client';
 
 interface DMState {
   dmChannels: DMChannel[];
@@ -9,6 +9,7 @@ interface DMState {
   error: string | null;
   fetchDMs: () => Promise<void>;
   createDM: (recipientIds: string[]) => Promise<DMChannel>;
+  closeDM: (channelId: string) => Promise<void>;
   selectDM: (channelId: string | null) => void;
   reset: () => void;
 }
@@ -39,6 +40,14 @@ export const useDMStore = create<DMState>((set) => ({
       return {};
     });
     return dm;
+  },
+
+  closeDM: async (channelId: string) => {
+    await apiCloseDM(channelId);
+    set((state) => ({
+      dmChannels: state.dmChannels.filter((d) => d.id !== channelId),
+      selectedDMId: state.selectedDMId === channelId ? null : state.selectedDMId,
+    }));
   },
 
   selectDM: (channelId: string | null) => {

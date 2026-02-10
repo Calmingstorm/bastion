@@ -302,6 +302,14 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 		Data: msg,
 	})
 
+	// For DM channels, reopen for any members who closed the conversation
+	if serverID == nil {
+		h.db.Exec(r.Context(),
+			`UPDATE dm_members SET closed_at = NULL WHERE channel_id = $1 AND closed_at IS NOT NULL`,
+			channelID,
+		)
+	}
+
 	// Process @mentions (only for server channels, not DMs)
 	if serverID != nil {
 		h.processMentions(r, *serverID, channelID, userID, req.Content)

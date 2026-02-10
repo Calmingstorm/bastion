@@ -10,6 +10,7 @@ export function DMList() {
   const dmChannels = useDMStore((s) => s.dmChannels);
   const selectedDMId = useDMStore((s) => s.selectedDMId);
   const selectDM = useDMStore((s) => s.selectDM);
+  const closeDM = useDMStore((s) => s.closeDM);
   const fetchDMs = useDMStore((s) => s.fetchDMs);
   const unreadChannels = useUnreadStore((s) => s.unreadChannels);
   const [newDMOpen, setNewDMOpen] = useState(false);
@@ -56,14 +57,14 @@ export function DMList() {
               const hasUnread = unreadChannels.has(dm.id);
 
               return (
-                <button
+                <div
                   key={dm.id}
-                  onClick={() => handleSelect(dm.id)}
-                  className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left transition-colors ${
+                  className={`group flex w-full items-center gap-2 rounded px-2 py-1.5 text-left transition-colors cursor-pointer ${
                     isSelected
                       ? 'bg-[var(--bg-input)] text-[var(--text-primary)]'
                       : 'text-[var(--text-muted)] hover:bg-[var(--bg-input)]/50 hover:text-[var(--text-secondary)]'
                   }`}
+                  onClick={() => handleSelect(dm.id)}
                 >
                   <div className="relative shrink-0">
                     {recipient?.avatarUrl ? (
@@ -94,7 +95,20 @@ export function DMList() {
                       </p>
                     )}
                   </div>
-                </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      closeDM(dm.id);
+                    }}
+                    className="shrink-0 rounded p-0.5 text-[var(--text-muted)] opacity-0 transition-opacity hover:text-[var(--text-primary)] group-hover:opacity-100"
+                    title="Close DM"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="18" y1="6" x2="6" y2="18" />
+                      <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                  </button>
+                </div>
               );
             })}
           </div>
