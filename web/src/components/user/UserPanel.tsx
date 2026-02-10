@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useAuthStore } from '../../stores/authStore';
 import { useThemeStore } from '../../stores/themeStore';
+import { usePresenceStore } from '../../stores/presenceStore';
 import { UserSettingsDialog } from './UserSettingsDialog';
 
 export function UserPanel() {
@@ -8,6 +9,7 @@ export function UserPanel() {
   const logout = useAuthStore((s) => s.logout);
   const theme = useThemeStore((s) => s.theme);
   const toggleTheme = useThemeStore((s) => s.toggleTheme);
+  const ownStatus = usePresenceStore((s) => (user ? s.presences[user.id] || 'offline' : 'offline'));
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   if (!user) return null;
@@ -29,7 +31,7 @@ export function UserPanel() {
             {user.displayName || user.username}
           </p>
           <p className="truncate text-[11px] text-[var(--text-muted)]">
-            Online
+            {ownStatus.charAt(0).toUpperCase() + ownStatus.slice(1)}
           </p>
         </div>
 

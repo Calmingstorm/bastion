@@ -46,6 +46,8 @@ export class WebSocketClient {
     this.ws.onopen = () => {
       this.reconnectAttempts = 0;
       this.startHeartbeat();
+      // Notify listeners that the connection is open (or reopened after reconnect)
+      this.dispatch('CONNECTED' as WSEventType, {});
     };
 
     this.ws.onmessage = (event: MessageEvent) => {

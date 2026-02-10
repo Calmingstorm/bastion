@@ -255,8 +255,18 @@ export const useWSStore = create<WSState>((set) => ({
       }
     });
 
+    // Set own presence to online when WebSocket opens (or reopens after reconnect).
+    // The server also broadcasts PRESENCE_UPDATE but there's a race where the
+    // broadcast can fire before our channel subscriptions are processed.
+    wsClient.on('CONNECTED', () => {
+      const currentUser = useAuthStore.getState().user;
+      if (currentUser) {
+        usePresenceStore.getState().setPresence(currentUser.id, 'online');
+      }
+      set({ isConnected: true });
+    });
+
     wsClient.connect(token);
-    set({ isConnected: true });
 
     // Start heartbeat for presence (every 60s)
     if (heartbeatInterval) {

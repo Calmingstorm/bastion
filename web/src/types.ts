@@ -218,7 +218,8 @@ export type WSEventType =
   | 'SERVER_DELETE'
   | 'MESSAGE_PIN'
   | 'MESSAGE_UNPIN'
-  | 'MEMBER_NICKNAME_UPDATE';
+  | 'MEMBER_NICKNAME_UPDATE'
+  | 'CONNECTED';
 
 export interface PinnedMessage {
   id: string;
