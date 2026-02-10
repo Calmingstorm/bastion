@@ -264,7 +264,7 @@ type resetPasswordRequest struct {
 }
 
 func (h *AuthHandler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
-	if !h.cfg.SMTP.Enabled() || h.emailSvc == nil {
+	if h.emailSvc == nil {
 		writeJSON(w, http.StatusNotImplemented, errorBody("password reset not available"))
 		return
 	}

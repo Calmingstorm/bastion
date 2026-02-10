@@ -47,8 +47,8 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 	// Create services
 	fileStorage := storage.NewFileStorage(&cfg.Upload)
 	var emailSvc *email.Service
-	if cfg.SMTP.Enabled() {
-		emailSvc = email.New(&cfg.SMTP)
+	if cfg.Mailgun.Enabled() || cfg.SMTP.Enabled() {
+		emailSvc = email.New(&cfg.SMTP, &cfg.Mailgun)
 	}
 
 	// Create handlers
