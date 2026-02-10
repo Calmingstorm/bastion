@@ -50,6 +50,7 @@ export function MessageInput() {
       // Error is handled in the store
     } finally {
       setIsSending(false);
+      textareaRef.current?.focus();
     }
   }, [content, files, activeChannelId, isSending, sendMessage, addMessage]);
 

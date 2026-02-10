@@ -10,16 +10,16 @@ interface ServerIconProps {
 }
 
 const COLORS = [
-  '#5865f2',
-  '#57f287',
-  '#fee75c',
-  '#eb459e',
-  '#ed4245',
-  '#3ba55d',
-  '#e67e22',
-  '#9b59b6',
-  '#1abc9c',
-  '#e91e63',
+  '#0ea5e9', // sky
+  '#06b6d4', // cyan
+  '#14b8a6', // teal
+  '#22c55e', // green
+  '#f59e0b', // amber
+  '#f97316', // orange
+  '#ef4444', // red
+  '#ec4899', // pink
+  '#a855f7', // purple
+  '#6366f1', // indigo
 ];
 
 function getColorForId(id: string): string {
@@ -64,10 +64,8 @@ export function ServerIcon({ server, isSelected, onClick }: ServerIconProps) {
 
             <button
               onClick={onClick}
-              className={`relative flex h-12 w-12 items-center justify-center text-lg font-semibold text-white transition-all duration-200 ${
-                isSelected
-                  ? 'rounded-2xl'
-                  : 'rounded-[24px] hover:rounded-2xl'
+              className={`relative flex h-12 w-12 items-center justify-center rounded-xl text-lg font-semibold text-white transition-all duration-200 ${
+                isSelected ? 'ring-2 ring-white/20' : ''
               }`}
               style={{
                 backgroundColor: server.iconUrl ? 'transparent' : bgColor,
@@ -77,9 +75,7 @@ export function ServerIcon({ server, isSelected, onClick }: ServerIconProps) {
                 <img
                   src={server.iconUrl}
                   alt={server.name}
-                  className={`h-12 w-12 object-cover transition-all duration-200 ${
-                    isSelected ? 'rounded-2xl' : 'rounded-[24px] hover:rounded-2xl'
-                  }`}
+                  className="h-12 w-12 rounded-xl object-cover"
                 />
               ) : (
                 initial

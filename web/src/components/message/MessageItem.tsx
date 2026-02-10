@@ -11,16 +11,16 @@ interface MessageItemProps {
 }
 
 const AVATAR_COLORS = [
-  '#5865f2',
-  '#57f287',
-  '#fee75c',
-  '#eb459e',
-  '#ed4245',
-  '#3ba55d',
-  '#e67e22',
-  '#9b59b6',
-  '#1abc9c',
-  '#e91e63',
+  '#0ea5e9', // sky
+  '#06b6d4', // cyan
+  '#14b8a6', // teal
+  '#22c55e', // green
+  '#f59e0b', // amber
+  '#f97316', // orange
+  '#ef4444', // red
+  '#ec4899', // pink
+  '#a855f7', // purple
+  '#6366f1', // indigo
 ];
 
 function getAvatarColor(id: string): string {

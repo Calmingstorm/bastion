@@ -1,28 +1,37 @@
 package api
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
 
 	"github.com/Calmingstorm/bastion/server/internal/auth"
 	"github.com/Calmingstorm/bastion/server/internal/config"
+	"github.com/Calmingstorm/bastion/server/internal/email"
 	"github.com/Calmingstorm/bastion/server/internal/models"
 )
 
 var usernameRegex = regexp.MustCompile(`^[a-zA-Z0-9_]{3,32}$`)
 
 type AuthHandler struct {
-	db  *pgxpool.Pool
-	cfg *config.Config
+	db       *pgxpool.Pool
+	cfg      *config.Config
+	rdb      *redis.Client
+	emailSvc *email.Service
 }
 
-func NewAuthHandler(db *pgxpool.Pool, cfg *config.Config) *AuthHandler {
-	return &AuthHandler{db: db, cfg: cfg}
+func NewAuthHandler(db *pgxpool.Pool, cfg *config.Config, rdb *redis.Client, emailSvc *email.Service) *AuthHandler {
+	return &AuthHandler{db: db, cfg: cfg, rdb: rdb, emailSvc: emailSvc}
 }
 
 type registerRequest struct {
@@ -243,4 +252,123 @@ func (h *AuthHandler) GetMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, user)
+}
+
+type forgotPasswordRequest struct {
+	Email string `json:"email"`
+}
+
+type resetPasswordRequest struct {
+	Token    string `json:"token"`
+	Password string `json:"password"`
+}
+
+func (h *AuthHandler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
+	if !h.cfg.SMTP.Enabled() || h.emailSvc == nil {
+		writeJSON(w, http.StatusNotImplemented, errorBody("password reset not available"))
+		return
+	}
+
+	var req forgotPasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		return
+	}
+
+	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
+	msg := map[string]string{"message": "If that email exists, a reset link has been sent."}
+
+	// Look up user — always return same message to prevent enumeration
+	var userID string
+	err := h.db.QueryRow(r.Context(),
+		`SELECT id FROM users WHERE email = $1`, req.Email,
+	).Scan(&userID)
+	if err != nil {
+		writeJSON(w, http.StatusOK, msg)
+		return
+	}
+
+	// Generate secure random token
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		log.Error().Err(err).Msg("failed to generate reset token")
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+	token := hex.EncodeToString(tokenBytes)
+
+	// Store in Redis with 1-hour TTL
+	ctx := context.Background()
+	if err := h.rdb.Set(ctx, "reset:"+token, userID, 1*time.Hour).Err(); err != nil {
+		log.Error().Err(err).Msg("failed to store reset token")
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+
+	// Send email
+	resetLink := fmt.Sprintf("%s/reset-password?token=%s", h.cfg.Domain, token)
+	htmlBody := fmt.Sprintf(`<div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:24px">
+<h2 style="color:#e4e6eb">Password Reset</h2>
+<p style="color:#9ea3b0">You requested a password reset for your Bastion account. Click the link below to set a new password:</p>
+<p><a href="%s" style="display:inline-block;padding:10px 24px;background:#0ea5e9;color:#fff;border-radius:6px;text-decoration:none;font-weight:600">Reset Password</a></p>
+<p style="color:#6b7084;font-size:13px">This link expires in 1 hour. If you didn't request this, you can ignore this email.</p>
+</div>`, resetLink)
+
+	if err := h.emailSvc.Send(req.Email, "Bastion — Password Reset", htmlBody); err != nil {
+		log.Error().Err(err).Str("email", req.Email).Msg("failed to send reset email")
+		// Still return success to prevent enumeration
+	}
+
+	writeJSON(w, http.StatusOK, msg)
+}
+
+func (h *AuthHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
+	var req resetPasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		return
+	}
+
+	req.Token = strings.TrimSpace(req.Token)
+	if req.Token == "" {
+		writeJSON(w, http.StatusBadRequest, errorBody("token is required"))
+		return
+	}
+
+	if len(req.Password) < 8 {
+		writeJSON(w, http.StatusBadRequest, errorBody("password must be at least 8 characters"))
+		return
+	}
+
+	// Look up token in Redis
+	ctx := context.Background()
+	userID, err := h.rdb.Get(ctx, "reset:"+req.Token).Result()
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid or expired token"))
+		return
+	}
+
+	// Hash new password
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to hash password")
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+
+	// Update password in database
+	_, err = h.db.Exec(r.Context(),
+		`UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
+		hash, userID,
+	)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to update password")
+		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		return
+	}
+
+	// Delete token (single-use)
+	h.rdb.Del(ctx, "reset:"+req.Token)
+
+	writeJSON(w, http.StatusOK, map[string]string{"message": "Password has been reset."})
 }

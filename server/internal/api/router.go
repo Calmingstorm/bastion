@@ -17,6 +17,7 @@ import (
 
 	"github.com/Calmingstorm/bastion/server/internal/auth"
 	"github.com/Calmingstorm/bastion/server/internal/config"
+	"github.com/Calmingstorm/bastion/server/internal/email"
 	"github.com/Calmingstorm/bastion/server/internal/realtime"
 	"github.com/Calmingstorm/bastion/server/internal/storage"
 )
@@ -45,9 +46,13 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 
 	// Create services
 	fileStorage := storage.NewFileStorage(&cfg.Upload)
+	var emailSvc *email.Service
+	if cfg.SMTP.Enabled() {
+		emailSvc = email.New(&cfg.SMTP)
+	}
 
 	// Create handlers
-	authHandler := NewAuthHandler(db, cfg)
+	authHandler := NewAuthHandler(db, cfg, rdb, emailSvc)
 	serverHandler := NewServerHandler(db)
 	channelHandler := NewChannelHandler(db)
 	messageHandler := NewMessageHandler(db, hub)
@@ -62,6 +67,8 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 		r.Post("/register", authHandler.Register)
 		r.Post("/login", authHandler.Login)
 		r.Post("/refresh", authHandler.Refresh)
+		r.Post("/forgot-password", authHandler.ForgotPassword)
+		r.Post("/reset-password", authHandler.ResetPassword)
 	})
 
 	// Serve uploaded files (public, UUID-named so unguessable)

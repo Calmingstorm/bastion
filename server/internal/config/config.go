@@ -14,6 +14,20 @@ type Config struct {
 	JWT    JWTConfig
 	Redis  RedisConfig
 	Upload UploadConfig
+	SMTP   SMTPConfig
+	Domain string
+}
+
+type SMTPConfig struct {
+	Host     string
+	Port     string
+	Username string
+	Password string
+	From     string
+}
+
+func (c *SMTPConfig) Enabled() bool {
+	return c.Host != "" && c.Username != ""
 }
 
 type DBConfig struct {
@@ -75,6 +89,14 @@ func Load() *Config {
 			MaxFileSize: parseFileSize(getEnvMulti("10MB", "BASTION_UPLOAD_MAX_SIZE")),
 			BaseURL:     getEnvMulti("/api/uploads", "BASTION_UPLOAD_BASE_URL"),
 		},
+		SMTP: SMTPConfig{
+			Host:     getEnvMulti("", "BASTION_SMTP_HOST"),
+			Port:     getEnvMulti("587", "BASTION_SMTP_PORT"),
+			Username: getEnvMulti("", "BASTION_SMTP_USER"),
+			Password: getEnvMulti("", "BASTION_SMTP_PASS"),
+			From:     getEnvMulti("Bastion <noreply@localhost>", "BASTION_SMTP_FROM"),
+		},
+		Domain: getEnvMulti("http://localhost:5173", "BASTION_DOMAIN"),
 	}
 }
 

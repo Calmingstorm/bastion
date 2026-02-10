@@ -1,19 +1,19 @@
 @import "tailwindcss";
 
 :root {
-  /* Discord-inspired dark palette */
-  --bg-primary: #313338;
-  --bg-secondary: #2b2d31;
-  --bg-tertiary: #1e1f22;
-  --bg-input: #383a40;
-  --text-primary: #f2f3f5;
-  --text-secondary: #b5bac1;
-  --text-muted: #949ba4;
-  --accent: #5865f2;
-  --accent-hover: #4752c4;
-  --danger: #da373c;
-  --success: #23a559;
-  --border: #3f4147;
+  /* Bastion dark palette */
+  --bg-primary: #1a1d24;
+  --bg-secondary: #15181e;
+  --bg-tertiary: #101318;
+  --bg-input: #1e222b;
+  --text-primary: #e4e6eb;
+  --text-secondary: #9ea3b0;
+  --text-muted: #6b7084;
+  --accent: #0ea5e9;
+  --accent-hover: #0284c7;
+  --danger: #ef4444;
+  --success: #22c55e;
+  --border: #252930;
 }
 
 body {

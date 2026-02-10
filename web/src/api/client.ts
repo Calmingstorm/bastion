@@ -366,5 +366,28 @@ export async function apiGetMembers(serverId: string): Promise<MemberWithUser[]>
   return response.data;
 }
 
+// ---- Password Reset API ----
+
+export async function apiForgotPassword(
+  email: string
+): Promise<{ message: string }> {
+  const response = await apiClient.post<{ message: string }>(
+    '/api/auth/forgot-password',
+    { email }
+  );
+  return response.data;
+}
+
+export async function apiResetPassword(
+  token: string,
+  password: string
+): Promise<{ message: string }> {
+  const response = await apiClient.post<{ message: string }>(
+    '/api/auth/reset-password',
+    { token, password }
+  );
+  return response.data;
+}
+
 export { getAccessToken, getRefreshToken, setTokens, clearTokens };
 export default apiClient;

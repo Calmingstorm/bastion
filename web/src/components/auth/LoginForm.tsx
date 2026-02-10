@@ -73,6 +73,12 @@ export function LoginForm() {
           className="w-full rounded-[3px] border-none bg-[var(--bg-tertiary)] px-3 py-2.5 text-[var(--text-primary)] placeholder-[var(--text-muted)] outline-none focus:ring-2 focus:ring-[var(--accent)]"
           placeholder="Enter your password"
         />
+        <Link
+          to="/forgot-password"
+          className="mt-1 inline-block text-xs text-[var(--accent)] hover:underline"
+        >
+          Forgot your password?
+        </Link>
       </div>
 
       <button

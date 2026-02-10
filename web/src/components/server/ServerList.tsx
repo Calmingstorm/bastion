@@ -33,21 +33,13 @@ export function ServerList() {
           <Tooltip.Trigger asChild>
             <button
               onClick={handleHomeClick}
-              className={`mb-1 flex h-12 w-12 items-center justify-center text-white transition-all duration-200 ${
+              className={`mb-1 flex h-12 w-12 items-center justify-center rounded-xl text-xl font-bold text-white transition-all duration-200 ${
                 !selectedServerId
-                  ? 'rounded-2xl bg-[var(--accent)]'
-                  : 'rounded-[24px] bg-[var(--accent)] hover:rounded-xl hover:bg-[var(--accent-hover)]'
+                  ? 'bg-[var(--accent)]'
+                  : 'bg-[var(--accent)] hover:bg-[var(--accent-hover)]'
               }`}
             >
-              <svg
-                width="24"
-                height="24"
-                viewBox="0 0 24 24"
-                fill="currentColor"
-              >
-                <path d="M3 9.5L12 4l9 5.5v9L12 24l-9-5.5v-9zM12 2L1 8.5v9L12 24l11-6.5v-9L12 2z" />
-                <path d="M12 8a4 4 0 100 8 4 4 0 000-8z" />
-              </svg>
+              B
             </button>
           </Tooltip.Trigger>
           <Tooltip.Portal>
@@ -85,7 +77,7 @@ export function ServerList() {
           <Tooltip.Trigger asChild>
             <button
               onClick={() => setDialogOpen(true)}
-              className="flex h-12 w-12 items-center justify-center rounded-[24px] bg-[var(--bg-secondary)] text-[var(--success)] transition-all duration-200 hover:rounded-2xl hover:bg-[var(--success)] hover:text-white"
+              className="flex h-12 w-12 items-center justify-center rounded-xl bg-[var(--bg-secondary)] text-[var(--success)] transition-all duration-200 hover:bg-[var(--success)] hover:text-white"
             >
               <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M13 5h-2v6H5v2h6v6h2v-6h6v-2h-6V5z" />
