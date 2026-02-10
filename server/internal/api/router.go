@@ -37,7 +37,6 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 	r.Use(middleware.RealIP)
 	r.Use(zerologMiddleware)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(30 * time.Second))
 
 	// Health check
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -68,9 +67,10 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 	// Serve uploaded files (public, UUID-named so unguessable)
 	r.Get("/api/uploads/*", userHandler.ServeUpload)
 
-	// Protected routes
+	// Protected API routes (with timeout)
 	r.Group(func(r chi.Router) {
 		r.Use(auth.Middleware(cfg.JWT.Secret))
+		r.Use(middleware.Timeout(30 * time.Second))
 
 		// Users
 		r.Get("/api/users/me", authHandler.GetMe)
@@ -118,8 +118,11 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 		r.Post("/api/dm", dmHandler.CreateOrGet)
 		r.Get("/api/dm", dmHandler.List)
 		r.Get("/api/dm/{channelID}", dmHandler.Get)
+	})
 
-		// WebSocket
+	// WebSocket (protected, NO timeout — connection must stay alive)
+	r.Group(func(r chi.Router) {
+		r.Use(auth.Middleware(cfg.JWT.Secret))
 		r.Get("/api/ws", func(w http.ResponseWriter, r *http.Request) {
 			userID := auth.UserIDFromContext(r.Context())
 			realtime.ServeWS(hub, w, r, userID, db, rdb)

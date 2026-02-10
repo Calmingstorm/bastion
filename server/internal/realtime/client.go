@@ -94,7 +94,9 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, userID uuid.UUID,
 		}
 	}
 
-	ctx, cancel := context.WithCancel(r.Context())
+	// Use context.Background() — the WS connection outlives the HTTP handler.
+	// r.Context() is canceled when ServeWS returns, which would kill the goroutines.
+	ctx, cancel := context.WithCancel(context.Background())
 
 	go client.writePump(ctx, cancel)
 	go client.readPump(ctx, cancel, channelIDs)
