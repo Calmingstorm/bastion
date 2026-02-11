@@ -29,12 +29,12 @@ func (h *PinHandler) Pin(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	channelID, err := parseUUID(chi.URLParam(r, "channelID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid channel ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid channel ID"))
 		return
 	}
 	messageID, err := parseUUID(chi.URLParam(r, "messageID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid message ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid message ID"))
 		return
 	}
 
@@ -44,7 +44,7 @@ func (h *PinHandler) Pin(w http.ResponseWriter, r *http.Request) {
 		`SELECT server_id FROM channels WHERE id = $1`, channelID,
 	).Scan(&serverID)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorBody("channel not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "channel not found"))
 		return
 	}
 
@@ -62,7 +62,7 @@ func (h *PinHandler) Pin(w http.ResponseWriter, r *http.Request) {
 			channelID, userID,
 		).Scan(&isParticipant)
 		if err != nil || !isParticipant {
-			writeJSON(w, http.StatusForbidden, errorBody("you do not have access to this channel"))
+			writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have access to this channel"))
 			return
 		}
 	}
@@ -74,7 +74,7 @@ func (h *PinHandler) Pin(w http.ResponseWriter, r *http.Request) {
 		messageID, channelID,
 	).Scan(&msgExists)
 	if err != nil || !msgExists {
-		writeJSON(w, http.StatusNotFound, errorBody("message not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "message not found"))
 		return
 	}
 
@@ -85,11 +85,11 @@ func (h *PinHandler) Pin(w http.ResponseWriter, r *http.Request) {
 	).Scan(&pinCount)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to count pins")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	if pinCount >= 50 {
-		writeJSON(w, http.StatusBadRequest, errorBody("this channel has reached the maximum of 50 pins"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "this channel has reached the maximum of 50 pins"))
 		return
 	}
 
@@ -102,7 +102,7 @@ func (h *PinHandler) Pin(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to pin message")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -123,12 +123,12 @@ func (h *PinHandler) Unpin(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	channelID, err := parseUUID(chi.URLParam(r, "channelID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid channel ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid channel ID"))
 		return
 	}
 	messageID, err := parseUUID(chi.URLParam(r, "messageID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid message ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid message ID"))
 		return
 	}
 
@@ -138,7 +138,7 @@ func (h *PinHandler) Unpin(w http.ResponseWriter, r *http.Request) {
 		`SELECT server_id FROM channels WHERE id = $1`, channelID,
 	).Scan(&serverID)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorBody("channel not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "channel not found"))
 		return
 	}
 
@@ -156,7 +156,7 @@ func (h *PinHandler) Unpin(w http.ResponseWriter, r *http.Request) {
 			channelID, userID,
 		).Scan(&isParticipant)
 		if err != nil || !isParticipant {
-			writeJSON(w, http.StatusForbidden, errorBody("you do not have access to this channel"))
+			writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have access to this channel"))
 			return
 		}
 	}
@@ -168,7 +168,7 @@ func (h *PinHandler) Unpin(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to unpin message")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -199,7 +199,7 @@ func (h *PinHandler) List(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	channelID, err := parseUUID(chi.URLParam(r, "channelID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid channel ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid channel ID"))
 		return
 	}
 
@@ -216,7 +216,7 @@ func (h *PinHandler) List(w http.ResponseWriter, r *http.Request) {
 		)`, channelID, userID,
 	).Scan(&hasAccess)
 	if err != nil || !hasAccess {
-		writeJSON(w, http.StatusForbidden, errorBody("you do not have access to this channel"))
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have access to this channel"))
 		return
 	}
 
@@ -235,7 +235,7 @@ func (h *PinHandler) List(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to list pinned messages")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	defer rows.Close()
@@ -248,7 +248,7 @@ func (h *PinHandler) List(w http.ResponseWriter, r *http.Request) {
 			&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL,
 			&msg.PinnedAt); err != nil {
 			log.Error().Err(err).Msg("failed to scan pinned message")
-			writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
 		msg.Author = &author
@@ -257,7 +257,7 @@ func (h *PinHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	if err := rows.Err(); err != nil {
 		log.Error().Err(err).Msg("rows iteration error")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 

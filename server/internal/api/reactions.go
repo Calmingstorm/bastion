@@ -24,17 +24,17 @@ func (h *ReactionHandler) AddReaction(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	channelID, err := parseUUID(chi.URLParam(r, "channelID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid channel ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid channel ID"))
 		return
 	}
 	messageID, err := parseUUID(chi.URLParam(r, "messageID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid message ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid message ID"))
 		return
 	}
 	emoji := chi.URLParam(r, "emoji")
 	if emoji == "" || len(emoji) > 32 {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid emoji"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid emoji"))
 		return
 	}
 
@@ -45,7 +45,7 @@ func (h *ReactionHandler) AddReaction(w http.ResponseWriter, r *http.Request) {
 		messageID, channelID,
 	).Scan(&exists)
 	if err != nil || !exists {
-		writeJSON(w, http.StatusNotFound, errorBody("message not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "message not found"))
 		return
 	}
 
@@ -57,7 +57,7 @@ func (h *ReactionHandler) AddReaction(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to add reaction")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -78,17 +78,17 @@ func (h *ReactionHandler) RemoveReaction(w http.ResponseWriter, r *http.Request)
 	userID := auth.UserIDFromContext(r.Context())
 	channelID, err := parseUUID(chi.URLParam(r, "channelID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid channel ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid channel ID"))
 		return
 	}
 	messageID, err := parseUUID(chi.URLParam(r, "messageID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid message ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid message ID"))
 		return
 	}
 	emoji := chi.URLParam(r, "emoji")
 	if emoji == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid emoji"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid emoji"))
 		return
 	}
 
@@ -98,7 +98,7 @@ func (h *ReactionHandler) RemoveReaction(w http.ResponseWriter, r *http.Request)
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to remove reaction")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 

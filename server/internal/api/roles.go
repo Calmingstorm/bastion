@@ -74,11 +74,11 @@ func getMemberPermissions(db *pgxpool.Pool, r *http.Request, serverID, userID uu
 func requirePermission(db *pgxpool.Pool, w http.ResponseWriter, r *http.Request, serverID, userID uuid.UUID, perm int64) (int64, bool) {
 	perms, err := getMemberPermissions(db, r, serverID, userID)
 	if err != nil {
-		writeJSON(w, http.StatusForbidden, errorBody("not a member of this server"))
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "not a member of this server"))
 		return 0, false
 	}
 	if !permissions.Has(perms, perm) {
-		writeJSON(w, http.StatusForbidden, errorBody("you do not have permission to do that"))
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have permission to do that"))
 		return 0, false
 	}
 	return perms, true
@@ -92,7 +92,7 @@ func requireMembership(db *pgxpool.Pool, w http.ResponseWriter, r *http.Request,
 		serverID, userID,
 	).Scan(&isMember)
 	if err != nil || !isMember {
-		writeJSON(w, http.StatusForbidden, errorBody("you are not a member of this server"))
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you are not a member of this server"))
 		return false
 	}
 	return true
@@ -108,7 +108,7 @@ func (h *RoleHandler) Create(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 
@@ -118,13 +118,13 @@ func (h *RoleHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	var req createRoleRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
 	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" || len(req.Name) > 100 {
-		writeJSON(w, http.StatusBadRequest, errorBody("role name must be 1-100 characters"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "role name must be 1-100 characters"))
 		return
 	}
 
@@ -136,7 +136,7 @@ func (h *RoleHandler) Create(w http.ResponseWriter, r *http.Request) {
 	).Scan(&maxPos)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to get max role position")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -155,12 +155,21 @@ func (h *RoleHandler) Create(w http.ResponseWriter, r *http.Request) {
 		&role.Permissions, &role.IsDefault, &role.CreatedAt)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create role")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
 	// Audit log
 	writeAuditLog(h.db, r.Context(), serverID, userID, models.AuditRoleCreate, "role", role.ID, nil, nil)
+
+	// Broadcast to all server channels
+	channelIDs, _ := getServerChannelIDs(r.Context(), h.db, serverID)
+	for _, chID := range channelIDs {
+		h.hub.BroadcastToChannel(chID, realtime.Event{
+			Type: realtime.EventRoleCreate,
+			Data: role,
+		})
+	}
 
 	writeJSON(w, http.StatusCreated, role)
 }
@@ -169,7 +178,7 @@ func (h *RoleHandler) List(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 
@@ -184,7 +193,7 @@ func (h *RoleHandler) List(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to list roles")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	defer rows.Close()
@@ -195,7 +204,7 @@ func (h *RoleHandler) List(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(&role.ID, &role.ServerID, &role.Name, &role.Color, &role.Position,
 			&role.Permissions, &role.IsDefault, &role.CreatedAt); err != nil {
 			log.Error().Err(err).Msg("failed to scan role")
-			writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
 		roles = append(roles, role)
@@ -214,12 +223,12 @@ func (h *RoleHandler) Update(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 	roleID, err := parseUUID(chi.URLParam(r, "roleID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid role ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid role ID"))
 		return
 	}
 
@@ -229,7 +238,7 @@ func (h *RoleHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	var req updateRoleRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
@@ -241,7 +250,7 @@ func (h *RoleHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if req.Name != nil {
 		name := strings.TrimSpace(*req.Name)
 		if name == "" || len(name) > 100 {
-			writeJSON(w, http.StatusBadRequest, errorBody("role name must be 1-100 characters"))
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "role name must be 1-100 characters"))
 			return
 		}
 		sets = append(sets, "name = $"+itoa(argIdx))
@@ -262,7 +271,7 @@ func (h *RoleHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(sets) == 0 {
-		writeJSON(w, http.StatusBadRequest, errorBody("no fields to update"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "no fields to update"))
 		return
 	}
 
@@ -276,11 +285,20 @@ func (h *RoleHandler) Update(w http.ResponseWriter, r *http.Request) {
 		&role.ID, &role.ServerID, &role.Name, &role.Color, &role.Position,
 		&role.Permissions, &role.IsDefault, &role.CreatedAt)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorBody("role not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "role not found"))
 		return
 	}
 
 	writeAuditLog(h.db, r.Context(), serverID, userID, models.AuditRoleUpdate, "role", role.ID, nil, nil)
+
+	// Broadcast to all server channels
+	channelIDs, _ := getServerChannelIDs(r.Context(), h.db, serverID)
+	for _, chID := range channelIDs {
+		h.hub.BroadcastToChannel(chID, realtime.Event{
+			Type: realtime.EventRoleUpdate,
+			Data: role,
+		})
+	}
 
 	writeJSON(w, http.StatusOK, role)
 }
@@ -289,12 +307,12 @@ func (h *RoleHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 	roleID, err := parseUUID(chi.URLParam(r, "roleID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid role ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid role ID"))
 		return
 	}
 
@@ -308,11 +326,11 @@ func (h *RoleHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		`SELECT is_default FROM roles WHERE id = $1 AND server_id = $2`, roleID, serverID,
 	).Scan(&isDefault)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorBody("role not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "role not found"))
 		return
 	}
 	if isDefault {
-		writeJSON(w, http.StatusBadRequest, errorBody("cannot delete the default role"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "cannot delete the default role"))
 		return
 	}
 
@@ -321,11 +339,23 @@ func (h *RoleHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to delete role")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
 	writeAuditLog(h.db, r.Context(), serverID, userID, models.AuditRoleDelete, "role", roleID, nil, nil)
+
+	// Broadcast to all server channels
+	channelIDs, _ := getServerChannelIDs(r.Context(), h.db, serverID)
+	for _, chID := range channelIDs {
+		h.hub.BroadcastToChannel(chID, realtime.Event{
+			Type: realtime.EventRoleDelete,
+			Data: map[string]string{
+				"roleId":   roleID.String(),
+				"serverId": serverID.String(),
+			},
+		})
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
@@ -338,12 +368,12 @@ func (h *RoleHandler) AssignRole(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 	roleID, err := parseUUID(chi.URLParam(r, "roleID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid role ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid role ID"))
 		return
 	}
 
@@ -353,13 +383,13 @@ func (h *RoleHandler) AssignRole(w http.ResponseWriter, r *http.Request) {
 
 	var req assignRoleRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
 	targetID, err := parseUUID(req.UserID)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid user ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid user ID"))
 		return
 	}
 
@@ -374,11 +404,24 @@ func (h *RoleHandler) AssignRole(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to assign role")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
 	writeAuditLog(h.db, r.Context(), serverID, userID, models.AuditMemberRoleUpdate, "member", targetID, nil, nil)
+
+	// Broadcast to all server channels
+	channelIDs, _ := getServerChannelIDs(r.Context(), h.db, serverID)
+	for _, chID := range channelIDs {
+		h.hub.BroadcastToChannel(chID, realtime.Event{
+			Type: realtime.EventRoleAssigned,
+			Data: map[string]string{
+				"serverId": serverID.String(),
+				"roleId":   roleID.String(),
+				"userId":   targetID.String(),
+			},
+		})
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "assigned"})
 }
@@ -387,12 +430,12 @@ func (h *RoleHandler) RemoveRole(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 	roleID, err := parseUUID(chi.URLParam(r, "roleID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid role ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid role ID"))
 		return
 	}
 
@@ -406,23 +449,23 @@ func (h *RoleHandler) RemoveRole(w http.ResponseWriter, r *http.Request) {
 		`SELECT is_default FROM roles WHERE id = $1 AND server_id = $2`, roleID, serverID,
 	).Scan(&isDefault)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorBody("role not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "role not found"))
 		return
 	}
 	if isDefault {
-		writeJSON(w, http.StatusBadRequest, errorBody("cannot remove members from the default role"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "cannot remove members from the default role"))
 		return
 	}
 
 	var req assignRoleRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
 	targetID, err := parseUUID(req.UserID)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid user ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid user ID"))
 		return
 	}
 
@@ -432,11 +475,24 @@ func (h *RoleHandler) RemoveRole(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to remove role")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
 	writeAuditLog(h.db, r.Context(), serverID, userID, models.AuditMemberRoleUpdate, "member", targetID, nil, nil)
+
+	// Broadcast to all server channels
+	channelIDs, _ := getServerChannelIDs(r.Context(), h.db, serverID)
+	for _, chID := range channelIDs {
+		h.hub.BroadcastToChannel(chID, realtime.Event{
+			Type: realtime.EventRoleRemoved,
+			Data: map[string]string{
+				"serverId": serverID.String(),
+				"roleId":   roleID.String(),
+				"userId":   targetID.String(),
+			},
+		})
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 }
@@ -446,13 +502,13 @@ func (h *RoleHandler) GetMemberPermissions(w http.ResponseWriter, r *http.Reques
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 
 	perms, err := getMemberPermissions(h.db, r, serverID, userID)
 	if err != nil {
-		writeJSON(w, http.StatusForbidden, errorBody("not a member of this server"))
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "not a member of this server"))
 		return
 	}
 

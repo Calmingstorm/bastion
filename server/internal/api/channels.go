@@ -56,7 +56,7 @@ func (h *ChannelHandler) List(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 
@@ -68,11 +68,11 @@ func (h *ChannelHandler) List(w http.ResponseWriter, r *http.Request) {
 	).Scan(&isMember)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to check membership")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	if !isMember {
-		writeJSON(w, http.StatusForbidden, errorBody("you are not a member of this server"))
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you are not a member of this server"))
 		return
 	}
 
@@ -84,7 +84,7 @@ func (h *ChannelHandler) List(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to list channels")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	defer rows.Close()
@@ -94,7 +94,7 @@ func (h *ChannelHandler) List(w http.ResponseWriter, r *http.Request) {
 		var ch models.Channel
 		if err := rows.Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Topic, &ch.Type, &ch.Position, &ch.CategoryID, &ch.CreatedAt); err != nil {
 			log.Error().Err(err).Msg("failed to scan channel")
-			writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
 		channels = append(channels, ch)
@@ -102,7 +102,7 @@ func (h *ChannelHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	if err := rows.Err(); err != nil {
 		log.Error().Err(err).Msg("rows iteration error")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -113,7 +113,7 @@ func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 
@@ -124,7 +124,7 @@ func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	var req createChannelRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
@@ -132,7 +132,7 @@ func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 	req.Name = strings.ReplaceAll(req.Name, " ", "-")
 
 	if req.Name == "" || len(req.Name) > 100 {
-		writeJSON(w, http.StatusBadRequest, errorBody("channel name must be 1-100 characters"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "channel name must be 1-100 characters"))
 		return
 	}
 
@@ -143,7 +143,7 @@ func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 	).Scan(&maxPos)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to get max position")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -156,7 +156,7 @@ func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 	).Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Topic, &ch.Type, &ch.Position, &ch.CategoryID, &ch.CreatedAt)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create channel")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -173,12 +173,12 @@ func (h *ChannelHandler) Update(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 	channelID, err := parseUUID(chi.URLParam(r, "channelID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid channel ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid channel ID"))
 		return
 	}
 
@@ -188,7 +188,7 @@ func (h *ChannelHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	var req updateChannelRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
@@ -197,7 +197,7 @@ func (h *ChannelHandler) Update(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimSpace(strings.ToLower(*req.Name))
 		name = strings.ReplaceAll(name, " ", "-")
 		if name == "" || len(name) > 100 {
-			writeJSON(w, http.StatusBadRequest, errorBody("channel name must be 1-100 characters"))
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "channel name must be 1-100 characters"))
 			return
 		}
 		req.Name = &name
@@ -224,13 +224,13 @@ func (h *ChannelHandler) Update(w http.ResponseWriter, r *http.Request) {
 			*req.Topic, channelID, serverID,
 		).Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Topic, &ch.Type, &ch.Position, &ch.CategoryID, &ch.CreatedAt)
 	} else {
-		writeJSON(w, http.StatusBadRequest, errorBody("nothing to update"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "nothing to update"))
 		return
 	}
 
 	if err != nil {
 		log.Error().Err(err).Msg("failed to update channel")
-		writeJSON(w, http.StatusNotFound, errorBody("channel not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "channel not found"))
 		return
 	}
 
@@ -253,12 +253,12 @@ func (h *ChannelHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 	channelID, err := parseUUID(chi.URLParam(r, "channelID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid channel ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid channel ID"))
 		return
 	}
 
@@ -273,11 +273,11 @@ func (h *ChannelHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	).Scan(&channelCount)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to count channels")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	if channelCount <= 1 {
-		writeJSON(w, http.StatusBadRequest, errorBody("cannot delete the last channel"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "cannot delete the last channel"))
 		return
 	}
 
@@ -299,11 +299,11 @@ func (h *ChannelHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to delete channel")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	if result.RowsAffected() == 0 {
-		writeJSON(w, http.StatusNotFound, errorBody("channel not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "channel not found"))
 		return
 	}
 
@@ -324,7 +324,7 @@ func (h *ChannelHandler) Reorder(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 
@@ -334,19 +334,19 @@ func (h *ChannelHandler) Reorder(w http.ResponseWriter, r *http.Request) {
 
 	var entries []reorderEntry
 	if err := json.NewDecoder(r.Body).Decode(&entries); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
 	if len(entries) == 0 {
-		writeJSON(w, http.StatusBadRequest, errorBody("no channels to reorder"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "no channels to reorder"))
 		return
 	}
 
 	tx, err := h.db.Begin(r.Context())
 	if err != nil {
 		log.Error().Err(err).Msg("failed to begin transaction")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -354,7 +354,7 @@ func (h *ChannelHandler) Reorder(w http.ResponseWriter, r *http.Request) {
 	for _, entry := range entries {
 		chID, err := uuid.Parse(entry.ID)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, errorBody("invalid channel ID: "+entry.ID))
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid channel ID: "+entry.ID))
 			return
 		}
 		_, err = tx.Exec(r.Context(),
@@ -363,14 +363,14 @@ func (h *ChannelHandler) Reorder(w http.ResponseWriter, r *http.Request) {
 		)
 		if err != nil {
 			log.Error().Err(err).Str("channelID", chID.String()).Msg("failed to update channel position")
-			writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
 		log.Error().Err(err).Msg("failed to commit reorder")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 

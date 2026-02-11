@@ -50,7 +50,7 @@ func (h *InviteHandler) Create(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 
@@ -61,14 +61,14 @@ func (h *InviteHandler) Create(w http.ResponseWriter, r *http.Request) {
 		serverID, userID,
 	).Scan(&isMember)
 	if err != nil || !isMember {
-		writeJSON(w, http.StatusForbidden, errorBody("you are not a member of this server"))
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you are not a member of this server"))
 		return
 	}
 
 	var req createInviteRequest
 	if r.ContentLength > 0 {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 			return
 		}
 	}
@@ -76,7 +76,7 @@ func (h *InviteHandler) Create(w http.ResponseWriter, r *http.Request) {
 	code, err := generateInviteCode(8)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to generate invite code")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -96,7 +96,7 @@ func (h *InviteHandler) Create(w http.ResponseWriter, r *http.Request) {
 		&invite.MaxUses, &invite.Uses, &invite.ExpiresAt, &invite.CreatedAt)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create invite")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -107,7 +107,7 @@ func (h *InviteHandler) List(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 
@@ -118,7 +118,7 @@ func (h *InviteHandler) List(w http.ResponseWriter, r *http.Request) {
 		serverID, userID,
 	).Scan(&isMember)
 	if err != nil || !isMember {
-		writeJSON(w, http.StatusForbidden, errorBody("you are not a member of this server"))
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you are not a member of this server"))
 		return
 	}
 
@@ -130,7 +130,7 @@ func (h *InviteHandler) List(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to list invites")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	defer rows.Close()
@@ -141,7 +141,7 @@ func (h *InviteHandler) List(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(&inv.ID, &inv.ServerID, &inv.CreatorID, &inv.Code,
 			&inv.MaxUses, &inv.Uses, &inv.ExpiresAt, &inv.CreatedAt); err != nil {
 			log.Error().Err(err).Msg("failed to scan invite")
-			writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
 		invites = append(invites, inv)
@@ -154,7 +154,7 @@ func (h *InviteHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	inviteID, err := parseUUID(chi.URLParam(r, "inviteID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid invite ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid invite ID"))
 		return
 	}
 
@@ -167,19 +167,19 @@ func (h *InviteHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		 WHERE si.id = $1`, inviteID,
 	).Scan(&creatorID, &serverOwnerID)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorBody("invite not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "invite not found"))
 		return
 	}
 
 	if userID != creatorID && userID != serverOwnerID {
-		writeJSON(w, http.StatusForbidden, errorBody("you cannot delete this invite"))
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you cannot delete this invite"))
 		return
 	}
 
 	_, err = h.db.Exec(r.Context(), `DELETE FROM server_invites WHERE id = $1`, inviteID)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to delete invite")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -191,7 +191,7 @@ func (h *InviteHandler) Join(w http.ResponseWriter, r *http.Request) {
 	code := chi.URLParam(r, "code")
 
 	if code == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody("invite code is required"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invite code is required"))
 		return
 	}
 
@@ -203,19 +203,19 @@ func (h *InviteHandler) Join(w http.ResponseWriter, r *http.Request) {
 	).Scan(&invite.ID, &invite.ServerID, &invite.CreatorID, &invite.Code,
 		&invite.MaxUses, &invite.Uses, &invite.ExpiresAt, &invite.CreatedAt)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorBody("invalid invite code"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "invalid invite code"))
 		return
 	}
 
 	// Check expiration
 	if invite.ExpiresAt != nil && invite.ExpiresAt.Before(time.Now()) {
-		writeJSON(w, http.StatusGone, errorBody("this invite has expired"))
+		writeJSON(w, http.StatusGone, errorResponse("NOT_FOUND", "this invite has expired"))
 		return
 	}
 
 	// Check max uses
 	if invite.MaxUses != nil && invite.Uses >= *invite.MaxUses {
-		writeJSON(w, http.StatusGone, errorBody("this invite has reached its maximum uses"))
+		writeJSON(w, http.StatusGone, errorResponse("NOT_FOUND", "this invite has reached its maximum uses"))
 		return
 	}
 
@@ -227,7 +227,7 @@ func (h *InviteHandler) Join(w http.ResponseWriter, r *http.Request) {
 	).Scan(&isMember)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to check membership")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	if isMember {
@@ -248,7 +248,7 @@ func (h *InviteHandler) Join(w http.ResponseWriter, r *http.Request) {
 		invite.ServerID, userID,
 	).Scan(&isBanned)
 	if err == nil && isBanned {
-		writeJSON(w, http.StatusForbidden, errorBody("you are banned from this server"))
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you are banned from this server"))
 		return
 	}
 
@@ -256,7 +256,7 @@ func (h *InviteHandler) Join(w http.ResponseWriter, r *http.Request) {
 	tx, err := h.db.Begin(r.Context())
 	if err != nil {
 		log.Error().Err(err).Msg("failed to begin transaction")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -267,7 +267,7 @@ func (h *InviteHandler) Join(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to add member")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -284,13 +284,13 @@ func (h *InviteHandler) Join(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to increment invite uses")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
 		log.Error().Err(err).Msg("failed to commit transaction")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -301,8 +301,13 @@ func (h *InviteHandler) Join(w http.ResponseWriter, r *http.Request) {
 		invite.ServerID,
 	).Scan(&s.ID, &s.Name, &s.IconURL, &s.Description, &s.OwnerID, &s.CreatedAt)
 
-	// Broadcast member join to server channels
+	// Subscribe new member's WS clients to all server channels
 	channelIDs, _ := getServerChannelIDs(r.Context(), h.db, invite.ServerID)
+	for _, chID := range channelIDs {
+		h.hub.SubscribeUser(userID, chID)
+	}
+
+	// Broadcast member join to server channels
 	for _, chID := range channelIDs {
 		h.hub.BroadcastToChannel(chID, realtime.Event{
 			Type: realtime.EventServerMemberJoin,

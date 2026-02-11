@@ -32,12 +32,12 @@ func (h *DMHandler) CreateOrGet(w http.ResponseWriter, r *http.Request) {
 
 	var req createDMRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
 	if len(req.RecipientIDs) == 0 || len(req.RecipientIDs) > 9 {
-		writeJSON(w, http.StatusBadRequest, errorBody("1-9 recipients required"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "1-9 recipients required"))
 		return
 	}
 
@@ -45,7 +45,7 @@ func (h *DMHandler) CreateOrGet(w http.ResponseWriter, r *http.Request) {
 	if len(req.RecipientIDs) == 1 {
 		recipientID, err := parseUUID(req.RecipientIDs[0])
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, errorBody("invalid recipient ID"))
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid recipient ID"))
 			return
 		}
 
@@ -81,7 +81,7 @@ func (h *DMHandler) CreateOrGet(w http.ResponseWriter, r *http.Request) {
 	tx, err := h.db.Begin(r.Context())
 	if err != nil {
 		log.Error().Err(err).Msg("failed to begin transaction")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -93,7 +93,7 @@ func (h *DMHandler) CreateOrGet(w http.ResponseWriter, r *http.Request) {
 	).Scan(&channelID)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create DM channel")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -104,7 +104,7 @@ func (h *DMHandler) CreateOrGet(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to add DM member (creator)")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -112,7 +112,7 @@ func (h *DMHandler) CreateOrGet(w http.ResponseWriter, r *http.Request) {
 	for _, rid := range req.RecipientIDs {
 		recipientID, err := parseUUID(rid)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, errorBody("invalid recipient ID"))
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid recipient ID"))
 			return
 		}
 		_, err = tx.Exec(r.Context(),
@@ -121,20 +121,20 @@ func (h *DMHandler) CreateOrGet(w http.ResponseWriter, r *http.Request) {
 		)
 		if err != nil {
 			log.Error().Err(err).Msg("failed to add DM member")
-			writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
 		log.Error().Err(err).Msg("failed to commit transaction")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
 	ch := h.getDMChannel(r, channelID, userID)
 	if ch == nil {
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -168,7 +168,7 @@ func (h *DMHandler) Close(w http.ResponseWriter, r *http.Request) {
 		channelID, userID,
 	)
 	if err != nil || tag.RowsAffected() == 0 {
-		writeJSON(w, http.StatusNotFound, errorBody("DM not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "DM not found"))
 		return
 	}
 
@@ -187,7 +187,7 @@ func (h *DMHandler) List(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to list DM channels")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	defer rows.Close()
@@ -197,7 +197,7 @@ func (h *DMHandler) List(w http.ResponseWriter, r *http.Request) {
 		var ch models.Channel
 		if err := rows.Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Topic, &ch.Type, &ch.Position, &ch.CreatedAt); err != nil {
 			log.Error().Err(err).Msg("failed to scan DM channel")
-			writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
 
@@ -247,7 +247,7 @@ func (h *DMHandler) Get(w http.ResponseWriter, r *http.Request) {
 		channelID, userID,
 	).Scan(&isMember)
 	if err != nil || !isMember {
-		writeJSON(w, http.StatusForbidden, errorBody("you do not have access to this channel"))
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have access to this channel"))
 		return
 	}
 
@@ -255,7 +255,7 @@ func (h *DMHandler) Get(w http.ResponseWriter, r *http.Request) {
 	if ch != nil {
 		writeJSON(w, http.StatusOK, ch)
 	} else {
-		writeJSON(w, http.StatusNotFound, errorBody("channel not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "channel not found"))
 	}
 }
 

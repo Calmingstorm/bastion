@@ -38,7 +38,7 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 
 	query := r.URL.Query().Get("q")
 	if query == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody("query parameter 'q' is required"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "query parameter 'q' is required"))
 		return
 	}
 
@@ -84,7 +84,7 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 	if channelIDParam != "" {
 		channelID, err := uuid.Parse(channelIDParam)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, errorBody("invalid channelId"))
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid channelId"))
 			return
 		}
 		fullSQL := baseSQL + ` AND m.channel_id = $5` + accessSQL + orderSQL
@@ -98,7 +98,7 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 	} else if serverIDParam != "" {
 		serverID, err := uuid.Parse(serverIDParam)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, errorBody("invalid serverId"))
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid serverId"))
 			return
 		}
 		fullSQL := baseSQL + ` AND c.server_id = $5` + accessSQL + orderSQL
@@ -122,7 +122,7 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 
 	if rows_err != nil {
 		log.Error().Err(rows_err).Msg("failed to search messages")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 

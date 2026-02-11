@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { storage } from '../utils/storage';
 
 type Theme = 'dark' | 'light';
 
@@ -9,12 +10,10 @@ interface ThemeState {
 
 function applyTheme(theme: Theme) {
   document.documentElement.setAttribute('data-theme', theme);
-  localStorage.setItem('bastion-theme', theme);
+  storage.setItem('bastion-theme', theme);
 }
 
-const stored = (typeof localStorage !== 'undefined'
-  ? localStorage.getItem('bastion-theme')
-  : null) as Theme | null;
+const stored = storage.getItem('bastion-theme') as Theme | null;
 const initial: Theme = stored === 'light' ? 'light' : 'dark';
 
 // Apply on load so there's no flash

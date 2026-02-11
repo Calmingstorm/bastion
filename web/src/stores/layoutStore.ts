@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { storage } from '../utils/storage';
 
 type Layout = 'modern' | 'classic';
 
@@ -7,16 +8,14 @@ interface LayoutState {
   setLayout: (layout: Layout) => void;
 }
 
-const stored = (typeof localStorage !== 'undefined'
-  ? localStorage.getItem('bastion-layout')
-  : null) as Layout | null;
+const stored = storage.getItem('bastion-layout') as Layout | null;
 const initial: Layout = stored === 'classic' ? 'classic' : 'modern';
 
 export const useLayoutStore = create<LayoutState>((set) => ({
   layout: initial,
 
   setLayout: (layout: Layout) => {
-    localStorage.setItem('bastion-layout', layout);
+    storage.setItem('bastion-layout', layout);
     set({ layout });
   },
 }));

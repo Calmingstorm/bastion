@@ -35,12 +35,12 @@ func (h *ModerationHandler) Kick(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 	targetID, err := parseUUID(chi.URLParam(r, "targetID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid target user ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid target user ID"))
 		return
 	}
 
@@ -50,7 +50,7 @@ func (h *ModerationHandler) Kick(w http.ResponseWriter, r *http.Request) {
 
 	// Cannot kick yourself
 	if userID == targetID {
-		writeJSON(w, http.StatusBadRequest, errorBody("you cannot kick yourself"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "you cannot kick yourself"))
 		return
 	}
 
@@ -58,7 +58,7 @@ func (h *ModerationHandler) Kick(w http.ResponseWriter, r *http.Request) {
 	var ownerID uuid.UUID
 	_ = h.db.QueryRow(r.Context(), `SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID)
 	if targetID == ownerID {
-		writeJSON(w, http.StatusForbidden, errorBody("cannot kick the server owner"))
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "cannot kick the server owner"))
 		return
 	}
 
@@ -72,7 +72,7 @@ func (h *ModerationHandler) Kick(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to kick member")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -110,12 +110,12 @@ func (h *ModerationHandler) Ban(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 	targetID, err := parseUUID(chi.URLParam(r, "targetID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid target user ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid target user ID"))
 		return
 	}
 
@@ -124,14 +124,14 @@ func (h *ModerationHandler) Ban(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if userID == targetID {
-		writeJSON(w, http.StatusBadRequest, errorBody("you cannot ban yourself"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "you cannot ban yourself"))
 		return
 	}
 
 	var ownerID uuid.UUID
 	_ = h.db.QueryRow(r.Context(), `SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID)
 	if targetID == ownerID {
-		writeJSON(w, http.StatusForbidden, errorBody("cannot ban the server owner"))
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "cannot ban the server owner"))
 		return
 	}
 
@@ -141,7 +141,7 @@ func (h *ModerationHandler) Ban(w http.ResponseWriter, r *http.Request) {
 	tx, err := h.db.Begin(r.Context())
 	if err != nil {
 		log.Error().Err(err).Msg("failed to begin transaction")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -155,7 +155,7 @@ func (h *ModerationHandler) Ban(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create ban")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -167,7 +167,7 @@ func (h *ModerationHandler) Ban(w http.ResponseWriter, r *http.Request) {
 
 	if err := tx.Commit(r.Context()); err != nil {
 		log.Error().Err(err).Msg("failed to commit ban")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -195,12 +195,12 @@ func (h *ModerationHandler) Unban(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 	targetID, err := parseUUID(chi.URLParam(r, "targetID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid target user ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid target user ID"))
 		return
 	}
 
@@ -214,7 +214,7 @@ func (h *ModerationHandler) Unban(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to unban member")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -227,7 +227,7 @@ func (h *ModerationHandler) ListBans(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 
@@ -244,7 +244,7 @@ func (h *ModerationHandler) ListBans(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to list bans")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	defer rows.Close()
@@ -255,7 +255,7 @@ func (h *ModerationHandler) ListBans(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(&ban.ServerID, &ban.UserID, &ban.Username, &ban.Reason,
 			&ban.BannedBy, &ban.CreatedAt); err != nil {
 			log.Error().Err(err).Msg("failed to scan ban")
-			writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
 		bans = append(bans, ban)
@@ -273,12 +273,12 @@ func (h *ModerationHandler) Timeout(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 	targetID, err := parseUUID(chi.URLParam(r, "targetID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid target user ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid target user ID"))
 		return
 	}
 
@@ -287,25 +287,25 @@ func (h *ModerationHandler) Timeout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if userID == targetID {
-		writeJSON(w, http.StatusBadRequest, errorBody("you cannot timeout yourself"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "you cannot timeout yourself"))
 		return
 	}
 
 	var ownerID uuid.UUID
 	_ = h.db.QueryRow(r.Context(), `SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID)
 	if targetID == ownerID {
-		writeJSON(w, http.StatusForbidden, errorBody("cannot timeout the server owner"))
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "cannot timeout the server owner"))
 		return
 	}
 
 	var req timeoutRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
 	if req.Duration < 0 || req.Duration > 28*24*3600 { // max 28 days
-		writeJSON(w, http.StatusBadRequest, errorBody("timeout duration must be 0 to 28 days in seconds"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "timeout duration must be 0 to 28 days in seconds"))
 		return
 	}
 
@@ -321,7 +321,7 @@ func (h *ModerationHandler) Timeout(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to timeout member")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 

@@ -12,14 +12,16 @@ import (
 	"github.com/Calmingstorm/bastion/server/internal/auth"
 	"github.com/Calmingstorm/bastion/server/internal/models"
 	"github.com/Calmingstorm/bastion/server/internal/permissions"
+	"github.com/Calmingstorm/bastion/server/internal/realtime"
 )
 
 type CategoryHandler struct {
-	db *pgxpool.Pool
+	db  *pgxpool.Pool
+	hub *realtime.Hub
 }
 
-func NewCategoryHandler(db *pgxpool.Pool) *CategoryHandler {
-	return &CategoryHandler{db: db}
+func NewCategoryHandler(db *pgxpool.Pool, hub *realtime.Hub) *CategoryHandler {
+	return &CategoryHandler{db: db, hub: hub}
 }
 
 type createCategoryRequest struct {
@@ -30,7 +32,7 @@ func (h *CategoryHandler) Create(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 
@@ -40,13 +42,13 @@ func (h *CategoryHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	var req createCategoryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
 	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" || len(req.Name) > 100 {
-		writeJSON(w, http.StatusBadRequest, errorBody("category name must be 1-100 characters"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "category name must be 1-100 characters"))
 		return
 	}
 
@@ -56,7 +58,7 @@ func (h *CategoryHandler) Create(w http.ResponseWriter, r *http.Request) {
 	).Scan(&maxPos)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to get max category position")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -69,11 +71,20 @@ func (h *CategoryHandler) Create(w http.ResponseWriter, r *http.Request) {
 	).Scan(&cat.ID, &cat.ServerID, &cat.Name, &cat.Position, &cat.CreatedAt)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create category")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
 	writeAuditLog(h.db, r.Context(), serverID, userID, models.AuditCategoryCreate, "category", cat.ID, nil, nil)
+
+	// Broadcast to all server channels
+	channelIDs, _ := getServerChannelIDs(r.Context(), h.db, serverID)
+	for _, chID := range channelIDs {
+		h.hub.BroadcastToChannel(chID, realtime.Event{
+			Type: realtime.EventCategoryCreate,
+			Data: cat,
+		})
+	}
 
 	writeJSON(w, http.StatusCreated, cat)
 }
@@ -82,7 +93,7 @@ func (h *CategoryHandler) List(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 
@@ -97,7 +108,7 @@ func (h *CategoryHandler) List(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to list categories")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	defer rows.Close()
@@ -107,7 +118,7 @@ func (h *CategoryHandler) List(w http.ResponseWriter, r *http.Request) {
 		var cat models.ChannelCategory
 		if err := rows.Scan(&cat.ID, &cat.ServerID, &cat.Name, &cat.Position, &cat.CreatedAt); err != nil {
 			log.Error().Err(err).Msg("failed to scan category")
-			writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
 		cats = append(cats, cat)
@@ -125,12 +136,12 @@ func (h *CategoryHandler) Update(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 	catID, err := parseUUID(chi.URLParam(r, "categoryID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid category ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid category ID"))
 		return
 	}
 
@@ -140,7 +151,7 @@ func (h *CategoryHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	var req updateCategoryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
@@ -151,7 +162,7 @@ func (h *CategoryHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if req.Name != nil {
 		name := strings.TrimSpace(*req.Name)
 		if name == "" || len(name) > 100 {
-			writeJSON(w, http.StatusBadRequest, errorBody("category name must be 1-100 characters"))
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "category name must be 1-100 characters"))
 			return
 		}
 		sets = append(sets, "name = $"+itoa(argIdx))
@@ -166,7 +177,7 @@ func (h *CategoryHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(sets) == 0 {
-		writeJSON(w, http.StatusBadRequest, errorBody("no fields to update"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "no fields to update"))
 		return
 	}
 
@@ -179,11 +190,20 @@ func (h *CategoryHandler) Update(w http.ResponseWriter, r *http.Request) {
 	err = h.db.QueryRow(r.Context(), query, args...).Scan(
 		&cat.ID, &cat.ServerID, &cat.Name, &cat.Position, &cat.CreatedAt)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorBody("category not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "category not found"))
 		return
 	}
 
 	writeAuditLog(h.db, r.Context(), serverID, userID, models.AuditCategoryUpdate, "category", cat.ID, nil, nil)
+
+	// Broadcast to all server channels
+	channelIDs, _ := getServerChannelIDs(r.Context(), h.db, serverID)
+	for _, chID := range channelIDs {
+		h.hub.BroadcastToChannel(chID, realtime.Event{
+			Type: realtime.EventCategoryUpdate,
+			Data: cat,
+		})
+	}
 
 	writeJSON(w, http.StatusOK, cat)
 }
@@ -192,12 +212,12 @@ func (h *CategoryHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 	catID, err := parseUUID(chi.URLParam(r, "categoryID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid category ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid category ID"))
 		return
 	}
 
@@ -218,11 +238,23 @@ func (h *CategoryHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to delete category")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
 	writeAuditLog(h.db, r.Context(), serverID, userID, models.AuditCategoryDelete, "category", catID, nil, nil)
+
+	// Broadcast to all server channels
+	channelIDs, _ := getServerChannelIDs(r.Context(), h.db, serverID)
+	for _, chID := range channelIDs {
+		h.hub.BroadcastToChannel(chID, realtime.Event{
+			Type: realtime.EventCategoryDelete,
+			Data: map[string]string{
+				"categoryId": catID.String(),
+				"serverId":   serverID.String(),
+			},
+		})
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

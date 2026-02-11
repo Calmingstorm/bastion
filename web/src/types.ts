@@ -219,6 +219,15 @@ export type WSEventType =
   | 'MESSAGE_PIN'
   | 'MESSAGE_UNPIN'
   | 'MEMBER_NICKNAME_UPDATE'
+  | 'ROLE_CREATE'
+  | 'ROLE_UPDATE'
+  | 'ROLE_DELETE'
+  | 'ROLE_ASSIGNED'
+  | 'ROLE_REMOVED'
+  | 'SERVER_UPDATE'
+  | 'CATEGORY_CREATE'
+  | 'CATEGORY_UPDATE'
+  | 'CATEGORY_DELETE'
   | 'CONNECTED';
 
 export interface PinnedMessage {

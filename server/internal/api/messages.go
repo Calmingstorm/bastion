@@ -58,12 +58,12 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	channelID, err := parseUUID(chi.URLParam(r, "channelID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid channel ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid channel ID"))
 		return
 	}
 
 	if !h.checkChannelAccess(r, channelID, userID) {
-		writeJSON(w, http.StatusForbidden, errorBody("you do not have access to this channel"))
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have access to this channel"))
 		return
 	}
 
@@ -85,7 +85,7 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 	if beforeParam != "" {
 		beforeID, err := uuid.Parse(beforeParam)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, errorBody("invalid before cursor"))
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid before cursor"))
 			return
 		}
 
@@ -95,7 +95,7 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 			`SELECT created_at FROM messages WHERE id = $1`, beforeID,
 		).Scan(&cursorTime)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, errorBody("cursor message not found"))
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "cursor message not found"))
 			return
 		}
 
@@ -105,7 +105,7 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 		)
 		if err != nil {
 			log.Error().Err(err).Msg("failed to list messages")
-			writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
 	} else {
@@ -115,7 +115,7 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 		)
 		if err != nil {
 			log.Error().Err(err).Msg("failed to list messages")
-			writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
 	}
@@ -134,7 +134,7 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 			&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL,
 			&replyToID, &replyID, &replyContent, &replyAuthorID, &replyUsername, &replyDisplayName, &replyAvatarURL); err != nil {
 			log.Error().Err(err).Msg("failed to scan message")
-			writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
 		msg.Author = &author
@@ -162,7 +162,7 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	if err := rows.Err(); err != nil {
 		log.Error().Err(err).Msg("rows iteration error")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -205,12 +205,12 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	channelID, err := parseUUID(chi.URLParam(r, "channelID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid channel ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid channel ID"))
 		return
 	}
 
 	if !h.checkChannelAccess(r, channelID, userID) {
-		writeJSON(w, http.StatusForbidden, errorBody("you do not have access to this channel"))
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have access to this channel"))
 		return
 	}
 
@@ -224,24 +224,24 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 			*serverID, userID,
 		).Scan(&timedOutUntil)
 		if err == nil && timedOutUntil != nil && timedOutUntil.After(time.Now()) {
-			writeJSON(w, http.StatusForbidden, errorBody("you are timed out in this server"))
+			writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you are timed out in this server"))
 			return
 		}
 	}
 
 	var req sendMessageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
 	req.Content = strings.TrimSpace(req.Content)
 	if req.Content == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody("message content cannot be empty"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "message content cannot be empty"))
 		return
 	}
 	if len(req.Content) > 4000 {
-		writeJSON(w, http.StatusBadRequest, errorBody("message content cannot exceed 4000 characters"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "message content cannot exceed 4000 characters"))
 		return
 	}
 
@@ -253,7 +253,7 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 			*req.ReplyToID, channelID,
 		).Scan(&replyExists)
 		if err != nil || !replyExists {
-			writeJSON(w, http.StatusBadRequest, errorBody("referenced message not found in this channel"))
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "referenced message not found in this channel"))
 			return
 		}
 	}
@@ -275,7 +275,7 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 		&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to insert message")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	msg.Author = &author
@@ -322,12 +322,12 @@ func (h *MessageHandler) Edit(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	channelID, err := parseUUID(chi.URLParam(r, "channelID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid channel ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid channel ID"))
 		return
 	}
 	messageID, err := parseUUID(chi.URLParam(r, "messageID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid message ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid message ID"))
 		return
 	}
 
@@ -338,27 +338,27 @@ func (h *MessageHandler) Edit(w http.ResponseWriter, r *http.Request) {
 		messageID, channelID,
 	).Scan(&authorID)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorBody("message not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "message not found"))
 		return
 	}
 	if authorID != userID {
-		writeJSON(w, http.StatusForbidden, errorBody("you can only edit your own messages"))
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you can only edit your own messages"))
 		return
 	}
 
 	var req editMessageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
 	req.Content = strings.TrimSpace(req.Content)
 	if req.Content == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody("message content cannot be empty"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "message content cannot be empty"))
 		return
 	}
 	if len(req.Content) > 4000 {
-		writeJSON(w, http.StatusBadRequest, errorBody("message content cannot exceed 4000 characters"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "message content cannot exceed 4000 characters"))
 		return
 	}
 
@@ -377,7 +377,7 @@ func (h *MessageHandler) Edit(w http.ResponseWriter, r *http.Request) {
 		&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to update message")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	msg.Author = &author
@@ -394,12 +394,12 @@ func (h *MessageHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	channelID, err := parseUUID(chi.URLParam(r, "channelID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid channel ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid channel ID"))
 		return
 	}
 	messageID, err := parseUUID(chi.URLParam(r, "messageID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid message ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid message ID"))
 		return
 	}
 
@@ -414,19 +414,19 @@ func (h *MessageHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		messageID, channelID,
 	).Scan(&authorID, &serverID)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorBody("message not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "message not found"))
 		return
 	}
 
 	// Allow deletion if author OR has MANAGE_MESSAGES permission
 	if authorID != userID {
 		if serverID == nil {
-			writeJSON(w, http.StatusForbidden, errorBody("you can only delete your own messages"))
+			writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you can only delete your own messages"))
 			return
 		}
 		perms, err := getMemberPermissions(h.db, r, *serverID, userID)
 		if err != nil || !permissions.Has(perms, permissions.ManageMessages) {
-			writeJSON(w, http.StatusForbidden, errorBody("you can only delete your own messages"))
+			writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you can only delete your own messages"))
 			return
 		}
 	}
@@ -436,7 +436,7 @@ func (h *MessageHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to delete message")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 

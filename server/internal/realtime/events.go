@@ -22,6 +22,15 @@ const (
 	EventMessagePin            = "MESSAGE_PIN"
 	EventMessageUnpin          = "MESSAGE_UNPIN"
 	EventMemberNicknameUpdate  = "MEMBER_NICKNAME_UPDATE"
+	EventRoleCreate            = "ROLE_CREATE"
+	EventRoleUpdate            = "ROLE_UPDATE"
+	EventRoleDelete            = "ROLE_DELETE"
+	EventRoleAssigned          = "ROLE_ASSIGNED"
+	EventRoleRemoved           = "ROLE_REMOVED"
+	EventServerUpdate          = "SERVER_UPDATE"
+	EventCategoryCreate        = "CATEGORY_CREATE"
+	EventCategoryUpdate        = "CATEGORY_UPDATE"
+	EventCategoryDelete        = "CATEGORY_DELETE"
 )
 
 type Event struct {

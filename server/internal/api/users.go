@@ -39,7 +39,7 @@ func (h *UserHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 
 	var req updateProfileRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
@@ -51,7 +51,7 @@ func (h *UserHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	if req.DisplayName != nil {
 		name := strings.TrimSpace(*req.DisplayName)
 		if len(name) > 64 {
-			writeJSON(w, http.StatusBadRequest, errorBody("display name too long"))
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "display name too long"))
 			return
 		}
 		sets = append(sets, "display_name = $"+itoa(argIdx))
@@ -62,7 +62,7 @@ func (h *UserHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	if req.AboutMe != nil {
 		aboutMe := strings.TrimSpace(*req.AboutMe)
 		if len(aboutMe) > 2000 {
-			writeJSON(w, http.StatusBadRequest, errorBody("about me too long"))
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "about me too long"))
 			return
 		}
 		sets = append(sets, "about_me = $"+itoa(argIdx))
@@ -74,7 +74,7 @@ func (h *UserHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		status := strings.TrimSpace(*req.Status)
 		valid := map[string]bool{"online": true, "idle": true, "dnd": true, "offline": true}
 		if !valid[status] {
-			writeJSON(w, http.StatusBadRequest, errorBody("invalid status"))
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid status"))
 			return
 		}
 		sets = append(sets, "status = $"+itoa(argIdx))
@@ -83,7 +83,7 @@ func (h *UserHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(sets) == 0 {
-		writeJSON(w, http.StatusBadRequest, errorBody("no fields to update"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "no fields to update"))
 		return
 	}
 
@@ -99,7 +99,7 @@ func (h *UserHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		&user.DisplayName, &user.AvatarURL, &user.Status, &user.AboutMe, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to update profile")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -112,13 +112,13 @@ func (h *UserHandler) UploadAvatar(w http.ResponseWriter, r *http.Request) {
 	// Limit to 2MB for avatars
 	r.Body = http.MaxBytesReader(w, r.Body, 2*1024*1024)
 	if err := r.ParseMultipartForm(2 * 1024 * 1024); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("file too large (max 2MB)"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "file too large (max 2MB)"))
 		return
 	}
 
 	file, header, err := r.FormFile("avatar")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("missing avatar file"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "missing avatar file"))
 		return
 	}
 	defer file.Close()
@@ -126,7 +126,7 @@ func (h *UserHandler) UploadAvatar(w http.ResponseWriter, r *http.Request) {
 	// Validate content type
 	contentType := header.Header.Get("Content-Type")
 	if !strings.HasPrefix(contentType, "image/") {
-		writeJSON(w, http.StatusBadRequest, errorBody("file must be an image"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "file must be an image"))
 		return
 	}
 
@@ -138,7 +138,7 @@ func (h *UserHandler) UploadAvatar(w http.ResponseWriter, r *http.Request) {
 	storedName, url, err := h.storage.Save(file, ext)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to save avatar")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	_ = storedName
@@ -152,7 +152,7 @@ func (h *UserHandler) UploadAvatar(w http.ResponseWriter, r *http.Request) {
 		&user.DisplayName, &user.AvatarURL, &user.Status, &user.AboutMe, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to update avatar")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -162,7 +162,7 @@ func (h *UserHandler) UploadAvatar(w http.ResponseWriter, r *http.Request) {
 func (h *UserHandler) GetUser(w http.ResponseWriter, r *http.Request) {
 	targetID, err := parseUUID(chi.URLParam(r, "userID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid user ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid user ID"))
 		return
 	}
 
@@ -173,7 +173,7 @@ func (h *UserHandler) GetUser(w http.ResponseWriter, r *http.Request) {
 	).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash,
 		&user.DisplayName, &user.AvatarURL, &user.Status, &user.AboutMe, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorBody("user not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "user not found"))
 		return
 	}
 
@@ -184,7 +184,7 @@ func (h *UserHandler) GetMembers(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 
@@ -195,7 +195,7 @@ func (h *UserHandler) GetMembers(w http.ResponseWriter, r *http.Request) {
 		serverID, userID,
 	).Scan(&isMember)
 	if err != nil || !isMember {
-		writeJSON(w, http.StatusForbidden, errorBody("you are not a member of this server"))
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you are not a member of this server"))
 		return
 	}
 
@@ -209,7 +209,7 @@ func (h *UserHandler) GetMembers(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to list members")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	defer rows.Close()
@@ -220,7 +220,7 @@ func (h *UserHandler) GetMembers(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(&m.ServerID, &m.UserID, &m.Username, &m.DisplayName,
 			&m.AvatarURL, &m.Nickname, &m.Role, &m.Status, &m.TimedOutUntil, &m.JoinedAt); err != nil {
 			log.Error().Err(err).Msg("failed to scan member")
-			writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
 
@@ -270,7 +270,7 @@ func (h *UserHandler) ServeUpload(w http.ResponseWriter, r *http.Request) {
 	// Path is everything after /api/uploads/
 	filePath := chi.URLParam(r, "*")
 	if filePath == "" {
-		writeJSON(w, http.StatusNotFound, errorBody("file not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "file not found"))
 		return
 	}
 
@@ -291,7 +291,7 @@ func (h *UserHandler) SearchUsers(w http.ResponseWriter, r *http.Request) {
 
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	if q == "" || len(q) > 100 {
-		writeJSON(w, http.StatusBadRequest, errorBody("query parameter 'q' is required (max 100 chars)"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "query parameter 'q' is required (max 100 chars)"))
 		return
 	}
 
@@ -308,7 +308,7 @@ func (h *UserHandler) SearchUsers(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to search users")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	defer rows.Close()
@@ -334,12 +334,12 @@ func (h *UserHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		NewPassword     string `json:"newPassword"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
 	if len(req.NewPassword) < 8 {
-		writeJSON(w, http.StatusBadRequest, errorBody("new password must be at least 8 characters"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "new password must be at least 8 characters"))
 		return
 	}
 
@@ -349,14 +349,14 @@ func (h *UserHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		`SELECT password_hash FROM users WHERE id = $1`, userID,
 	).Scan(&hash)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
 	// Verify current password
 	match, err := auth.VerifyPassword(hash, req.CurrentPassword)
 	if err != nil || !match {
-		writeJSON(w, http.StatusUnauthorized, errorBody("current password is incorrect"))
+		writeJSON(w, http.StatusUnauthorized, errorResponse("AUTH_REQUIRED", "current password is incorrect"))
 		return
 	}
 
@@ -364,7 +364,7 @@ func (h *UserHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	newHash, err := auth.HashPassword(req.NewPassword)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to hash password")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -374,7 +374,7 @@ func (h *UserHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to update password")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -389,13 +389,13 @@ func (h *UserHandler) ChangeEmail(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
 	req.NewEmail = strings.TrimSpace(strings.ToLower(req.NewEmail))
 	if req.NewEmail == "" || !strings.Contains(req.NewEmail, "@") {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid email address"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid email address"))
 		return
 	}
 
@@ -405,13 +405,13 @@ func (h *UserHandler) ChangeEmail(w http.ResponseWriter, r *http.Request) {
 		`SELECT password_hash FROM users WHERE id = $1`, userID,
 	).Scan(&hash)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
 	match, err := auth.VerifyPassword(hash, req.Password)
 	if err != nil || !match {
-		writeJSON(w, http.StatusUnauthorized, errorBody("password is incorrect"))
+		writeJSON(w, http.StatusUnauthorized, errorResponse("AUTH_REQUIRED", "password is incorrect"))
 		return
 	}
 
@@ -422,7 +422,7 @@ func (h *UserHandler) ChangeEmail(w http.ResponseWriter, r *http.Request) {
 		req.NewEmail, userID,
 	).Scan(&exists)
 	if exists {
-		writeJSON(w, http.StatusConflict, errorBody("email is already in use"))
+		writeJSON(w, http.StatusConflict, errorResponse("CONFLICT", "email is already in use"))
 		return
 	}
 
@@ -435,7 +435,7 @@ func (h *UserHandler) ChangeEmail(w http.ResponseWriter, r *http.Request) {
 		&user.DisplayName, &user.AvatarURL, &user.Status, &user.AboutMe, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to update email")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -449,7 +449,7 @@ func (h *UserHandler) DeleteAccount(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
@@ -459,13 +459,13 @@ func (h *UserHandler) DeleteAccount(w http.ResponseWriter, r *http.Request) {
 		`SELECT password_hash FROM users WHERE id = $1`, userID,
 	).Scan(&hash)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
 	match, err := auth.VerifyPassword(hash, req.Password)
 	if err != nil || !match {
-		writeJSON(w, http.StatusUnauthorized, errorBody("password is incorrect"))
+		writeJSON(w, http.StatusUnauthorized, errorResponse("AUTH_REQUIRED", "password is incorrect"))
 		return
 	}
 
@@ -475,7 +475,7 @@ func (h *UserHandler) DeleteAccount(w http.ResponseWriter, r *http.Request) {
 		`SELECT EXISTS(SELECT 1 FROM servers WHERE owner_id = $1)`, userID,
 	).Scan(&ownsServers)
 	if ownsServers {
-		writeJSON(w, http.StatusBadRequest, errorBody("you must delete or transfer all servers you own before deleting your account"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "you must delete or transfer all servers you own before deleting your account"))
 		return
 	}
 
@@ -484,7 +484,7 @@ func (h *UserHandler) DeleteAccount(w http.ResponseWriter, r *http.Request) {
 	_, err = h.db.Exec(r.Context(), `DELETE FROM users WHERE id = $1`, userID)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to delete account")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 

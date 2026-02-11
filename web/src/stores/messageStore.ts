@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import type { Message } from '../types';
 import { apiGetMessages, apiSendMessage, apiEditMessage, apiDeleteMessage } from '../api/client';
+import { extractErrorMessage } from '../utils/errors';
+import { eventBus } from '../utils/eventBus';
 
 interface MessageState {
   messages: Record<string, Message[]>;
@@ -119,7 +121,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       // but addMessage deduplicates)
       get().addMessage(channelId, message);
       // Signal message list to scroll to bottom for own messages
-      window.dispatchEvent(new CustomEvent('bastion:message-sent'));
+      eventBus.emit('bastion:message-sent');
     } catch (err: unknown) {
       const errMsg = extractErrorMessage(err, 'Failed to send message.');
       set({ error: errMsg });
@@ -234,17 +236,3 @@ export const useMessageStore = create<MessageState>((set, get) => ({
   },
 }));
 
-function extractErrorMessage(err: unknown, fallback: string): string {
-  if (err && typeof err === 'object' && 'response' in err) {
-    const axiosErr = err as {
-      response?: { data?: { message?: string; error?: string } };
-    };
-    if (axiosErr.response?.data?.message) {
-      return axiosErr.response.data.message;
-    }
-    if (axiosErr.response?.data?.error) {
-      return axiosErr.response.data.error;
-    }
-  }
-  return fallback;
-}

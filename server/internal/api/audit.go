@@ -58,7 +58,7 @@ func (h *AuditLogHandler) List(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 
@@ -102,7 +102,7 @@ func (h *AuditLogHandler) List(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.Query(r.Context(), baseQuery, args...)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to list audit log")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	defer rows.Close()
@@ -115,7 +115,7 @@ func (h *AuditLogHandler) List(w http.ResponseWriter, r *http.Request) {
 			&e.TargetType, &e.TargetID, &e.Changes, &e.Reason, &e.CreatedAt,
 			&actor.ID, &actor.Username, &actor.DisplayName, &actor.AvatarURL); err != nil {
 			log.Error().Err(err).Msg("failed to scan audit log entry")
-			writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
 		e.Actor = &actor

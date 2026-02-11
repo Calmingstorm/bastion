@@ -28,19 +28,19 @@ func (h *ReadStateHandler) Ack(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	channelID, err := parseUUID(chi.URLParam(r, "channelID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid channel ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid channel ID"))
 		return
 	}
 
 	var req ackRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
 	messageID, err := parseUUID(req.MessageID)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid message ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid message ID"))
 		return
 	}
 
@@ -53,7 +53,7 @@ func (h *ReadStateHandler) Ack(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to ack channel")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -69,7 +69,7 @@ func (h *ReadStateHandler) ListReadStates(w http.ResponseWriter, r *http.Request
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to list read states")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	defer rows.Close()
@@ -80,7 +80,7 @@ func (h *ReadStateHandler) ListReadStates(w http.ResponseWriter, r *http.Request
 		if err := rows.Scan(&rs.UserID, &rs.ChannelID, &rs.LastMessageID,
 			&rs.LastReadAt, &rs.MentionCount); err != nil {
 			log.Error().Err(err).Msg("failed to scan read state")
-			writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
 		states = append(states, rs)

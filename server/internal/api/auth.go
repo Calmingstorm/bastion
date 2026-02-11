@@ -62,7 +62,7 @@ type tokenResponse struct {
 func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	var req registerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
@@ -72,19 +72,19 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 	// Validate username
 	if !usernameRegex.MatchString(req.Username) {
-		writeJSON(w, http.StatusBadRequest, errorBody("username must be 3-32 characters and contain only letters, numbers, and underscores"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "username must be 3-32 characters and contain only letters, numbers, and underscores"))
 		return
 	}
 
 	// Validate email (basic check)
 	if !strings.Contains(req.Email, "@") || len(req.Email) < 5 {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid email address"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid email address"))
 		return
 	}
 
 	// Validate password
 	if len(req.Password) < 8 {
-		writeJSON(w, http.StatusBadRequest, errorBody("password must be at least 8 characters"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "password must be at least 8 characters"))
 		return
 	}
 
@@ -92,7 +92,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	hash, err := auth.HashPassword(req.Password)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to hash password")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -109,15 +109,15 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		errMsg := err.Error()
 		if strings.Contains(errMsg, "users_username_key") {
-			writeJSON(w, http.StatusConflict, errorBody("username already taken"))
+			writeJSON(w, http.StatusConflict, errorResponse("CONFLICT", "username already taken"))
 			return
 		}
 		if strings.Contains(errMsg, "users_email_key") {
-			writeJSON(w, http.StatusConflict, errorBody("email already registered"))
+			writeJSON(w, http.StatusConflict, errorResponse("CONFLICT", "email already registered"))
 			return
 		}
 		log.Error().Err(err).Msg("failed to insert user")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -125,14 +125,14 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	accessToken, err := auth.GenerateAccessToken(user.ID, h.cfg.JWT.Secret, h.cfg.JWT.AccessTTL)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to generate access token")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
 	refreshToken, err := auth.GenerateRefreshToken(user.ID, h.cfg.JWT.Secret, h.cfg.JWT.RefreshTTL)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to generate refresh token")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -146,7 +146,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
@@ -161,14 +161,14 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		&user.DisplayName, &user.AvatarURL, &user.Status, &user.AboutMe, &user.CreatedAt, &user.UpdatedAt)
 
 	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, errorBody("invalid email or password"))
+		writeJSON(w, http.StatusUnauthorized, errorResponse("AUTH_REQUIRED", "invalid email or password"))
 		return
 	}
 
 	// Verify password
 	match, err := auth.VerifyPassword(user.PasswordHash, req.Password)
 	if err != nil || !match {
-		writeJSON(w, http.StatusUnauthorized, errorBody("invalid email or password"))
+		writeJSON(w, http.StatusUnauthorized, errorResponse("AUTH_REQUIRED", "invalid email or password"))
 		return
 	}
 
@@ -176,14 +176,14 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	accessToken, err := auth.GenerateAccessToken(user.ID, h.cfg.JWT.Secret, h.cfg.JWT.AccessTTL)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to generate access token")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
 	refreshToken, err := auth.GenerateRefreshToken(user.ID, h.cfg.JWT.Secret, h.cfg.JWT.RefreshTTL)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to generate refresh token")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -197,24 +197,24 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	var req refreshRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
 	claims, err := auth.ValidateToken(req.RefreshToken, h.cfg.JWT.Secret)
 	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, errorBody("invalid refresh token"))
+		writeJSON(w, http.StatusUnauthorized, errorResponse("TOKEN_INVALID", "invalid refresh token"))
 		return
 	}
 
 	if claims.TokenType != "refresh" {
-		writeJSON(w, http.StatusUnauthorized, errorBody("invalid token type"))
+		writeJSON(w, http.StatusUnauthorized, errorResponse("TOKEN_INVALID", "invalid token type"))
 		return
 	}
 
 	userID, err := parseUUID(claims.Subject)
 	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, errorBody("invalid token subject"))
+		writeJSON(w, http.StatusUnauthorized, errorResponse("TOKEN_INVALID", "invalid token subject"))
 		return
 	}
 
@@ -222,14 +222,14 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	var exists bool
 	err = h.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, userID).Scan(&exists)
 	if err != nil || !exists {
-		writeJSON(w, http.StatusUnauthorized, errorBody("user not found"))
+		writeJSON(w, http.StatusUnauthorized, errorResponse("NOT_FOUND", "user not found"))
 		return
 	}
 
 	accessToken, err := auth.GenerateAccessToken(userID, h.cfg.JWT.Secret, h.cfg.JWT.AccessTTL)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to generate access token")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -247,7 +247,7 @@ func (h *AuthHandler) GetMe(w http.ResponseWriter, r *http.Request) {
 		&user.DisplayName, &user.AvatarURL, &user.Status, &user.AboutMe, &user.CreatedAt, &user.UpdatedAt)
 
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorBody("user not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "user not found"))
 		return
 	}
 
@@ -265,13 +265,13 @@ type resetPasswordRequest struct {
 
 func (h *AuthHandler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
 	if h.emailSvc == nil {
-		writeJSON(w, http.StatusNotImplemented, errorBody("password reset not available"))
+		writeJSON(w, http.StatusNotImplemented, errorResponse("INTERNAL_ERROR", "password reset not available"))
 		return
 	}
 
 	var req forgotPasswordRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
@@ -292,7 +292,7 @@ func (h *AuthHandler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
 		log.Error().Err(err).Msg("failed to generate reset token")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	token := hex.EncodeToString(tokenBytes)
@@ -301,7 +301,7 @@ func (h *AuthHandler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
 	if err := h.rdb.Set(ctx, "reset:"+token, userID, 1*time.Hour).Err(); err != nil {
 		log.Error().Err(err).Msg("failed to store reset token")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -328,18 +328,18 @@ func (h *AuthHandler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 	var req resetPasswordRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
 	req.Token = strings.TrimSpace(req.Token)
 	if req.Token == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody("token is required"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "token is required"))
 		return
 	}
 
 	if len(req.Password) < 8 {
-		writeJSON(w, http.StatusBadRequest, errorBody("password must be at least 8 characters"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "password must be at least 8 characters"))
 		return
 	}
 
@@ -347,7 +347,7 @@ func (h *AuthHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
 	userID, err := h.rdb.Get(ctx, "reset:"+req.Token).Result()
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid or expired token"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid or expired token"))
 		return
 	}
 
@@ -355,7 +355,7 @@ func (h *AuthHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 	hash, err := auth.HashPassword(req.Password)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to hash password")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -366,7 +366,7 @@ func (h *AuthHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to update password")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 

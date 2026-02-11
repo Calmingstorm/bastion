@@ -71,14 +71,14 @@ var giphyShareRe = regexp.MustCompile(`^https?://(?:www\.)?giphy\.com/gifs/(.+)$
 func (h *UnfurlHandler) Unfurl(w http.ResponseWriter, r *http.Request) {
 	rawURL := r.URL.Query().Get("url")
 	if rawURL == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody("url parameter is required"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "url parameter is required"))
 		return
 	}
 
 	// Validate it's a proper URL
 	parsed, err := url.Parse(rawURL)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid URL"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid URL"))
 		return
 	}
 
@@ -100,7 +100,7 @@ func (h *UnfurlHandler) Unfurl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusBadRequest, errorBody("unsupported URL"))
+	writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "unsupported URL"))
 }
 
 func (h *UnfurlHandler) unfurlTenor(w http.ResponseWriter, r *http.Request, originalURL, postID string) {
@@ -112,7 +112,7 @@ func (h *UnfurlHandler) unfurlTenor(w http.ResponseWriter, r *http.Request, orig
 
 	req, err := http.NewRequestWithContext(r.Context(), "GET", "https://tenor.googleapis.com/v2/posts", nil)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	q := req.URL.Query()
@@ -123,14 +123,14 @@ func (h *UnfurlHandler) unfurlTenor(w http.ResponseWriter, r *http.Request, orig
 
 	resp, err := h.client.Do(req)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, errorBody("failed to reach GIF service"))
+		writeJSON(w, http.StatusBadGateway, errorResponse("INTERNAL_ERROR", "failed to reach GIF service"))
 		return
 	}
 	defer resp.Body.Close()
 
 	var tenorResp tenorResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tenorResp); err != nil || len(tenorResp.Results) == 0 {
-		writeJSON(w, http.StatusNotFound, errorBody("GIF not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "GIF not found"))
 		return
 	}
 
@@ -145,7 +145,7 @@ func (h *UnfurlHandler) unfurlTenor(w http.ResponseWriter, r *http.Request, orig
 	}
 
 	if result.MediaURL == "" {
-		writeJSON(w, http.StatusNotFound, errorBody("GIF media not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "GIF media not found"))
 		return
 	}
 
@@ -158,7 +158,7 @@ func (h *UnfurlHandler) unfurlGiphy(w http.ResponseWriter, originalURL, pathSuff
 	parts := strings.Split(pathSuffix, "-")
 	giphyID := parts[len(parts)-1]
 	if giphyID == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody("could not extract Giphy ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "could not extract Giphy ID"))
 		return
 	}
 

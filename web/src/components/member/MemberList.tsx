@@ -3,6 +3,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { usePresenceStore } from '../../stores/presenceStore';
 import { useAuthStore } from '../../stores/authStore';
 import { apiGetMembers } from '../../api/client';
+import { eventBus } from '../../utils/eventBus';
 import { UserProfileCard } from '../user/UserProfileCard';
 import { UserContextMenu } from '../user/UserContextMenu';
 import { PresenceDot } from '../user/PresenceDot';
@@ -35,11 +36,11 @@ export function MemberList() {
   // Refetch on member changes (join, kick, ban, timeout via WS events)
   useEffect(() => {
     const handler = () => fetchMemberList();
-    window.addEventListener('bastion:member-join', handler);
-    window.addEventListener('bastion:member-update', handler);
+    eventBus.on('bastion:member-join', handler);
+    eventBus.on('bastion:member-update', handler);
     return () => {
-      window.removeEventListener('bastion:member-join', handler);
-      window.removeEventListener('bastion:member-update', handler);
+      eventBus.off('bastion:member-join', handler);
+      eventBus.off('bastion:member-update', handler);
     };
   }, [fetchMemberList]);
 

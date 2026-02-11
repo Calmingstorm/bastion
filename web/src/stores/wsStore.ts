@@ -7,7 +7,9 @@ import { useTypingStore } from './typingStore';
 import { useUnreadStore } from './unreadStore';
 import { useAuthStore } from './authStore';
 import { useDMStore } from './dmStore';
-import type { Message, Channel, DMChannel } from '../types';
+import type { Message, Channel, DMChannel, Server } from '../types';
+import { eventBus } from '../utils/eventBus';
+import { showNotification } from '../utils/notifications';
 
 interface WSState {
   isConnected: boolean;
@@ -113,15 +115,11 @@ export const useWSStore = create<WSState>((set) => ({
           useUnreadStore.getState().incrementMention(payload.channelId);
         }
         // Browser notification when tab is hidden
-        if (payload.senderName && 'Notification' in window &&
-            Notification.permission === 'granted' && document.hidden) {
+        if (payload.senderName) {
           const title = payload.channelName
             ? `${payload.senderName} in #${payload.channelName}`
             : payload.senderName;
-          new Notification(title, {
-            body: payload.content || 'mentioned you',
-            icon: '/favicon.ico',
-          });
+          showNotification(title, payload.content || 'mentioned you');
         }
       }
     });
@@ -142,7 +140,7 @@ export const useWSStore = create<WSState>((set) => ({
           }
         } else {
           // Someone else was kicked — refresh member list
-          window.dispatchEvent(new CustomEvent('bastion:member-update', { detail: payload }));
+          eventBus.emit('bastion:member-update', payload);
         }
       }
     });
@@ -181,7 +179,7 @@ export const useWSStore = create<WSState>((set) => ({
           useServerStore.getState().removeServer(payload.serverId);
         } else {
           // Someone else left — refresh member list
-          window.dispatchEvent(new CustomEvent('bastion:member-update', { detail: payload }));
+          eventBus.emit('bastion:member-update', payload);
         }
       }
     });
@@ -196,21 +194,21 @@ export const useWSStore = create<WSState>((set) => ({
     wsClient.on('MESSAGE_PIN', (data: unknown) => {
       const payload = data as { channelId: string; messageId: string };
       if (payload.channelId) {
-        window.dispatchEvent(new CustomEvent('bastion:pin-update', { detail: payload }));
+        eventBus.emit('bastion:pin-update', payload);
       }
     });
 
     wsClient.on('MESSAGE_UNPIN', (data: unknown) => {
       const payload = data as { channelId: string; messageId: string };
       if (payload.channelId) {
-        window.dispatchEvent(new CustomEvent('bastion:pin-update', { detail: payload }));
+        eventBus.emit('bastion:pin-update', payload);
       }
     });
 
     wsClient.on('MEMBER_NICKNAME_UPDATE', (data: unknown) => {
       const payload = data as { serverId: string; userId: string; nickname: string };
       if (payload.serverId) {
-        window.dispatchEvent(new CustomEvent('bastion:member-update', { detail: payload }));
+        eventBus.emit('bastion:member-update', payload);
       }
     });
 
@@ -221,7 +219,7 @@ export const useWSStore = create<WSState>((set) => ({
         // Refetch member list if viewing the server the new member joined
         if (selectedServerId === payload.serverId) {
           // Dispatch a custom event that MemberList can listen for
-          window.dispatchEvent(new CustomEvent('bastion:member-join', { detail: payload }));
+          eventBus.emit('bastion:member-join', payload);
         }
       }
     });
@@ -242,7 +240,7 @@ export const useWSStore = create<WSState>((set) => ({
           }
         } else {
           // Someone else was banned — refresh member list
-          window.dispatchEvent(new CustomEvent('bastion:member-update', { detail: payload }));
+          eventBus.emit('bastion:member-update', payload);
         }
       }
     });
@@ -251,19 +249,74 @@ export const useWSStore = create<WSState>((set) => ({
       const payload = data as { serverId: string; userId: string; timedOutUntil: string };
       if (payload.serverId) {
         // Refresh member list so timeout indicator appears
-        window.dispatchEvent(new CustomEvent('bastion:member-update', { detail: payload }));
+        eventBus.emit('bastion:member-update', payload);
       }
+    });
+
+    // Role events — refresh member list (roles affect display)
+    wsClient.on('ROLE_CREATE', () => {
+      eventBus.emit('bastion:member-update');
+    });
+    wsClient.on('ROLE_UPDATE', () => {
+      eventBus.emit('bastion:member-update');
+    });
+    wsClient.on('ROLE_DELETE', () => {
+      eventBus.emit('bastion:member-update');
+    });
+    wsClient.on('ROLE_ASSIGNED', () => {
+      eventBus.emit('bastion:member-update');
+    });
+    wsClient.on('ROLE_REMOVED', () => {
+      eventBus.emit('bastion:member-update');
+    });
+
+    // Server update — update server in store directly
+    wsClient.on('SERVER_UPDATE', (data: unknown) => {
+      const server = data as Server;
+      if (server && server.id) {
+        useServerStore.getState().updateServer(server);
+      }
+    });
+
+    // Category events — dispatch custom event so category-listing components can refetch
+    wsClient.on('CATEGORY_CREATE', (data: unknown) => {
+      const payload = data as { serverId?: string };
+      eventBus.emit('bastion:category-update', payload);
+    });
+    wsClient.on('CATEGORY_UPDATE', (data: unknown) => {
+      const payload = data as { serverId?: string };
+      eventBus.emit('bastion:category-update', payload);
+    });
+    wsClient.on('CATEGORY_DELETE', (data: unknown) => {
+      const payload = data as { serverId?: string };
+      eventBus.emit('bastion:category-update', payload);
     });
 
     // Set own presence to online when WebSocket opens (or reopens after reconnect).
     // The server also broadcasts PRESENCE_UPDATE but there's a race where the
     // broadcast can fire before our channel subscriptions are processed.
-    wsClient.on('CONNECTED', () => {
+    wsClient.on('CONNECTED', (data: unknown) => {
+      const { isReconnect } = (data as { isReconnect?: boolean }) || {};
       const currentUser = useAuthStore.getState().user;
       if (currentUser) {
         usePresenceStore.getState().setPresence(currentUser.id, 'online');
       }
       set({ isConnected: true });
+
+      if (isReconnect) {
+        // Resync missed data after reconnection
+        const selectedChannelId = useServerStore.getState().selectedChannelId;
+        const selectedDMId = useDMStore.getState().selectedDMId;
+        const activeChannelId = selectedChannelId || selectedDMId;
+        if (activeChannelId) {
+          useMessageStore.getState().fetchMessages(activeChannelId);
+        }
+        // Refresh member list
+        eventBus.emit('bastion:member-update');
+        // Refresh DMs and unread state
+        useDMStore.getState().fetchDMs();
+        useUnreadStore.getState().fetchReadStates();
+      }
     });
 
     wsClient.connect(token);

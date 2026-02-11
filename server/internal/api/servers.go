@@ -39,20 +39,20 @@ func (h *ServerHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	var req createServerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
 	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" || len(req.Name) > 100 {
-		writeJSON(w, http.StatusBadRequest, errorBody("server name must be 1-100 characters"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "server name must be 1-100 characters"))
 		return
 	}
 
 	tx, err := h.db.Begin(r.Context())
 	if err != nil {
 		log.Error().Err(err).Msg("failed to begin transaction")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -66,7 +66,7 @@ func (h *ServerHandler) Create(w http.ResponseWriter, r *http.Request) {
 	).Scan(&server.ID, &server.Name, &server.IconURL, &server.Description, &server.OwnerID, &server.CreatedAt)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create server")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -77,7 +77,7 @@ func (h *ServerHandler) Create(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to add creator as member")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -92,7 +92,7 @@ func (h *ServerHandler) Create(w http.ResponseWriter, r *http.Request) {
 	).Scan(&defaultRoleID)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create default role")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -103,7 +103,7 @@ func (h *ServerHandler) Create(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to assign default role")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -114,13 +114,13 @@ func (h *ServerHandler) Create(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create default channel")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
 		log.Error().Err(err).Msg("failed to commit transaction")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -140,7 +140,7 @@ func (h *ServerHandler) List(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to list servers")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	defer rows.Close()
@@ -150,7 +150,7 @@ func (h *ServerHandler) List(w http.ResponseWriter, r *http.Request) {
 		var s models.Server
 		if err := rows.Scan(&s.ID, &s.Name, &s.IconURL, &s.Description, &s.OwnerID, &s.CreatedAt, &s.MemberCount); err != nil {
 			log.Error().Err(err).Msg("failed to scan server")
-			writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
 		servers = append(servers, s)
@@ -158,7 +158,7 @@ func (h *ServerHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	if err := rows.Err(); err != nil {
 		log.Error().Err(err).Msg("rows iteration error")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -169,7 +169,7 @@ func (h *ServerHandler) Get(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "id"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 
@@ -181,11 +181,11 @@ func (h *ServerHandler) Get(w http.ResponseWriter, r *http.Request) {
 	).Scan(&isMember)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to check membership")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	if !isMember {
-		writeJSON(w, http.StatusForbidden, errorBody("you are not a member of this server"))
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you are not a member of this server"))
 		return
 	}
 
@@ -197,7 +197,7 @@ func (h *ServerHandler) Get(w http.ResponseWriter, r *http.Request) {
 		serverID,
 	).Scan(&s.ID, &s.Name, &s.IconURL, &s.Description, &s.OwnerID, &s.CreatedAt, &s.MemberCount)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorBody("server not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "server not found"))
 		return
 	}
 
@@ -208,7 +208,7 @@ func (h *ServerHandler) Join(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "id"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 
@@ -218,7 +218,7 @@ func (h *ServerHandler) Join(w http.ResponseWriter, r *http.Request) {
 		`SELECT EXISTS(SELECT 1 FROM servers WHERE id = $1)`, serverID,
 	).Scan(&exists)
 	if err != nil || !exists {
-		writeJSON(w, http.StatusNotFound, errorBody("server not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "server not found"))
 		return
 	}
 
@@ -230,11 +230,11 @@ func (h *ServerHandler) Join(w http.ResponseWriter, r *http.Request) {
 	).Scan(&isMember)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to check membership")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	if isMember {
-		writeJSON(w, http.StatusConflict, errorBody("already a member of this server"))
+		writeJSON(w, http.StatusConflict, errorResponse("CONFLICT", "already a member of this server"))
 		return
 	}
 
@@ -245,14 +245,14 @@ func (h *ServerHandler) Join(w http.ResponseWriter, r *http.Request) {
 		serverID, userID,
 	).Scan(&isBanned)
 	if err == nil && isBanned {
-		writeJSON(w, http.StatusForbidden, errorBody("you are banned from this server"))
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you are banned from this server"))
 		return
 	}
 
 	tx, err := h.db.Begin(r.Context())
 	if err != nil {
 		log.Error().Err(err).Msg("failed to begin transaction")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -266,7 +266,7 @@ func (h *ServerHandler) Join(w http.ResponseWriter, r *http.Request) {
 	).Scan(&member.ServerID, &member.UserID, &member.Nickname, &member.Role, &member.TimedOutUntil, &member.JoinedAt)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to join server")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -279,7 +279,7 @@ func (h *ServerHandler) Join(w http.ResponseWriter, r *http.Request) {
 
 	if err := tx.Commit(r.Context()); err != nil {
 		log.Error().Err(err).Msg("failed to commit join")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -312,7 +312,7 @@ func (h *ServerHandler) Update(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "id"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 
@@ -322,7 +322,7 @@ func (h *ServerHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	var req updateServerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
@@ -333,7 +333,7 @@ func (h *ServerHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if req.Name != nil {
 		name := strings.TrimSpace(*req.Name)
 		if name == "" || len(name) > 100 {
-			writeJSON(w, http.StatusBadRequest, errorBody("server name must be 1-100 characters"))
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "server name must be 1-100 characters"))
 			return
 		}
 		sets = append(sets, "name = $"+itoa(argIdx))
@@ -344,7 +344,7 @@ func (h *ServerHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if req.Description != nil {
 		desc := strings.TrimSpace(*req.Description)
 		if len(desc) > 1000 {
-			writeJSON(w, http.StatusBadRequest, errorBody("description too long (max 1000 chars)"))
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "description too long (max 1000 chars)"))
 			return
 		}
 		sets = append(sets, "description = $"+itoa(argIdx))
@@ -353,7 +353,7 @@ func (h *ServerHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(sets) == 0 {
-		writeJSON(w, http.StatusBadRequest, errorBody("no fields to update"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "no fields to update"))
 		return
 	}
 
@@ -366,11 +366,20 @@ func (h *ServerHandler) Update(w http.ResponseWriter, r *http.Request) {
 	err = h.db.QueryRow(r.Context(), query, args...).Scan(
 		&s.ID, &s.Name, &s.IconURL, &s.Description, &s.OwnerID, &s.CreatedAt)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorBody("server not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "server not found"))
 		return
 	}
 
 	writeAuditLog(h.db, r.Context(), serverID, userID, models.AuditServerUpdate, "server", serverID, nil, nil)
+
+	// Broadcast server update to all server channels
+	channelIDs, _ := getServerChannelIDs(r.Context(), h.db, serverID)
+	for _, chID := range channelIDs {
+		h.hub.BroadcastToChannel(chID, realtime.Event{
+			Type: realtime.EventServerUpdate,
+			Data: s,
+		})
+	}
 
 	writeJSON(w, http.StatusOK, s)
 }
@@ -379,7 +388,7 @@ func (h *ServerHandler) UploadIcon(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "id"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 
@@ -390,13 +399,13 @@ func (h *ServerHandler) UploadIcon(w http.ResponseWriter, r *http.Request) {
 	// Limit to 2MB for icons
 	r.Body = http.MaxBytesReader(w, r.Body, 2*1024*1024)
 	if err := r.ParseMultipartForm(2 * 1024 * 1024); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("file too large (max 2MB)"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "file too large (max 2MB)"))
 		return
 	}
 
 	file, header, err := r.FormFile("icon")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("missing icon file"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "missing icon file"))
 		return
 	}
 	defer file.Close()
@@ -404,7 +413,7 @@ func (h *ServerHandler) UploadIcon(w http.ResponseWriter, r *http.Request) {
 	// Validate content type
 	contentType := header.Header.Get("Content-Type")
 	if !strings.HasPrefix(contentType, "image/") {
-		writeJSON(w, http.StatusBadRequest, errorBody("file must be an image"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "file must be an image"))
 		return
 	}
 
@@ -416,7 +425,7 @@ func (h *ServerHandler) UploadIcon(w http.ResponseWriter, r *http.Request) {
 	_, url, err := h.storage.Save(file, ext)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to save server icon")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -428,11 +437,20 @@ func (h *ServerHandler) UploadIcon(w http.ResponseWriter, r *http.Request) {
 	).Scan(&s.ID, &s.Name, &s.IconURL, &s.Description, &s.OwnerID, &s.CreatedAt)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to update server icon")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
 	writeAuditLog(h.db, r.Context(), serverID, userID, models.AuditServerUpdate, "server", serverID, nil, nil)
+
+	// Broadcast server update to all server channels
+	channelIDs, _ := getServerChannelIDs(r.Context(), h.db, serverID)
+	for _, chID := range channelIDs {
+		h.hub.BroadcastToChannel(chID, realtime.Event{
+			Type: realtime.EventServerUpdate,
+			Data: s,
+		})
+	}
 
 	writeJSON(w, http.StatusOK, s)
 }
@@ -441,7 +459,7 @@ func (h *ServerHandler) Leave(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 
@@ -452,7 +470,7 @@ func (h *ServerHandler) Leave(w http.ResponseWriter, r *http.Request) {
 		serverID, userID,
 	).Scan(&isMember)
 	if err != nil || !isMember {
-		writeJSON(w, http.StatusForbidden, errorBody("you are not a member of this server"))
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you are not a member of this server"))
 		return
 	}
 
@@ -460,7 +478,7 @@ func (h *ServerHandler) Leave(w http.ResponseWriter, r *http.Request) {
 	var ownerID uuid.UUID
 	_ = h.db.QueryRow(r.Context(), `SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID)
 	if userID == ownerID {
-		writeJSON(w, http.StatusBadRequest, errorBody("server owner cannot leave — delete the server or transfer ownership first"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "server owner cannot leave — delete the server or transfer ownership first"))
 		return
 	}
 
@@ -471,7 +489,7 @@ func (h *ServerHandler) Leave(w http.ResponseWriter, r *http.Request) {
 		`DELETE FROM server_members WHERE server_id = $1 AND user_id = $2`, serverID, userID)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to leave server")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -501,7 +519,7 @@ func (h *ServerHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 
@@ -509,11 +527,11 @@ func (h *ServerHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	var ownerID uuid.UUID
 	err = h.db.QueryRow(r.Context(), `SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorBody("server not found"))
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "server not found"))
 		return
 	}
 	if userID != ownerID {
-		writeJSON(w, http.StatusForbidden, errorBody("only the server owner can delete the server"))
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "only the server owner can delete the server"))
 		return
 	}
 
@@ -532,7 +550,7 @@ func (h *ServerHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	_, err = h.db.Exec(r.Context(), `DELETE FROM servers WHERE id = $1`, serverID)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to delete server")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
@@ -543,12 +561,12 @@ func (h *ServerHandler) UpdateNickname(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid server ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
 		return
 	}
 	targetID, err := parseUUID(chi.URLParam(r, "userID"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid user ID"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid user ID"))
 		return
 	}
 
@@ -569,13 +587,13 @@ func (h *ServerHandler) UpdateNickname(w http.ResponseWriter, r *http.Request) {
 		Nickname string `json:"nickname"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid request body"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
 		return
 	}
 
 	nickname := strings.TrimSpace(req.Nickname)
 	if len(nickname) > 64 {
-		writeJSON(w, http.StatusBadRequest, errorBody("nickname too long (max 64 characters)"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "nickname too long (max 64 characters)"))
 		return
 	}
 
@@ -590,7 +608,7 @@ func (h *ServerHandler) UpdateNickname(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to update nickname")
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 

@@ -8,6 +8,7 @@ import { MessageItem, DateSeparator } from './MessageItem';
 import { TypingIndicator } from './TypingIndicator';
 import { SearchDialog } from '../search/SearchDialog';
 import { PinnedMessages } from './PinnedMessages';
+import { eventBus } from '../../utils/eventBus';
 import { PresenceDot } from '../user/PresenceDot';
 import type { Message } from '../../types';
 
@@ -106,8 +107,8 @@ export function MessageList({ onToggleMembers, onToggleSidebar }: MessageListPro
   // Always scroll to bottom after the current user sends a message
   useEffect(() => {
     const handler = () => scrollToBottomPersistent();
-    window.addEventListener('bastion:message-sent', handler);
-    return () => window.removeEventListener('bastion:message-sent', handler);
+    eventBus.on('bastion:message-sent', handler);
+    return () => eventBus.off('bastion:message-sent', handler);
   }, [scrollToBottomPersistent]);
 
   // Fetch messages when channel changes

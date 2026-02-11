@@ -18,16 +18,17 @@ const (
 	pongWait       = 60 * time.Second
 	pingInterval   = 30 * time.Second
 	maxMessageSize = 4096
-	sendBufferSize = 64
+	sendBufferSize = 256
 )
 
 type Client struct {
-	hub    *Hub
-	conn   *websocket.Conn
-	userID uuid.UUID
-	send   chan Event
-	db     *pgxpool.Pool
-	rdb    *redis.Client
+	hub       *Hub
+	conn      *websocket.Conn
+	userID    uuid.UUID
+	send      chan Event
+	db        *pgxpool.Pool
+	rdb       *redis.Client
+	dropCount int
 }
 
 type incomingMessage struct {
@@ -232,6 +233,7 @@ func (c *Client) writePump(ctx context.Context, cancel context.CancelFunc) {
 				log.Debug().Err(err).Str("userID", c.userID.String()).Msg("websocket write error")
 				return
 			}
+			c.dropCount = 0
 
 		case <-ticker.C:
 			pingCtx, pingCancel := context.WithTimeout(ctx, writeWait)

@@ -1,4 +1,5 @@
 import type { WSMessage, WSEventType } from '../types';
+import { storage } from '../utils/storage';
 
 type EventHandler = (data: unknown) => void;
 
@@ -13,6 +14,7 @@ export class WebSocketClient {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private heartbeatInterval: number = 30000;
   private intentionalClose: boolean = false;
+  private wasConnectedBefore: boolean = false;
 
   connect(token: string): void {
     this.token = token;
@@ -22,7 +24,7 @@ export class WebSocketClient {
     const host = import.meta.env.VITE_API_URL
       ? new URL(import.meta.env.VITE_API_URL).host
       : window.location.host;
-    this.url = `${protocol}//${host}/api/ws?token=${encodeURIComponent(token)}`;
+    this.url = `${protocol}//${host}/api/v1/ws?token=${encodeURIComponent(token)}`;
 
     this.doConnect();
   }
@@ -47,7 +49,8 @@ export class WebSocketClient {
       this.reconnectAttempts = 0;
       this.startHeartbeat();
       // Notify listeners that the connection is open (or reopened after reconnect)
-      this.dispatch('CONNECTED' as WSEventType, {});
+      this.dispatch('CONNECTED' as WSEventType, { isReconnect: this.wasConnectedBefore });
+      this.wasConnectedBefore = true;
     };
 
     this.ws.onmessage = (event: MessageEvent) => {
@@ -99,18 +102,22 @@ export class WebSocketClient {
     this.reconnectAttempts++;
 
     this.reconnectTimer = setTimeout(() => {
-      // Rebuild URL with stored token in case it was refreshed
+      // Read fresh token from storage in case it was refreshed during disconnect
+      const freshToken = storage.getItem('accessToken');
+      if (freshToken) this.token = freshToken;
+      // Rebuild URL with fresh token
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const host = import.meta.env.VITE_API_URL
         ? new URL(import.meta.env.VITE_API_URL).host
         : window.location.host;
-      this.url = `${protocol}//${host}/api/ws?token=${encodeURIComponent(this.token)}`;
+      this.url = `${protocol}//${host}/api/v1/ws?token=${encodeURIComponent(this.token)}`;
       this.doConnect();
     }, delay);
   }
 
   disconnect(): void {
     this.intentionalClose = true;
+    this.removeAllHandlers();
 
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -125,6 +132,14 @@ export class WebSocketClient {
     }
 
     this.reconnectAttempts = 0;
+  }
+
+  updateToken(token: string): void {
+    this.token = token;
+  }
+
+  removeAllHandlers(): void {
+    this.handlers.clear();
   }
 
   on(event: WSEventType, handler: EventHandler): void {

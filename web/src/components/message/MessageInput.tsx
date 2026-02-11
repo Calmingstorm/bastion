@@ -9,6 +9,7 @@ import { EmojiInputPicker } from './EmojiInputPicker';
 import { GifPicker } from './GifPicker';
 import { useFeatureStore } from '../../stores/featureStore';
 import type { MemberWithUser } from '../../types';
+import { eventBus } from '../../utils/eventBus';
 
 export function MessageInput() {
   const [content, setContent] = useState('');
@@ -65,8 +66,8 @@ export function MessageInput() {
     const handler = () => {
       apiGetMembers(selectedServerId).then(setMembers).catch(() => {});
     };
-    window.addEventListener('bastion:member-join', handler);
-    return () => window.removeEventListener('bastion:member-join', handler);
+    eventBus.on('bastion:member-join', handler);
+    return () => eventBus.off('bastion:member-join', handler);
   }, [selectedServerId]);
 
   // Clear reply when switching channels
@@ -92,7 +93,7 @@ export function MessageInput() {
       if (files.length > 0) {
         const msg = await apiSendMessageWithFiles(activeChannelId, trimmed, files);
         addMessage(activeChannelId, msg);
-        window.dispatchEvent(new CustomEvent('bastion:message-sent'));
+        eventBus.emit('bastion:message-sent');
       } else {
         await sendMessage(activeChannelId, trimmed, replyingTo?.id);
       }

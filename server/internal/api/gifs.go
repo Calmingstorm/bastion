@@ -90,13 +90,13 @@ type giphyImage struct {
 
 func (h *GifHandler) Search(w http.ResponseWriter, r *http.Request) {
 	if !h.GifEnabled() {
-		writeJSON(w, http.StatusServiceUnavailable, errorBody("GIF search is not configured"))
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse("INTERNAL_ERROR", "GIF search is not configured"))
 		return
 	}
 
 	query := r.URL.Query().Get("q")
 	if query == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody("query parameter 'q' is required"))
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "query parameter 'q' is required"))
 		return
 	}
 
@@ -116,7 +116,7 @@ func (h *GifHandler) Search(w http.ResponseWriter, r *http.Request) {
 
 func (h *GifHandler) Trending(w http.ResponseWriter, r *http.Request) {
 	if !h.GifEnabled() {
-		writeJSON(w, http.StatusServiceUnavailable, errorBody("GIF search is not configured"))
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse("INTERNAL_ERROR", "GIF search is not configured"))
 		return
 	}
 
@@ -139,7 +139,7 @@ func (h *GifHandler) Trending(w http.ResponseWriter, r *http.Request) {
 func (h *GifHandler) searchTenor(w http.ResponseWriter, r *http.Request, query string, limit int) {
 	req, err := http.NewRequestWithContext(r.Context(), "GET", "https://tenor.googleapis.com/v2/search", nil)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	q := req.URL.Query()
@@ -152,14 +152,14 @@ func (h *GifHandler) searchTenor(w http.ResponseWriter, r *http.Request, query s
 
 	resp, err := h.client.Do(req)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, errorBody("failed to reach GIF service"))
+		writeJSON(w, http.StatusBadGateway, errorResponse("INTERNAL_ERROR", "failed to reach GIF service"))
 		return
 	}
 	defer resp.Body.Close()
 
 	var tenorResp tenorResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tenorResp); err != nil {
-		writeJSON(w, http.StatusBadGateway, errorBody("failed to parse GIF response"))
+		writeJSON(w, http.StatusBadGateway, errorResponse("INTERNAL_ERROR", "failed to parse GIF response"))
 		return
 	}
 
@@ -169,7 +169,7 @@ func (h *GifHandler) searchTenor(w http.ResponseWriter, r *http.Request, query s
 func (h *GifHandler) trendingTenor(w http.ResponseWriter, r *http.Request, limit int) {
 	req, err := http.NewRequestWithContext(r.Context(), "GET", "https://tenor.googleapis.com/v2/featured", nil)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	q := req.URL.Query()
@@ -181,14 +181,14 @@ func (h *GifHandler) trendingTenor(w http.ResponseWriter, r *http.Request, limit
 
 	resp, err := h.client.Do(req)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, errorBody("failed to reach GIF service"))
+		writeJSON(w, http.StatusBadGateway, errorResponse("INTERNAL_ERROR", "failed to reach GIF service"))
 		return
 	}
 	defer resp.Body.Close()
 
 	var tenorResp tenorResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tenorResp); err != nil {
-		writeJSON(w, http.StatusBadGateway, errorBody("failed to parse GIF response"))
+		writeJSON(w, http.StatusBadGateway, errorResponse("INTERNAL_ERROR", "failed to parse GIF response"))
 		return
 	}
 
@@ -224,7 +224,7 @@ func parseTenorResults(results []tenorResult) []gifResult {
 func (h *GifHandler) searchGiphy(w http.ResponseWriter, r *http.Request, query string, limit int) {
 	req, err := http.NewRequestWithContext(r.Context(), "GET", "https://api.giphy.com/v1/gifs/search", nil)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	q := req.URL.Query()
@@ -236,14 +236,14 @@ func (h *GifHandler) searchGiphy(w http.ResponseWriter, r *http.Request, query s
 
 	resp, err := h.client.Do(req)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, errorBody("failed to reach GIF service"))
+		writeJSON(w, http.StatusBadGateway, errorResponse("INTERNAL_ERROR", "failed to reach GIF service"))
 		return
 	}
 	defer resp.Body.Close()
 
 	var giphyResp giphyResponse
 	if err := json.NewDecoder(resp.Body).Decode(&giphyResp); err != nil {
-		writeJSON(w, http.StatusBadGateway, errorBody("failed to parse GIF response"))
+		writeJSON(w, http.StatusBadGateway, errorResponse("INTERNAL_ERROR", "failed to parse GIF response"))
 		return
 	}
 
@@ -253,7 +253,7 @@ func (h *GifHandler) searchGiphy(w http.ResponseWriter, r *http.Request, query s
 func (h *GifHandler) trendingGiphy(w http.ResponseWriter, r *http.Request, limit int) {
 	req, err := http.NewRequestWithContext(r.Context(), "GET", "https://api.giphy.com/v1/gifs/trending", nil)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorBody("internal server error"))
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	q := req.URL.Query()
@@ -264,14 +264,14 @@ func (h *GifHandler) trendingGiphy(w http.ResponseWriter, r *http.Request, limit
 
 	resp, err := h.client.Do(req)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, errorBody("failed to reach GIF service"))
+		writeJSON(w, http.StatusBadGateway, errorResponse("INTERNAL_ERROR", "failed to reach GIF service"))
 		return
 	}
 	defer resp.Body.Close()
 
 	var giphyResp giphyResponse
 	if err := json.NewDecoder(resp.Body).Decode(&giphyResp); err != nil {
-		writeJSON(w, http.StatusBadGateway, errorBody("failed to parse GIF response"))
+		writeJSON(w, http.StatusBadGateway, errorResponse("INTERNAL_ERROR", "failed to parse GIF response"))
 		return
 	}
 

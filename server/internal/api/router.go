@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/go-chi/httprate"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
@@ -44,14 +46,6 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
-	// Public features endpoint — tells clients which optional features are available
-	r.Get("/api/features", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"gifSearch":   cfg.TenorAPIKey != "" || cfg.GiphyAPIKey != "",
-			"gifProvider": gifProvider(cfg),
-		})
-	})
-
 	// Create services
 	fileStorage := storage.NewFileStorage(&cfg.Upload)
 	var emailSvc *email.Service
@@ -70,7 +64,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 	dmHandler := NewDMHandler(db, hub)
 	readStateHandler := NewReadStateHandler(db)
 	roleHandler := NewRoleHandler(db, rdb, hub)
-	categoryHandler := NewCategoryHandler(db)
+	categoryHandler := NewCategoryHandler(db, hub)
 	moderationHandler := NewModerationHandler(db, rdb, hub)
 	reactionHandler := NewReactionHandler(db, hub)
 	auditLogHandler := NewAuditLogHandler(db)
@@ -79,140 +73,164 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 	unfurlHandler := NewUnfurlHandler(cfg)
 	pinHandler := NewPinHandler(db, hub)
 
-	// Public routes
-	r.Route("/api/auth", func(r chi.Router) {
-		r.Post("/register", authHandler.Register)
-		r.Post("/login", authHandler.Login)
-		r.Post("/refresh", authHandler.Refresh)
-		r.Post("/forgot-password", authHandler.ForgotPassword)
-		r.Post("/reset-password", authHandler.ResetPassword)
+	// Backward-compat redirect: /api/* -> /api/v1/*
+	r.HandleFunc("/api/*", func(w http.ResponseWriter, r *http.Request) {
+		newPath := "/api/v1" + strings.TrimPrefix(r.URL.Path, "/api")
+		if r.URL.RawQuery != "" {
+			newPath += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, newPath, http.StatusTemporaryRedirect)
 	})
 
-	// Serve uploaded files (public, UUID-named so unguessable)
-	r.Get("/api/uploads/*", userHandler.ServeUpload)
-
-	// Protected API routes (with timeout)
-	r.Group(func(r chi.Router) {
-		r.Use(auth.Middleware(cfg.JWT.Secret))
-		r.Use(middleware.Timeout(30 * time.Second))
-
-		// Users
-		r.Get("/api/users/me", authHandler.GetMe)
-		r.Patch("/api/users/me", userHandler.UpdateProfile)
-		r.Post("/api/users/me/avatar", userHandler.UploadAvatar)
-		r.Get("/api/users/me/read-states", readStateHandler.ListReadStates)
-		r.Get("/api/users/{userID}", userHandler.GetUser)
-		r.Get("/api/users/search", userHandler.SearchUsers)
-
-		// Account management
-		r.Post("/api/users/me/change-password", userHandler.ChangePassword)
-		r.Post("/api/users/me/change-email", userHandler.ChangeEmail)
-		r.Delete("/api/users/me", userHandler.DeleteAccount)
-
-		// Servers
-		r.Route("/api/servers", func(r chi.Router) {
-			r.Post("/", serverHandler.Create)
-			r.Get("/", serverHandler.List)
-			r.Get("/{id}", serverHandler.Get)
-			r.Patch("/{id}", serverHandler.Update)
-			r.Delete("/{serverID}", serverHandler.Delete)
-			r.Post("/{id}/icon", serverHandler.UploadIcon)
-			r.Post("/{id}/join", serverHandler.Join)
-			r.Delete("/{serverID}/leave", serverHandler.Leave)
-
-			// Nicknames
-			r.Patch("/{serverID}/members/{userID}/nickname", serverHandler.UpdateNickname)
-
-			// Channel reordering
-			r.Put("/{serverID}/channels/reorder", channelHandler.Reorder)
-
-			// Channels (nested under servers)
-			r.Get("/{serverID}/channels", channelHandler.List)
-			r.Post("/{serverID}/channels", channelHandler.Create)
-			r.Patch("/{serverID}/channels/{channelID}", channelHandler.Update)
-			r.Delete("/{serverID}/channels/{channelID}", channelHandler.Delete)
-
-			// Channel categories
-			r.Get("/{serverID}/categories", categoryHandler.List)
-			r.Post("/{serverID}/categories", categoryHandler.Create)
-			r.Patch("/{serverID}/categories/{categoryID}", categoryHandler.Update)
-			r.Delete("/{serverID}/categories/{categoryID}", categoryHandler.Delete)
-
-			// Roles
-			r.Get("/{serverID}/roles", roleHandler.List)
-			r.Post("/{serverID}/roles", roleHandler.Create)
-			r.Patch("/{serverID}/roles/{roleID}", roleHandler.Update)
-			r.Delete("/{serverID}/roles/{roleID}", roleHandler.Delete)
-			r.Post("/{serverID}/roles/{roleID}/assign", roleHandler.AssignRole)
-			r.Post("/{serverID}/roles/{roleID}/remove", roleHandler.RemoveRole)
-
-			// Permissions
-			r.Get("/{serverID}/permissions", roleHandler.GetMemberPermissions)
-
-			// Invites (nested under servers)
-			r.Post("/{serverID}/invites", inviteHandler.Create)
-			r.Get("/{serverID}/invites", inviteHandler.List)
-
-			// Members
-			r.Get("/{serverID}/members", userHandler.GetMembers)
-
-			// Moderation
-			r.Post("/{serverID}/kick/{targetID}", moderationHandler.Kick)
-			r.Post("/{serverID}/bans/{targetID}", moderationHandler.Ban)
-			r.Delete("/{serverID}/bans/{targetID}", moderationHandler.Unban)
-			r.Get("/{serverID}/bans", moderationHandler.ListBans)
-			r.Post("/{serverID}/timeout/{targetID}", moderationHandler.Timeout)
-
-			// Audit log
-			r.Get("/{serverID}/audit-log", auditLogHandler.List)
+	// All API routes under /api/v1
+	r.Route("/api/v1", func(r chi.Router) {
+		// Public features endpoint
+		r.Get("/features", func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"gifSearch":   cfg.TenorAPIKey != "" || cfg.GiphyAPIKey != "",
+				"gifProvider": gifProvider(cfg),
+			})
 		})
 
-		// Invites (top-level for join/delete)
-		r.Delete("/api/invites/{inviteID}", inviteHandler.Delete)
-		r.Post("/api/invites/{code}/join", inviteHandler.Join)
-
-		// Messages
-		r.Route("/api/channels/{channelID}/messages", func(r chi.Router) {
-			r.Get("/", messageHandler.List)
-			r.Post("/", messageHandler.Send)
-			r.Post("/upload", uploadHandler.SendWithAttachments)
-			r.Put("/{messageID}", messageHandler.Edit)
-			r.Delete("/{messageID}", messageHandler.Delete)
-			r.Put("/{messageID}/reactions/{emoji}", reactionHandler.AddReaction)
-			r.Delete("/{messageID}/reactions/{emoji}", reactionHandler.RemoveReaction)
+		// Public auth routes with rate limiting
+		r.Group(func(r chi.Router) {
+			r.Use(httprate.LimitByIP(5, time.Minute))
+			r.Route("/auth", func(r chi.Router) {
+				r.Post("/register", authHandler.Register)
+				r.Post("/login", authHandler.Login)
+				r.Post("/refresh", authHandler.Refresh)
+				r.Post("/forgot-password", authHandler.ForgotPassword)
+				r.Post("/reset-password", authHandler.ResetPassword)
+			})
 		})
 
-		// Pinned messages
-		r.Put("/api/channels/{channelID}/pins/{messageID}", pinHandler.Pin)
-		r.Delete("/api/channels/{channelID}/pins/{messageID}", pinHandler.Unpin)
-		r.Get("/api/channels/{channelID}/pins", pinHandler.List)
+		// Serve uploaded files (public, UUID-named so unguessable)
+		r.Get("/uploads/*", userHandler.ServeUpload)
 
-		// Read states
-		r.Post("/api/channels/{channelID}/ack", readStateHandler.Ack)
+		// Protected API routes (with timeout)
+		r.Group(func(r chi.Router) {
+			r.Use(auth.Middleware(cfg.JWT.Secret))
+			r.Use(middleware.Timeout(30 * time.Second))
+			r.Use(RateLimitByUserID(120, time.Minute))
 
-		// GIF search
-		r.Get("/api/gifs/search", gifHandler.Search)
-		r.Get("/api/gifs/trending", gifHandler.Trending)
+			// Users
+			r.Get("/users/me", authHandler.GetMe)
+			r.Patch("/users/me", userHandler.UpdateProfile)
+			r.Post("/users/me/avatar", userHandler.UploadAvatar)
+			r.Get("/users/me/read-states", readStateHandler.ListReadStates)
+			r.Get("/users/{userID}", userHandler.GetUser)
+			r.Get("/users/search", userHandler.SearchUsers)
 
-		// Message search
-		r.Get("/api/search", searchHandler.Search)
+			// Account management
+			r.Post("/users/me/change-password", userHandler.ChangePassword)
+			r.Post("/users/me/change-email", userHandler.ChangeEmail)
+			r.Delete("/users/me", userHandler.DeleteAccount)
 
-		// URL unfurling (resolve Tenor/Giphy share URLs to media URLs)
-		r.Get("/api/unfurl", unfurlHandler.Unfurl)
+			// Servers
+			r.Route("/servers", func(r chi.Router) {
+				r.Post("/", serverHandler.Create)
+				r.Get("/", serverHandler.List)
+				r.Get("/{id}", serverHandler.Get)
+				r.Patch("/{id}", serverHandler.Update)
+				r.Delete("/{serverID}", serverHandler.Delete)
+				r.Post("/{id}/icon", serverHandler.UploadIcon)
+				r.Post("/{id}/join", serverHandler.Join)
+				r.Delete("/{serverID}/leave", serverHandler.Leave)
 
-		// Direct Messages
-		r.Post("/api/dm", dmHandler.CreateOrGet)
-		r.Get("/api/dm", dmHandler.List)
-		r.Get("/api/dm/{channelID}", dmHandler.Get)
-		r.Post("/api/dm/{channelID}/close", dmHandler.Close)
-	})
+				// Nicknames
+				r.Patch("/{serverID}/members/{userID}/nickname", serverHandler.UpdateNickname)
 
-	// WebSocket (protected, NO timeout — connection must stay alive)
-	r.Group(func(r chi.Router) {
-		r.Use(auth.Middleware(cfg.JWT.Secret))
-		r.Get("/api/ws", func(w http.ResponseWriter, r *http.Request) {
-			userID := auth.UserIDFromContext(r.Context())
-			realtime.ServeWS(hub, w, r, userID, db, rdb)
+				// Channel reordering
+				r.Put("/{serverID}/channels/reorder", channelHandler.Reorder)
+
+				// Channels (nested under servers)
+				r.Get("/{serverID}/channels", channelHandler.List)
+				r.Post("/{serverID}/channels", channelHandler.Create)
+				r.Patch("/{serverID}/channels/{channelID}", channelHandler.Update)
+				r.Delete("/{serverID}/channels/{channelID}", channelHandler.Delete)
+
+				// Channel categories
+				r.Get("/{serverID}/categories", categoryHandler.List)
+				r.Post("/{serverID}/categories", categoryHandler.Create)
+				r.Patch("/{serverID}/categories/{categoryID}", categoryHandler.Update)
+				r.Delete("/{serverID}/categories/{categoryID}", categoryHandler.Delete)
+
+				// Roles
+				r.Get("/{serverID}/roles", roleHandler.List)
+				r.Post("/{serverID}/roles", roleHandler.Create)
+				r.Patch("/{serverID}/roles/{roleID}", roleHandler.Update)
+				r.Delete("/{serverID}/roles/{roleID}", roleHandler.Delete)
+				r.Post("/{serverID}/roles/{roleID}/assign", roleHandler.AssignRole)
+				r.Post("/{serverID}/roles/{roleID}/remove", roleHandler.RemoveRole)
+
+				// Permissions
+				r.Get("/{serverID}/permissions", roleHandler.GetMemberPermissions)
+
+				// Invites (nested under servers)
+				r.Post("/{serverID}/invites", inviteHandler.Create)
+				r.Get("/{serverID}/invites", inviteHandler.List)
+
+				// Members
+				r.Get("/{serverID}/members", userHandler.GetMembers)
+
+				// Moderation
+				r.Post("/{serverID}/kick/{targetID}", moderationHandler.Kick)
+				r.Post("/{serverID}/bans/{targetID}", moderationHandler.Ban)
+				r.Delete("/{serverID}/bans/{targetID}", moderationHandler.Unban)
+				r.Get("/{serverID}/bans", moderationHandler.ListBans)
+				r.Post("/{serverID}/timeout/{targetID}", moderationHandler.Timeout)
+
+				// Audit log
+				r.Get("/{serverID}/audit-log", auditLogHandler.List)
+			})
+
+			// Invites (top-level for join/delete)
+			r.Delete("/invites/{inviteID}", inviteHandler.Delete)
+			r.Post("/invites/{code}/join", inviteHandler.Join)
+
+			// Messages (with message send rate limit)
+			r.Route("/channels/{channelID}/messages", func(r chi.Router) {
+				r.Get("/", messageHandler.List)
+				r.With(RateLimitByUserID(10, 10*time.Second)).Post("/", messageHandler.Send)
+				r.With(RateLimitByUserID(5, time.Minute)).Post("/upload", uploadHandler.SendWithAttachments)
+				r.Put("/{messageID}", messageHandler.Edit)
+				r.Delete("/{messageID}", messageHandler.Delete)
+				r.Put("/{messageID}/reactions/{emoji}", reactionHandler.AddReaction)
+				r.Delete("/{messageID}/reactions/{emoji}", reactionHandler.RemoveReaction)
+			})
+
+			// Pinned messages
+			r.Put("/channels/{channelID}/pins/{messageID}", pinHandler.Pin)
+			r.Delete("/channels/{channelID}/pins/{messageID}", pinHandler.Unpin)
+			r.Get("/channels/{channelID}/pins", pinHandler.List)
+
+			// Read states
+			r.Post("/channels/{channelID}/ack", readStateHandler.Ack)
+
+			// GIF search
+			r.Get("/gifs/search", gifHandler.Search)
+			r.Get("/gifs/trending", gifHandler.Trending)
+
+			// Message search
+			r.Get("/search", searchHandler.Search)
+
+			// URL unfurling (resolve Tenor/Giphy share URLs to media URLs)
+			r.Get("/unfurl", unfurlHandler.Unfurl)
+
+			// Direct Messages
+			r.Post("/dm", dmHandler.CreateOrGet)
+			r.Get("/dm", dmHandler.List)
+			r.Get("/dm/{channelID}", dmHandler.Get)
+			r.Post("/dm/{channelID}/close", dmHandler.Close)
+		})
+
+		// WebSocket (protected, NO timeout — connection must stay alive)
+		r.Group(func(r chi.Router) {
+			r.Use(auth.Middleware(cfg.JWT.Secret))
+			r.Get("/ws", func(w http.ResponseWriter, r *http.Request) {
+				userID := auth.UserIDFromContext(r.Context())
+				realtime.ServeWS(hub, w, r, userID, db, rdb)
+			})
 		})
 	})
 
@@ -263,6 +281,15 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 
 func errorBody(msg string) map[string]string {
 	return map[string]string{"error": msg}
+}
+
+type apiError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+func errorResponse(code, msg string) map[string]apiError {
+	return map[string]apiError{"error": {Code: code, Message: msg}}
 }
 
 func parseUUID(s string) (uuid.UUID, error) {

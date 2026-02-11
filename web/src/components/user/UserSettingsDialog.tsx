@@ -4,6 +4,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { apiUpdateProfile, apiUploadAvatar, apiChangePassword, apiChangeEmail, apiDeleteAccount, clearTokens } from '../../api/client';
 import { useLayoutStore } from '../../stores/layoutStore';
 import { useThemeStore } from '../../stores/themeStore';
+import { storage } from '../../utils/storage';
 
 interface UserSettingsDialogProps {
   open: boolean;
@@ -82,7 +83,7 @@ function ProfileTab({ onClose }: { onClose: () => void }) {
         aboutMe: aboutMe.trim() || undefined,
       });
       useAuthStore.setState({ user: updated });
-      localStorage.setItem('user', JSON.stringify(updated));
+      storage.setItem('user', JSON.stringify(updated));
       onClose();
     } catch {
       setError('Failed to save profile.');
@@ -100,7 +101,7 @@ function ProfileTab({ onClose }: { onClose: () => void }) {
     try {
       const updated = await apiUploadAvatar(file);
       useAuthStore.setState({ user: updated });
-      localStorage.setItem('user', JSON.stringify(updated));
+      storage.setItem('user', JSON.stringify(updated));
     } catch {
       setError('Failed to upload avatar.');
     }
@@ -226,7 +227,7 @@ function ChangeEmailForm() {
             try {
               const updated = await apiChangeEmail(newEmail, password);
               useAuthStore.setState({ user: updated });
-              localStorage.setItem('user', JSON.stringify(updated));
+              storage.setItem('user', JSON.stringify(updated));
               setShow(false); setNewEmail(''); setPassword('');
             } catch {
               setError('Failed to change email. Check your password.');
@@ -403,7 +404,7 @@ function DeleteAccountForm() {
             try {
               await apiDeleteAccount(password);
               clearTokens();
-              window.location.href = '/login';
+              window.location.href = '/login'; // Delete account — hard redirect is intentional
             } catch {
               setError('Failed to delete account. Check your password or ensure you don\'t own any servers.');
             } finally { setIsDeleting(false); }

@@ -1,4 +1,6 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios';
+import { wsClient } from './websocket';
+import { storage } from '../utils/storage';
 import type {
   User,
   Server,
@@ -19,29 +21,38 @@ import type {
 } from '../types';
 
 const apiClient = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || '',
+  baseURL: (import.meta.env.VITE_API_URL || '') + '/api/v1',
   headers: {
     'Content-Type': 'application/json',
   },
 });
 
 function getAccessToken(): string | null {
-  return localStorage.getItem('accessToken');
+  return storage.getItem('accessToken');
 }
 
 function getRefreshToken(): string | null {
-  return localStorage.getItem('refreshToken');
+  return storage.getItem('refreshToken');
 }
 
 function setTokens(accessToken: string, refreshToken: string): void {
-  localStorage.setItem('accessToken', accessToken);
-  localStorage.setItem('refreshToken', refreshToken);
+  storage.setItem('accessToken', accessToken);
+  storage.setItem('refreshToken', refreshToken);
 }
 
 function clearTokens(): void {
-  localStorage.removeItem('accessToken');
-  localStorage.removeItem('refreshToken');
-  localStorage.removeItem('user');
+  storage.removeItem('accessToken');
+  storage.removeItem('refreshToken');
+  storage.removeItem('user');
+}
+
+// Injectable navigation callback — override for non-browser platforms
+let onAuthFailure: () => void = () => {
+  window.location.href = '/login';
+};
+
+export function setAuthFailureHandler(handler: () => void): void {
+  onAuthFailure = handler;
 }
 
 // Request interceptor: attach Bearer token
@@ -104,17 +115,18 @@ apiClient.interceptors.response.use(
       const refreshToken = getRefreshToken();
       if (!refreshToken) {
         clearTokens();
-        window.location.href = '/login';
+        onAuthFailure();
         return Promise.reject(error);
       }
 
       try {
         const response = await axios.post<{ accessToken: string }>(
-          `${import.meta.env.VITE_API_URL || ''}/api/auth/refresh`,
+          `${import.meta.env.VITE_API_URL || ''}/api/v1/auth/refresh`,
           { refreshToken }
         );
         const { accessToken } = response.data;
         setTokens(accessToken, refreshToken);
+        wsClient.updateToken(accessToken);
         processQueue(null, accessToken);
 
         if (originalRequest.headers) {
@@ -124,7 +136,7 @@ apiClient.interceptors.response.use(
       } catch (refreshError) {
         processQueue(refreshError, null);
         clearTokens();
-        window.location.href = '/login';
+        onAuthFailure();
         return Promise.reject(refreshError);
       } finally {
         isRefreshing = false;
@@ -141,7 +153,7 @@ export async function apiLogin(
   email: string,
   password: string
 ): Promise<LoginResponse> {
-  const response = await apiClient.post<LoginResponse>('/api/auth/login', {
+  const response = await apiClient.post<LoginResponse>('/auth/login', {
     email,
     password,
   });
@@ -153,7 +165,7 @@ export async function apiRegister(
   email: string,
   password: string
 ): Promise<RegisterResponse> {
-  const response = await apiClient.post<RegisterResponse>('/api/auth/register', {
+  const response = await apiClient.post<RegisterResponse>('/auth/register', {
     username,
     email,
     password,
@@ -167,12 +179,12 @@ export async function apiRefreshToken(
   const response = await apiClient.post<{
     accessToken: string;
     refreshToken: string;
-  }>('/api/auth/refresh', { refreshToken });
+  }>('/auth/refresh', { refreshToken });
   return response.data;
 }
 
 export async function apiGetMe(): Promise<User> {
-  const response = await apiClient.get<User>('/api/users/me');
+  const response = await apiClient.get<User>('/users/me');
   return response.data;
 }
 
@@ -183,38 +195,38 @@ export async function apiUpdateProfile(data: {
   aboutMe?: string;
   status?: string;
 }): Promise<User> {
-  const response = await apiClient.patch<User>('/api/users/me', data);
+  const response = await apiClient.patch<User>('/users/me', data);
   return response.data;
 }
 
 export async function apiUploadAvatar(file: File): Promise<User> {
   const formData = new FormData();
   formData.append('avatar', file);
-  const response = await apiClient.post<User>('/api/users/me/avatar', formData, {
+  const response = await apiClient.post<User>('/users/me/avatar', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
   });
   return response.data;
 }
 
 export async function apiGetUser(userId: string): Promise<User> {
-  const response = await apiClient.get<User>(`/api/users/${userId}`);
+  const response = await apiClient.get<User>(`/users/${userId}`);
   return response.data;
 }
 
 // ---- Server API ----
 
 export async function apiGetServers(): Promise<Server[]> {
-  const response = await apiClient.get<Server[]>('/api/servers');
+  const response = await apiClient.get<Server[]>('/servers');
   return response.data;
 }
 
 export async function apiCreateServer(name: string): Promise<Server> {
-  const response = await apiClient.post<Server>('/api/servers', { name });
+  const response = await apiClient.post<Server>('/servers', { name });
   return response.data;
 }
 
 export async function apiJoinServer(inviteCode: string): Promise<Server> {
-  const response = await apiClient.post<Server>(`/api/invites/${inviteCode}/join`);
+  const response = await apiClient.post<Server>(`/invites/${inviteCode}/join`);
   return response.data;
 }
 
@@ -222,7 +234,7 @@ export async function apiJoinServer(inviteCode: string): Promise<Server> {
 
 export async function apiGetChannels(serverId: string): Promise<Channel[]> {
   const response = await apiClient.get<Channel[]>(
-    `/api/servers/${serverId}/channels`
+    `/servers/${serverId}/channels`
   );
   return response.data;
 }
@@ -233,7 +245,7 @@ export async function apiCreateChannel(
   topic?: string
 ): Promise<Channel> {
   const response = await apiClient.post<Channel>(
-    `/api/servers/${serverId}/channels`,
+    `/servers/${serverId}/channels`,
     { name, topic }
   );
   return response.data;
@@ -245,7 +257,7 @@ export async function apiUpdateChannel(
   data: { name?: string; topic?: string }
 ): Promise<Channel> {
   const response = await apiClient.patch<Channel>(
-    `/api/servers/${serverId}/channels/${channelId}`,
+    `/servers/${serverId}/channels/${channelId}`,
     data
   );
   return response.data;
@@ -255,7 +267,7 @@ export async function apiDeleteChannel(
   serverId: string,
   channelId: string
 ): Promise<void> {
-  await apiClient.delete(`/api/servers/${serverId}/channels/${channelId}`);
+  await apiClient.delete(`/servers/${serverId}/channels/${channelId}`);
 }
 
 // ---- Message API ----
@@ -270,7 +282,7 @@ export async function apiGetMessages(
     params.before = before;
   }
   const response = await apiClient.get<Message[]>(
-    `/api/channels/${channelId}/messages`,
+    `/channels/${channelId}/messages`,
     { params }
   );
   return response.data;
@@ -284,7 +296,7 @@ export async function apiSendMessage(
   const body: Record<string, string> = { content };
   if (replyToId) body.replyToId = replyToId;
   const response = await apiClient.post<Message>(
-    `/api/channels/${channelId}/messages`,
+    `/channels/${channelId}/messages`,
     body
   );
   return response.data;
@@ -296,7 +308,7 @@ export async function apiEditMessage(
   content: string
 ): Promise<Message> {
   const response = await apiClient.put<Message>(
-    `/api/channels/${channelId}/messages/${messageId}`,
+    `/channels/${channelId}/messages/${messageId}`,
     { content }
   );
   return response.data;
@@ -306,7 +318,7 @@ export async function apiDeleteMessage(
   channelId: string,
   messageId: string
 ): Promise<void> {
-  await apiClient.delete(`/api/channels/${channelId}/messages/${messageId}`);
+  await apiClient.delete(`/channels/${channelId}/messages/${messageId}`);
 }
 
 export async function apiSendMessageWithFiles(
@@ -318,7 +330,7 @@ export async function apiSendMessageWithFiles(
   formData.append('content', content);
   files.forEach((file) => formData.append('files', file));
   const response = await apiClient.post<Message>(
-    `/api/channels/${channelId}/messages/upload`,
+    `/channels/${channelId}/messages/upload`,
     formData,
     { headers: { 'Content-Type': 'multipart/form-data' } }
   );
@@ -332,7 +344,7 @@ export async function apiCreateInvite(
   options?: { maxUses?: number; expiresIn?: number }
 ): Promise<ServerInvite> {
   const response = await apiClient.post<ServerInvite>(
-    `/api/servers/${serverId}/invites`,
+    `/servers/${serverId}/invites`,
     options || {}
   );
   return response.data;
@@ -340,38 +352,38 @@ export async function apiCreateInvite(
 
 export async function apiGetInvites(serverId: string): Promise<ServerInvite[]> {
   const response = await apiClient.get<ServerInvite[]>(
-    `/api/servers/${serverId}/invites`
+    `/servers/${serverId}/invites`
   );
   return response.data;
 }
 
 export async function apiDeleteInvite(inviteId: string): Promise<void> {
-  await apiClient.delete(`/api/invites/${inviteId}`);
+  await apiClient.delete(`/invites/${inviteId}`);
 }
 
 export async function apiJoinViaInvite(code: string): Promise<Server> {
-  const response = await apiClient.post<Server>(`/api/invites/${code}/join`);
+  const response = await apiClient.post<Server>(`/invites/${code}/join`);
   return response.data;
 }
 
 // ---- DM API ----
 
 export async function apiCreateDM(recipientIds: string[]): Promise<DMChannel> {
-  const response = await apiClient.post<DMChannel>('/api/dm', { recipientIds });
+  const response = await apiClient.post<DMChannel>('/dm', { recipientIds });
   return response.data;
 }
 
 export async function apiGetDMs(): Promise<DMChannel[]> {
-  const response = await apiClient.get<DMChannel[]>('/api/dm');
+  const response = await apiClient.get<DMChannel[]>('/dm');
   return response.data;
 }
 
 export async function apiCloseDM(channelId: string): Promise<void> {
-  await apiClient.post(`/api/dm/${channelId}/close`);
+  await apiClient.post(`/dm/${channelId}/close`);
 }
 
 export async function apiGetDM(channelId: string): Promise<DMChannel> {
-  const response = await apiClient.get<DMChannel>(`/api/dm/${channelId}`);
+  const response = await apiClient.get<DMChannel>(`/dm/${channelId}`);
   return response.data;
 }
 
@@ -381,11 +393,11 @@ export async function apiAckChannel(
   channelId: string,
   messageId: string
 ): Promise<void> {
-  await apiClient.post(`/api/channels/${channelId}/ack`, { messageId });
+  await apiClient.post(`/channels/${channelId}/ack`, { messageId });
 }
 
 export async function apiGetReadStates(): Promise<ReadState[]> {
-  const response = await apiClient.get<ReadState[]>('/api/users/me/read-states');
+  const response = await apiClient.get<ReadState[]>('/users/me/read-states');
   return response.data;
 }
 
@@ -393,7 +405,7 @@ export async function apiGetReadStates(): Promise<ReadState[]> {
 
 export async function apiGetMembers(serverId: string): Promise<MemberWithUser[]> {
   const response = await apiClient.get<MemberWithUser[]>(
-    `/api/servers/${serverId}/members`
+    `/servers/${serverId}/members`
   );
   return response.data;
 }
@@ -404,7 +416,7 @@ export async function apiForgotPassword(
   email: string
 ): Promise<{ message: string }> {
   const response = await apiClient.post<{ message: string }>(
-    '/api/auth/forgot-password',
+    '/auth/forgot-password',
     { email }
   );
   return response.data;
@@ -415,7 +427,7 @@ export async function apiResetPassword(
   password: string
 ): Promise<{ message: string }> {
   const response = await apiClient.post<{ message: string }>(
-    '/api/auth/reset-password',
+    '/auth/reset-password',
     { token, password }
   );
   return response.data;
@@ -427,14 +439,14 @@ export async function apiUpdateServer(
   serverId: string,
   data: { name?: string; description?: string }
 ): Promise<Server> {
-  const response = await apiClient.patch<Server>(`/api/servers/${serverId}`, data);
+  const response = await apiClient.patch<Server>(`/servers/${serverId}`, data);
   return response.data;
 }
 
 export async function apiUploadServerIcon(serverId: string, file: File): Promise<Server> {
   const formData = new FormData();
   formData.append('icon', file);
-  const response = await apiClient.post<Server>(`/api/servers/${serverId}/icon`, formData, {
+  const response = await apiClient.post<Server>(`/servers/${serverId}/icon`, formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
   });
   return response.data;
@@ -443,7 +455,7 @@ export async function apiUploadServerIcon(serverId: string, file: File): Promise
 // ---- Roles API ----
 
 export async function apiGetRoles(serverId: string): Promise<Role[]> {
-  const response = await apiClient.get<Role[]>(`/api/servers/${serverId}/roles`);
+  const response = await apiClient.get<Role[]>(`/servers/${serverId}/roles`);
   return response.data;
 }
 
@@ -451,7 +463,7 @@ export async function apiCreateRole(
   serverId: string,
   data: { name: string; color?: string; permissions?: number }
 ): Promise<Role> {
-  const response = await apiClient.post<Role>(`/api/servers/${serverId}/roles`, data);
+  const response = await apiClient.post<Role>(`/servers/${serverId}/roles`, data);
   return response.data;
 }
 
@@ -461,14 +473,14 @@ export async function apiUpdateRole(
   data: { name?: string; color?: string; permissions?: number }
 ): Promise<Role> {
   const response = await apiClient.patch<Role>(
-    `/api/servers/${serverId}/roles/${roleId}`,
+    `/servers/${serverId}/roles/${roleId}`,
     data
   );
   return response.data;
 }
 
 export async function apiDeleteRole(serverId: string, roleId: string): Promise<void> {
-  await apiClient.delete(`/api/servers/${serverId}/roles/${roleId}`);
+  await apiClient.delete(`/servers/${serverId}/roles/${roleId}`);
 }
 
 export async function apiAssignRole(
@@ -476,7 +488,7 @@ export async function apiAssignRole(
   roleId: string,
   userId: string
 ): Promise<void> {
-  await apiClient.post(`/api/servers/${serverId}/roles/${roleId}/assign`, { userId });
+  await apiClient.post(`/servers/${serverId}/roles/${roleId}/assign`, { userId });
 }
 
 export async function apiRemoveRole(
@@ -484,14 +496,14 @@ export async function apiRemoveRole(
   roleId: string,
   userId: string
 ): Promise<void> {
-  await apiClient.post(`/api/servers/${serverId}/roles/${roleId}/remove`, { userId });
+  await apiClient.post(`/servers/${serverId}/roles/${roleId}/remove`, { userId });
 }
 
 export async function apiGetMemberPermissions(
   serverId: string
 ): Promise<{ permissions: number }> {
   const response = await apiClient.get<{ permissions: number }>(
-    `/api/servers/${serverId}/permissions`
+    `/servers/${serverId}/permissions`
   );
   return response.data;
 }
@@ -500,7 +512,7 @@ export async function apiGetMemberPermissions(
 
 export async function apiGetCategories(serverId: string): Promise<ChannelCategory[]> {
   const response = await apiClient.get<ChannelCategory[]>(
-    `/api/servers/${serverId}/categories`
+    `/servers/${serverId}/categories`
   );
   return response.data;
 }
@@ -510,7 +522,7 @@ export async function apiCreateCategory(
   name: string
 ): Promise<ChannelCategory> {
   const response = await apiClient.post<ChannelCategory>(
-    `/api/servers/${serverId}/categories`,
+    `/servers/${serverId}/categories`,
     { name }
   );
   return response.data;
@@ -522,7 +534,7 @@ export async function apiUpdateCategory(
   data: { name?: string; position?: number }
 ): Promise<ChannelCategory> {
   const response = await apiClient.patch<ChannelCategory>(
-    `/api/servers/${serverId}/categories/${categoryId}`,
+    `/servers/${serverId}/categories/${categoryId}`,
     data
   );
   return response.data;
@@ -532,7 +544,7 @@ export async function apiDeleteCategory(
   serverId: string,
   categoryId: string
 ): Promise<void> {
-  await apiClient.delete(`/api/servers/${serverId}/categories/${categoryId}`);
+  await apiClient.delete(`/servers/${serverId}/categories/${categoryId}`);
 }
 
 // ---- Moderation API ----
@@ -542,7 +554,7 @@ export async function apiKickMember(
   userId: string,
   reason?: string
 ): Promise<void> {
-  await apiClient.post(`/api/servers/${serverId}/kick/${userId}`, { reason });
+  await apiClient.post(`/servers/${serverId}/kick/${userId}`, { reason });
 }
 
 export async function apiBanMember(
@@ -550,18 +562,18 @@ export async function apiBanMember(
   userId: string,
   reason?: string
 ): Promise<void> {
-  await apiClient.post(`/api/servers/${serverId}/bans/${userId}`, { reason });
+  await apiClient.post(`/servers/${serverId}/bans/${userId}`, { reason });
 }
 
 export async function apiUnbanMember(
   serverId: string,
   userId: string
 ): Promise<void> {
-  await apiClient.delete(`/api/servers/${serverId}/bans/${userId}`);
+  await apiClient.delete(`/servers/${serverId}/bans/${userId}`);
 }
 
 export async function apiGetBans(serverId: string): Promise<ServerBan[]> {
-  const response = await apiClient.get<ServerBan[]>(`/api/servers/${serverId}/bans`);
+  const response = await apiClient.get<ServerBan[]>(`/servers/${serverId}/bans`);
   return response.data;
 }
 
@@ -571,7 +583,7 @@ export async function apiTimeoutMember(
   duration: number,
   reason?: string
 ): Promise<void> {
-  await apiClient.post(`/api/servers/${serverId}/timeout/${userId}`, {
+  await apiClient.post(`/servers/${serverId}/timeout/${userId}`, {
     duration,
     reason,
   });
@@ -587,7 +599,7 @@ export async function apiGetAuditLog(
   if (filters?.action) params.action = filters.action;
   if (filters?.actor) params.actor = filters.actor;
   const response = await apiClient.get<AuditLogEntry[]>(
-    `/api/servers/${serverId}/audit-log`,
+    `/servers/${serverId}/audit-log`,
     { params }
   );
   return response.data;
@@ -600,7 +612,7 @@ export async function apiAddReaction(
   messageId: string,
   emoji: string
 ): Promise<void> {
-  await apiClient.put(`/api/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`);
+  await apiClient.put(`/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`);
 }
 
 export async function apiRemoveReaction(
@@ -608,7 +620,7 @@ export async function apiRemoveReaction(
   messageId: string,
   emoji: string
 ): Promise<void> {
-  await apiClient.delete(`/api/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`);
+  await apiClient.delete(`/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`);
 }
 
 // ---- Search API ----
@@ -624,7 +636,7 @@ export async function apiSearch(
   if (options?.channelId) params.channelId = options.channelId;
   if (options?.limit) params.limit = options.limit;
   if (options?.offset) params.offset = options.offset;
-  const response = await apiClient.get<SearchResult[]>('/api/search', { params });
+  const response = await apiClient.get<SearchResult[]>('/search', { params });
   return response.data;
 }
 
@@ -640,14 +652,14 @@ export interface GifResult {
 }
 
 export async function apiSearchGifs(query: string, limit = 20): Promise<GifResult[]> {
-  const response = await apiClient.get<GifResult[]>('/api/gifs/search', {
+  const response = await apiClient.get<GifResult[]>('/gifs/search', {
     params: { q: query, limit },
   });
   return response.data;
 }
 
 export async function apiTrendingGifs(limit = 20): Promise<GifResult[]> {
-  const response = await apiClient.get<GifResult[]>('/api/gifs/trending', {
+  const response = await apiClient.get<GifResult[]>('/gifs/trending', {
     params: { limit },
   });
   return response.data;
@@ -662,7 +674,7 @@ export interface UnfurlResult {
 }
 
 export async function apiUnfurl(url: string): Promise<UnfurlResult> {
-  const response = await apiClient.get<UnfurlResult>('/api/unfurl', {
+  const response = await apiClient.get<UnfurlResult>('/unfurl', {
     params: { url },
   });
   return response.data;
@@ -671,11 +683,11 @@ export async function apiUnfurl(url: string): Promise<UnfurlResult> {
 // ---- Leave / Delete Server API ----
 
 export async function apiLeaveServer(serverId: string): Promise<void> {
-  await apiClient.delete(`/api/servers/${serverId}/leave`);
+  await apiClient.delete(`/servers/${serverId}/leave`);
 }
 
 export async function apiDeleteServer(serverId: string): Promise<void> {
-  await apiClient.delete(`/api/servers/${serverId}`);
+  await apiClient.delete(`/servers/${serverId}`);
 }
 
 // ---- Account Management API ----
@@ -684,7 +696,7 @@ export async function apiChangePassword(
   currentPassword: string,
   newPassword: string
 ): Promise<void> {
-  await apiClient.post('/api/users/me/change-password', {
+  await apiClient.post('/users/me/change-password', {
     currentPassword,
     newPassword,
   });
@@ -694,7 +706,7 @@ export async function apiChangeEmail(
   newEmail: string,
   password: string
 ): Promise<User> {
-  const response = await apiClient.post<User>('/api/users/me/change-email', {
+  const response = await apiClient.post<User>('/users/me/change-email', {
     newEmail,
     password,
   });
@@ -702,7 +714,7 @@ export async function apiChangeEmail(
 }
 
 export async function apiDeleteAccount(password: string): Promise<void> {
-  await apiClient.delete('/api/users/me', { data: { password } });
+  await apiClient.delete('/users/me', { data: { password } });
 }
 
 // ---- Nickname API ----
@@ -713,7 +725,7 @@ export async function apiUpdateNickname(
   nickname: string
 ): Promise<void> {
   await apiClient.patch(
-    `/api/servers/${serverId}/members/${userId}/nickname`,
+    `/servers/${serverId}/members/${userId}/nickname`,
     { nickname }
   );
 }
@@ -725,7 +737,7 @@ export async function apiPinMessage(
   messageId: string
 ): Promise<void> {
   await apiClient.put(
-    `/api/channels/${channelId}/pins/${messageId}`
+    `/channels/${channelId}/pins/${messageId}`
   );
 }
 
@@ -734,7 +746,7 @@ export async function apiUnpinMessage(
   messageId: string
 ): Promise<void> {
   await apiClient.delete(
-    `/api/channels/${channelId}/pins/${messageId}`
+    `/channels/${channelId}/pins/${messageId}`
   );
 }
 
@@ -742,7 +754,7 @@ export async function apiGetPinnedMessages(
   channelId: string
 ): Promise<PinnedMessage[]> {
   const response = await apiClient.get<PinnedMessage[]>(
-    `/api/channels/${channelId}/pins`
+    `/channels/${channelId}/pins`
   );
   return response.data;
 }
@@ -750,7 +762,7 @@ export async function apiGetPinnedMessages(
 // ---- User Search API ----
 
 export async function apiSearchUsers(query: string): Promise<MessageAuthor[]> {
-  const response = await apiClient.get<MessageAuthor[]>('/api/users/search', {
+  const response = await apiClient.get<MessageAuthor[]>('/users/search', {
     params: { q: query },
   });
   return response.data;
@@ -762,7 +774,7 @@ export async function apiReorderChannels(
   serverId: string,
   positions: { id: string; position: number }[]
 ): Promise<void> {
-  await apiClient.put(`/api/servers/${serverId}/channels/reorder`, positions);
+  await apiClient.put(`/servers/${serverId}/channels/reorder`, positions);
 }
 
 export { getAccessToken, getRefreshToken, setTokens, clearTokens };

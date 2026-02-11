@@ -3,6 +3,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { apiGetPinnedMessages, apiUnpinMessage } from '../../api/client';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import type { PinnedMessage } from '../../types';
+import { eventBus } from '../../utils/eventBus';
 
 interface PinnedMessagesProps {
   open: boolean;
@@ -30,8 +31,8 @@ export function PinnedMessages({ open, onOpenChange, channelId }: PinnedMessages
         apiGetPinnedMessages(channelId).then(setPins).catch(() => {});
       }
     };
-    window.addEventListener('bastion:pin-update', handler);
-    return () => window.removeEventListener('bastion:pin-update', handler);
+    eventBus.on('bastion:pin-update', handler);
+    return () => eventBus.off('bastion:pin-update', handler);
   }, [open, channelId]);
 
   const handleUnpin = async (messageId: string) => {

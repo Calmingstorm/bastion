@@ -8,6 +8,7 @@ import {
   apiLeaveServer,
   apiDeleteServer,
 } from '../api/client';
+import { extractErrorMessage } from '../utils/errors';
 
 interface ServerState {
   servers: Server[];
@@ -224,17 +225,3 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 }));
 
-function extractErrorMessage(err: unknown, fallback: string): string {
-  if (err && typeof err === 'object' && 'response' in err) {
-    const axiosErr = err as {
-      response?: { data?: { message?: string; error?: string } };
-    };
-    if (axiosErr.response?.data?.message) {
-      return axiosErr.response.data.message;
-    }
-    if (axiosErr.response?.data?.error) {
-      return axiosErr.response.data.error;
-    }
-  }
-  return fallback;
-}

@@ -7,6 +7,8 @@ import {
   setTokens as persistTokens,
   clearTokens,
 } from '../api/client';
+import { extractErrorMessage } from '../utils/errors';
+import { storage } from '../utils/storage';
 
 interface AuthState {
   user: User | null;
@@ -40,7 +42,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       const response = await apiLogin(email, password);
       persistTokens(response.accessToken, response.refreshToken);
-      localStorage.setItem('user', JSON.stringify(response.user));
+      storage.setItem('user', JSON.stringify(response.user));
       set({
         user: response.user,
         accessToken: response.accessToken,
@@ -61,7 +63,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       const response = await apiRegister(username, email, password);
       persistTokens(response.accessToken, response.refreshToken);
-      localStorage.setItem('user', JSON.stringify(response.user));
+      storage.setItem('user', JSON.stringify(response.user));
       set({
         user: response.user,
         accessToken: response.accessToken,
@@ -94,9 +96,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   loadFromStorage: async () => {
-    const accessToken = localStorage.getItem('accessToken');
-    const refreshToken = localStorage.getItem('refreshToken');
-    const userStr = localStorage.getItem('user');
+    const accessToken = storage.getItem('accessToken');
+    const refreshToken = storage.getItem('refreshToken');
+    const userStr = storage.getItem('user');
 
     if (accessToken && refreshToken) {
       let user: User | null = null;
@@ -118,7 +120,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // Validate token by fetching current user
       try {
         const freshUser = await apiGetMe();
-        localStorage.setItem('user', JSON.stringify(freshUser));
+        storage.setItem('user', JSON.stringify(freshUser));
         set({ user: freshUser });
       } catch {
         // Token is invalid, clear everything
@@ -132,19 +134,3 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 }));
 
-function extractErrorMessage(err: unknown, fallback: string): string {
-  if (
-    err &&
-    typeof err === 'object' &&
-    'response' in err
-  ) {
-    const axiosErr = err as { response?: { data?: { message?: string; error?: string } } };
-    if (axiosErr.response?.data?.message) {
-      return axiosErr.response.data.message;
-    }
-    if (axiosErr.response?.data?.error) {
-      return axiosErr.response.data.error;
-    }
-  }
-  return fallback;
-}
