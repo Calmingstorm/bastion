@@ -16,6 +16,19 @@ import type { ChannelCategory } from '../../types';
 
 const DM_VISIBLE_COUNT = 8;
 
+const ICON_COLORS = [
+  '#0ea5e9', '#06b6d4', '#14b8a6', '#22c55e', '#f59e0b',
+  '#f97316', '#ef4444', '#ec4899', '#a855f7', '#6366f1',
+];
+
+function getColorForId(id: string): string {
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) {
+    hash = id.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return ICON_COLORS[Math.abs(hash) % ICON_COLORS.length];
+}
+
 export function UnifiedSidebar() {
   const servers = useServerStore((s) => s.servers);
   const selectedServerId = useServerStore((s) => s.selectedServerId);
@@ -266,6 +279,20 @@ export function UnifiedSidebar() {
                   >
                     <path d="M7 10l5 5 5-5z" />
                   </svg>
+                  {server.iconUrl ? (
+                    <img
+                      src={server.iconUrl}
+                      alt={server.name}
+                      className="h-5 w-5 shrink-0 rounded-md object-cover"
+                    />
+                  ) : (
+                    <div
+                      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[10px] font-bold text-white"
+                      style={{ backgroundColor: getColorForId(server.id) }}
+                    >
+                      {server.name.charAt(0).toUpperCase()}
+                    </div>
+                  )}
                   <span
                     className={`min-w-0 flex-1 truncate text-sm font-semibold ${
                       serverHasUnread
