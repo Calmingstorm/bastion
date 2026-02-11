@@ -124,8 +124,8 @@ export function UnifiedSidebar() {
               className="flex items-center gap-1"
             >
               <svg
-                width="12"
-                height="12"
+                width="16"
+                height="16"
                 viewBox="0 0 24 24"
                 fill="currentColor"
                 className={`shrink-0 text-[var(--text-muted)] transition-transform ${dmExpanded ? '' : '-rotate-90'}`}
@@ -271,8 +271,8 @@ export function UnifiedSidebar() {
                   className="flex min-w-0 flex-1 items-center gap-1 px-3 py-2 text-left"
                 >
                   <svg
-                    width="12"
-                    height="12"
+                    width="16"
+                    height="16"
                     viewBox="0 0 24 24"
                     fill="currentColor"
                     className={`shrink-0 text-[var(--text-muted)] transition-transform ${isExpanded ? '' : '-rotate-90'}`}
