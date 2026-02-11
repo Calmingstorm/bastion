@@ -293,7 +293,7 @@ export function UnifiedSidebar() {
                       {server.name.charAt(0).toUpperCase()}
                     </div>
                   )}
-                  <span className="text-[var(--text-muted)]">—</span>
+                  <span className="text-[var(--text-muted)]">-</span>
                   <span
                     className={`min-w-0 flex-1 truncate text-sm font-semibold ${
                       serverHasUnread
