@@ -5,10 +5,12 @@ import { MessageList } from '../message/MessageList';
 import { MessageInput } from '../message/MessageInput';
 import { MemberList } from '../member/MemberList';
 import { DMList } from '../dm/DMList';
+import { UnifiedSidebar } from '../sidebar/UnifiedSidebar';
 import { useServerStore } from '../../stores/serverStore';
 import { useDMStore } from '../../stores/dmStore';
 import { useNotifications } from '../../hooks/useNotifications';
 import { useFeatureStore } from '../../stores/featureStore';
+import { useLayoutStore } from '../../stores/layoutStore';
 import { useBreakpoints } from '../../hooks/useMediaQuery';
 import { useActivityPresence } from '../../hooks/useActivityPresence';
 
@@ -20,12 +22,10 @@ export function AppLayout() {
   const selectedServerId = useServerStore((s) => s.selectedServerId);
   const selectedChannelId = useServerStore((s) => s.selectedChannelId);
   const selectedDMId = useDMStore((s) => s.selectedDMId);
+  const layout = useLayoutStore((s) => s.layout);
   const { isMobile, isDesktop } = useBreakpoints();
   const [showMembers, setShowMembers] = useState(true);
   const [showSidebar, setShowSidebar] = useState(false);
-
-  const isDMView = !selectedServerId;
-  const showChat = isDMView ? !!selectedDMId : true;
 
   // Auto-close sidebar on mobile when navigating to a channel/DM
   useEffect(() => {
@@ -46,6 +46,62 @@ export function AppLayout() {
   const handleToggleMembers = useCallback(() => {
     setShowMembers((v) => !v);
   }, []);
+
+  // ─── Modern Layout ───
+  if (layout === 'modern') {
+    // In modern mode, DM is active when selectedDMId is set and no channel is selected
+    const isDM = !!selectedDMId && !selectedChannelId;
+
+    return (
+      <div className="flex h-screen w-screen overflow-hidden">
+        {/* Mobile sidebar overlay */}
+        {isMobile && showSidebar && (
+          <div
+            className="fixed inset-0 z-30 bg-black/50"
+            onClick={() => setShowSidebar(false)}
+          />
+        )}
+
+        {/* Unified Sidebar */}
+        <div className={
+          isMobile
+            ? `fixed left-0 top-0 z-40 h-full transition-transform duration-200 ${showSidebar ? 'translate-x-0' : '-translate-x-full'}`
+            : ''
+        }>
+          <UnifiedSidebar />
+        </div>
+
+        {/* Main chat area */}
+        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          <MessageList
+            onToggleMembers={!isDM ? handleToggleMembers : undefined}
+            onToggleSidebar={isMobile ? handleToggleSidebar : undefined}
+          />
+          <MessageInput />
+        </div>
+
+        {/* Member list - right sidebar (server channels only) */}
+        {!isDM && showMembers && !isMobile && <MemberList />}
+
+        {/* Mobile member list overlay */}
+        {!isDM && showMembers && isMobile && (
+          <>
+            <div
+              className="fixed inset-0 z-30 bg-black/50"
+              onClick={() => setShowMembers(false)}
+            />
+            <div className="fixed right-0 top-0 z-40 h-full">
+              <MemberList />
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  // ─── Classic Layout (unchanged) ───
+  const isDMView = !selectedServerId;
+  const showChat = isDMView ? !!selectedDMId : true;
 
   return (
     <div className="flex h-screen w-screen overflow-hidden">

@@ -64,7 +64,7 @@ export function MessageList({ onToggleMembers, onToggleSidebar }: MessageListPro
 
   // Determine active channel: server channel or DM channel
   const activeChannelId = selectedChannelId || selectedDMId;
-  const isDM = !selectedServerId && !!selectedDMId;
+  const isDM = !!selectedDMId && !selectedChannelId;
 
   // DM recipient info
   const dmChannel = isDM ? dmChannels.find((d) => d.id === selectedDMId) : null;

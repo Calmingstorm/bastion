@@ -1,0 +1,482 @@
+import { useState, useEffect, useCallback } from 'react';
+import { useServerStore } from '../../stores/serverStore';
+import { useDMStore } from '../../stores/dmStore';
+import { useAuthStore } from '../../stores/authStore';
+import { useUnreadStore } from '../../stores/unreadStore';
+import { ChannelItem } from '../channel/ChannelItem';
+import { PresenceDot } from '../user/PresenceDot';
+import { UserPanel } from '../user/UserPanel';
+import { CreateServerDialog } from '../server/CreateServerDialog';
+import { InviteDialog } from '../server/InviteDialog';
+import { ServerSettingsDialog } from '../server/ServerSettingsDialog';
+import { NewDMDialog } from '../dm/NewDMDialog';
+import { apiGetCategories } from '../../api/client';
+import bastionLogo from '../../assets/bastion-logo.svg';
+import type { ChannelCategory } from '../../types';
+
+const DM_VISIBLE_COUNT = 8;
+
+export function UnifiedSidebar() {
+  const servers = useServerStore((s) => s.servers);
+  const selectedServerId = useServerStore((s) => s.selectedServerId);
+  const channels = useServerStore((s) => s.channels);
+  const selectedChannelId = useServerStore((s) => s.selectedChannelId);
+  const selectServer = useServerStore((s) => s.selectServer);
+  const selectChannel = useServerStore((s) => s.selectChannel);
+  const isLoadingChannels = useServerStore((s) => s.isLoadingChannels);
+  const user = useAuthStore((s) => s.user);
+
+  const dmChannels = useDMStore((s) => s.dmChannels);
+  const selectedDMId = useDMStore((s) => s.selectedDMId);
+  const selectDM = useDMStore((s) => s.selectDM);
+  const closeDM = useDMStore((s) => s.closeDM);
+  const fetchDMs = useDMStore((s) => s.fetchDMs);
+
+  const unreadChannels = useUnreadStore((s) => s.unreadChannels);
+
+  const [expandedServerId, setExpandedServerId] = useState<string | null>(selectedServerId);
+  const [dmExpanded, setDmExpanded] = useState(true);
+  const [dmShowAll, setDmShowAll] = useState(false);
+  const [createServerOpen, setCreateServerOpen] = useState(false);
+  const [inviteServerId, setInviteServerId] = useState<string | null>(null);
+  const [settingsServerId, setSettingsServerId] = useState<string | null>(null);
+  const [newDMOpen, setNewDMOpen] = useState(false);
+  const [categories, setCategories] = useState<ChannelCategory[]>([]);
+  const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set());
+
+  // Fetch DMs on mount
+  useEffect(() => { fetchDMs(); }, [fetchDMs]);
+
+  // Sync expandedServerId with selectedServerId on external changes
+  useEffect(() => {
+    if (selectedServerId) {
+      setExpandedServerId(selectedServerId);
+    }
+  }, [selectedServerId]);
+
+  // Fetch categories when expanded server changes
+  useEffect(() => {
+    if (!expandedServerId) return;
+    apiGetCategories(expandedServerId).then((cats) => {
+      setCategories(cats.sort((a, b) => a.position - b.position));
+    }).catch(() => {});
+  }, [expandedServerId]);
+
+  const handleExpandServer = useCallback((serverId: string) => {
+    if (expandedServerId === serverId) {
+      setExpandedServerId(null);
+      return;
+    }
+    setExpandedServerId(serverId);
+    selectDM(null);
+    selectServer(serverId);
+  }, [expandedServerId, selectDM, selectServer]);
+
+  const handleSelectDM = useCallback((channelId: string) => {
+    selectDM(channelId);
+    useServerStore.setState({ selectedChannelId: null });
+  }, [selectDM]);
+
+  const handleSelectChannel = useCallback((channelId: string) => {
+    selectChannel(channelId);
+    selectDM(null);
+  }, [selectChannel, selectDM]);
+
+  const toggleCategory = (catId: string) => {
+    setCollapsedCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(catId)) next.delete(catId);
+      else next.add(catId);
+      return next;
+    });
+  };
+
+  const visibleDMs = dmShowAll ? dmChannels : dmChannels.slice(0, DM_VISIBLE_COUNT);
+
+  return (
+    <div className="flex h-full w-[280px] flex-col bg-[var(--bg-secondary)]">
+      {/* Brand header */}
+      <div className="flex h-12 shrink-0 items-center border-b border-[var(--border)] px-4">
+        <img src={bastionLogo} alt="Bastion" className="mr-2.5 h-6 w-6" />
+        <h1 className="text-sm font-bold text-[var(--text-primary)]">Bastion</h1>
+      </div>
+
+      {/* Scrollable content */}
+      <div className="flex-1 overflow-y-auto">
+        {/* ---- DM Section ---- */}
+        <div className="border-b border-[var(--border)]">
+          <div className="flex items-center justify-between px-3 py-2">
+            <button
+              onClick={() => setDmExpanded(!dmExpanded)}
+              className="flex items-center gap-1"
+            >
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="currentColor"
+                className={`shrink-0 text-[var(--text-muted)] transition-transform ${dmExpanded ? '' : '-rotate-90'}`}
+              >
+                <path d="M7 10l5 5 5-5z" />
+              </svg>
+              <span className="text-[11px] font-bold uppercase tracking-wide text-[var(--text-muted)]">
+                Direct Messages
+              </span>
+            </button>
+            <button
+              onClick={() => setNewDMOpen(true)}
+              className="rounded p-0.5 text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
+              title="New DM"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M13 5h-2v6H5v2h6v6h2v-6h6v-2h-6V5z" />
+              </svg>
+            </button>
+          </div>
+
+          {dmExpanded && (
+            <div className="px-2 pb-2">
+              {visibleDMs.length === 0 ? (
+                <p className="px-2 py-2 text-center text-xs text-[var(--text-muted)]">
+                  No conversations yet.
+                </p>
+              ) : (
+                <div className="space-y-0.5">
+                  {visibleDMs.map((dm) => {
+                    const recipient = dm.recipients?.[0];
+                    const name = recipient
+                      ? recipient.displayName || recipient.username
+                      : 'Unknown';
+                    const initial = name.charAt(0).toUpperCase();
+                    const isSelected = dm.id === selectedDMId && !selectedChannelId;
+                    const hasUnread = unreadChannels.has(dm.id);
+
+                    return (
+                      <div
+                        key={dm.id}
+                        className={`group flex w-full items-center gap-2 rounded px-2 py-1.5 text-left transition-colors cursor-pointer ${
+                          isSelected
+                            ? 'bg-[var(--bg-input)] text-[var(--text-primary)]'
+                            : 'text-[var(--text-muted)] hover:bg-[var(--bg-input)]/50 hover:text-[var(--text-secondary)]'
+                        }`}
+                        onClick={() => handleSelectDM(dm.id)}
+                      >
+                        <div className="relative shrink-0">
+                          {recipient?.avatarUrl ? (
+                            <img
+                              src={recipient.avatarUrl}
+                              alt={name}
+                              className="h-7 w-7 rounded-full object-cover"
+                            />
+                          ) : (
+                            <div className="flex h-7 w-7 items-center justify-center rounded-full bg-[var(--accent)] text-[10px] font-semibold text-white">
+                              {initial}
+                            </div>
+                          )}
+                          {recipient && (
+                            <PresenceDot
+                              userId={recipient.id}
+                              className="absolute -bottom-0.5 -right-0.5 !h-3 !w-3 !border"
+                            />
+                          )}
+                        </div>
+                        <span
+                          className={`min-w-0 flex-1 truncate text-sm ${
+                            hasUnread
+                              ? 'font-bold text-[var(--text-primary)]'
+                              : 'font-medium'
+                          }`}
+                        >
+                          {name}
+                        </span>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            closeDM(dm.id);
+                          }}
+                          className="shrink-0 rounded p-0.5 text-[var(--text-muted)] opacity-0 transition-opacity hover:text-[var(--text-primary)] group-hover:opacity-100"
+                          title="Close DM"
+                        >
+                          <svg
+                            width="12"
+                            height="12"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                          >
+                            <line x1="18" y1="6" x2="6" y2="18" />
+                            <line x1="6" y1="6" x2="18" y2="18" />
+                          </svg>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {!dmShowAll && dmChannels.length > DM_VISIBLE_COUNT && (
+                <button
+                  onClick={() => setDmShowAll(true)}
+                  className="mt-1 w-full rounded px-2 py-1 text-left text-xs text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
+                >
+                  Show all ({dmChannels.length})
+                </button>
+              )}
+              {dmShowAll && dmChannels.length > DM_VISIBLE_COUNT && (
+                <button
+                  onClick={() => setDmShowAll(false)}
+                  className="mt-1 w-full rounded px-2 py-1 text-left text-xs text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
+                >
+                  Show less
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* ---- Server Sections ---- */}
+        {servers.map((server) => {
+          const isExpanded = expandedServerId === server.id;
+          const isOwner = user && server.ownerId === user.id;
+
+          // Unread indicator for collapsed servers: check if any known channel has unreads
+          // When expanded, channels are in the store; when collapsed, we can't check reliably
+          // so we rely on the unreadChannels set (channel IDs persist across server switches)
+          const serverHasUnread = !isExpanded && channels.length === 0
+            ? false // Can't determine — TODO: backend server-level unread tracking
+            : isExpanded
+              ? channels.some((c) => unreadChannels.has(c.id))
+              : false;
+
+          return (
+            <div key={server.id} className="border-b border-[var(--border)]">
+              {/* Server header */}
+              <div className="flex items-center">
+                <button
+                  onClick={() => handleExpandServer(server.id)}
+                  className="flex min-w-0 flex-1 items-center gap-1 px-3 py-2 text-left"
+                >
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                    className={`shrink-0 text-[var(--text-muted)] transition-transform ${isExpanded ? '' : '-rotate-90'}`}
+                  >
+                    <path d="M7 10l5 5 5-5z" />
+                  </svg>
+                  <span
+                    className={`min-w-0 flex-1 truncate text-sm font-semibold ${
+                      serverHasUnread
+                        ? 'text-[var(--text-primary)]'
+                        : 'text-[var(--text-secondary)]'
+                    }`}
+                  >
+                    {server.name}
+                  </span>
+                  {!isExpanded && serverHasUnread && (
+                    <div className="h-2 w-2 shrink-0 rounded-full bg-white" />
+                  )}
+                </button>
+
+                {isExpanded && (
+                  <div className="flex shrink-0 gap-0.5 pr-2">
+                    <button
+                      onClick={() => setInviteServerId(server.id)}
+                      className="rounded p-1 text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
+                      title="Invite People"
+                    >
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2" />
+                        <circle cx="8.5" cy="7" r="4" />
+                        <line x1="20" y1="8" x2="20" y2="14" />
+                        <line x1="23" y1="11" x2="17" y2="11" />
+                      </svg>
+                    </button>
+                    {isOwner && (
+                      <button
+                        onClick={() => setSettingsServerId(server.id)}
+                        className="rounded p-1 text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
+                        title="Server Settings"
+                      >
+                        <svg
+                          width="14"
+                          height="14"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <circle cx="12" cy="12" r="3" />
+                          <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+                        </svg>
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Channels (when expanded) */}
+              {isExpanded && (
+                <div className="px-2 pb-2">
+                  {isLoadingChannels ? (
+                    <div className="flex items-center justify-center py-4">
+                      <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--text-muted)] border-t-[var(--accent)]" />
+                    </div>
+                  ) : channels.length === 0 ? (
+                    <p className="px-2 py-2 text-center text-xs text-[var(--text-muted)]">
+                      No channels yet.
+                    </p>
+                  ) : (
+                    <>
+                      {/* Uncategorized channels */}
+                      {(() => {
+                        const uncategorized = channels.filter(
+                          (c) => !c.categoryId
+                        );
+                        if (
+                          uncategorized.length === 0 &&
+                          categories.length > 0
+                        )
+                          return null;
+                        return (
+                          <div className="mb-1">
+                            {(categories.length > 0 ||
+                              uncategorized.length > 0) && (
+                              <div className="mb-0.5 px-1">
+                                <span className="text-[10px] font-bold uppercase tracking-wide text-[var(--text-muted)]">
+                                  Text Channels
+                                </span>
+                              </div>
+                            )}
+                            <div className="space-y-0.5">
+                              {uncategorized.map((channel) => (
+                                <ChannelItem
+                                  key={channel.id}
+                                  channel={channel}
+                                  isSelected={
+                                    channel.id === selectedChannelId &&
+                                    !selectedDMId
+                                  }
+                                  onClick={() =>
+                                    handleSelectChannel(channel.id)
+                                  }
+                                  canManage={!!isOwner}
+                                  serverId={server.id}
+                                />
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })()}
+
+                      {/* Categorized channels */}
+                      {categories.map((cat) => {
+                        const catChannels = channels.filter(
+                          (c) => c.categoryId === cat.id
+                        );
+                        if (catChannels.length === 0) return null;
+                        const isCollapsed = collapsedCategories.has(cat.id);
+                        return (
+                          <div key={cat.id} className="mb-1">
+                            <button
+                              onClick={() => toggleCategory(cat.id)}
+                              className="mb-0.5 flex w-full items-center gap-1 px-1 text-[10px] font-bold uppercase tracking-wide text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
+                            >
+                              <svg
+                                width="10"
+                                height="10"
+                                viewBox="0 0 24 24"
+                                fill="currentColor"
+                                className={`shrink-0 transition-transform ${isCollapsed ? '-rotate-90' : ''}`}
+                              >
+                                <path d="M7 10l5 5 5-5z" />
+                              </svg>
+                              {cat.name}
+                            </button>
+                            {!isCollapsed && (
+                              <div className="space-y-0.5">
+                                {catChannels.map((channel) => (
+                                  <ChannelItem
+                                    key={channel.id}
+                                    channel={channel}
+                                    isSelected={
+                                      channel.id === selectedChannelId &&
+                                      !selectedDMId
+                                    }
+                                    onClick={() =>
+                                      handleSelectChannel(channel.id)
+                                    }
+                                    canManage={!!isOwner}
+                                    serverId={server.id}
+                                  />
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {/* Add Server button */}
+        <div className="px-3 py-2">
+          <button
+            onClick={() => setCreateServerOpen(true)}
+            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)]/50 hover:text-[var(--text-secondary)]"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M13 5h-2v6H5v2h6v6h2v-6h6v-2h-6V5z" />
+            </svg>
+            Add Server
+          </button>
+        </div>
+      </div>
+
+      {/* User panel */}
+      <UserPanel />
+
+      {/* Dialogs */}
+      <CreateServerDialog
+        open={createServerOpen}
+        onOpenChange={setCreateServerOpen}
+      />
+      <NewDMDialog open={newDMOpen} onOpenChange={setNewDMOpen} />
+      {inviteServerId && (
+        <InviteDialog
+          open={!!inviteServerId}
+          onOpenChange={(open) => {
+            if (!open) setInviteServerId(null);
+          }}
+          serverId={inviteServerId}
+        />
+      )}
+      {settingsServerId && (
+        <ServerSettingsDialog
+          open={!!settingsServerId}
+          onOpenChange={(open) => {
+            if (!open) setSettingsServerId(null);
+          }}
+          serverId={settingsServerId}
+        />
+      )}
+    </div>
+  );
+}

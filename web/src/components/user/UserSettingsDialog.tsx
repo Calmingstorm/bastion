@@ -2,13 +2,15 @@ import { useState, type FormEvent } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useAuthStore } from '../../stores/authStore';
 import { apiUpdateProfile, apiUploadAvatar, apiChangePassword, apiChangeEmail, apiDeleteAccount, clearTokens } from '../../api/client';
+import { useLayoutStore } from '../../stores/layoutStore';
+import { useThemeStore } from '../../stores/themeStore';
 
 interface UserSettingsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
-type Tab = 'profile' | 'account';
+type Tab = 'profile' | 'account' | 'appearance';
 
 export function UserSettingsDialog({ open, onOpenChange }: UserSettingsDialogProps) {
   const [tab, setTab] = useState<Tab>('profile');
@@ -26,7 +28,7 @@ export function UserSettingsDialog({ open, onOpenChange }: UserSettingsDialogPro
             <Dialog.Title className="mb-3 px-2 text-xs font-bold uppercase tracking-wide text-[var(--text-muted)]">
               User Settings
             </Dialog.Title>
-            {(['profile', 'account'] as Tab[]).map((t) => (
+            {(['profile', 'account', 'appearance'] as Tab[]).map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -45,6 +47,7 @@ export function UserSettingsDialog({ open, onOpenChange }: UserSettingsDialogPro
           <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-8">
             {tab === 'profile' && <ProfileTab onClose={() => onOpenChange(false)} />}
             {tab === 'account' && <AccountTab />}
+            {tab === 'appearance' && <AppearanceTab />}
           </div>
 
           {/* Close */}
@@ -287,6 +290,81 @@ function ChangePasswordForm() {
         </button>
         <button onClick={() => { setShow(false); setError(null); }}
           className="rounded-[3px] px-3 py-1.5 text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)]">Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function AppearanceTab() {
+  const layout = useLayoutStore((s) => s.layout);
+  const setLayout = useLayoutStore((s) => s.setLayout);
+  const theme = useThemeStore((s) => s.theme);
+  const toggleTheme = useThemeStore((s) => s.toggleTheme);
+
+  return (
+    <div className="max-w-lg space-y-6">
+      <h2 className="text-lg font-bold text-[var(--text-primary)]">Appearance</h2>
+
+      {/* Theme */}
+      <div className="space-y-2">
+        <h3 className="text-sm font-bold text-[var(--text-secondary)]">Theme</h3>
+        <p className="text-xs text-[var(--text-muted)]">Choose your preferred color scheme.</p>
+        <div className="flex gap-3">
+          <button
+            onClick={() => { if (theme === 'light') toggleTheme(); }}
+            className={`flex-1 rounded-md border-2 p-3 text-center text-sm font-medium transition-colors ${
+              theme === 'dark'
+                ? 'border-[var(--accent)] bg-[var(--bg-secondary)] text-[var(--text-primary)]'
+                : 'border-[var(--border)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:border-[var(--text-muted)]'
+            }`}
+          >
+            Dark
+          </button>
+          <button
+            onClick={() => { if (theme === 'dark') toggleTheme(); }}
+            className={`flex-1 rounded-md border-2 p-3 text-center text-sm font-medium transition-colors ${
+              theme === 'light'
+                ? 'border-[var(--accent)] bg-[var(--bg-secondary)] text-[var(--text-primary)]'
+                : 'border-[var(--border)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:border-[var(--text-muted)]'
+            }`}
+          >
+            Light
+          </button>
+        </div>
+      </div>
+
+      {/* Layout */}
+      <div className="space-y-2">
+        <h3 className="text-sm font-bold text-[var(--text-secondary)]">Layout</h3>
+        <p className="text-xs text-[var(--text-muted)]">Choose how the sidebar is organized.</p>
+        <div className="flex gap-3">
+          <button
+            onClick={() => setLayout('modern')}
+            className={`flex-1 rounded-md border-2 p-4 text-left transition-colors ${
+              layout === 'modern'
+                ? 'border-[var(--accent)] bg-[var(--bg-secondary)]'
+                : 'border-[var(--border)] bg-[var(--bg-secondary)] hover:border-[var(--text-muted)]'
+            }`}
+          >
+            <div className="mb-1 text-sm font-semibold text-[var(--text-primary)]">Modern</div>
+            <p className="text-xs text-[var(--text-muted)]">
+              Unified sidebar with DMs and servers in one panel.
+            </p>
+          </button>
+          <button
+            onClick={() => setLayout('classic')}
+            className={`flex-1 rounded-md border-2 p-4 text-left transition-colors ${
+              layout === 'classic'
+                ? 'border-[var(--accent)] bg-[var(--bg-secondary)]'
+                : 'border-[var(--border)] bg-[var(--bg-secondary)] hover:border-[var(--text-muted)]'
+            }`}
+          >
+            <div className="mb-1 text-sm font-semibold text-[var(--text-primary)]">Classic</div>
+            <p className="text-xs text-[var(--text-muted)]">
+              Separate server icons and channel list panels.
+            </p>
+          </button>
+        </div>
       </div>
     </div>
   );
