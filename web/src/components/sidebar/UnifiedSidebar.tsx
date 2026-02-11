@@ -270,6 +270,15 @@ export function UnifiedSidebar() {
                   onClick={() => handleExpandServer(server.id)}
                   className="flex min-w-0 flex-1 items-center gap-1 px-3 py-2 text-left"
                 >
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                    className={`shrink-0 text-[var(--text-muted)] transition-transform ${isExpanded ? '' : '-rotate-90'}`}
+                  >
+                    <path d="M7 10l5 5 5-5z" />
+                  </svg>
                   {server.iconUrl ? (
                     <img
                       src={server.iconUrl}
@@ -284,15 +293,7 @@ export function UnifiedSidebar() {
                       {server.name.charAt(0).toUpperCase()}
                     </div>
                   )}
-                  <svg
-                    width="12"
-                    height="12"
-                    viewBox="0 0 24 24"
-                    fill="currentColor"
-                    className={`shrink-0 text-[var(--text-muted)] transition-transform ${isExpanded ? '' : '-rotate-90'}`}
-                  >
-                    <path d="M7 10l5 5 5-5z" />
-                  </svg>
+                  <span className="text-[var(--text-muted)]">—</span>
                   <span
                     className={`min-w-0 flex-1 truncate text-sm font-semibold ${
                       serverHasUnread
