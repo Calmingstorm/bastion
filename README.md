@@ -18,8 +18,10 @@ A self-hostable, open-source chat platform built for communities. Real-time text
 **Servers & Channels**
 - Create and join servers via invite links
 - Text channels with topics, organized into collapsible categories
-- Direct messages (1:1)
+- Direct messages (1:1 and group)
+- Channel drag-and-drop reordering
 - Typing indicators and online/offline/idle/DND presence
+- Message pinning
 
 **Roles & Permissions**
 - Custom roles with colors and granular bitfield permissions
@@ -37,6 +39,15 @@ A self-hostable, open-source chat platform built for communities. Real-time text
 - JWT authentication with automatic token refresh
 - Password reset via email (Mailgun or SMTP)
 - User profiles with avatars, display names, about me, and custom status
+- Account management: change password, change email, delete account
+- Server nicknames
+
+**Infrastructure**
+- Versioned REST API (`/api/v1/`) with backward-compatible redirects
+- Rate limiting: auth (5/min), messages (10/10s), uploads (5/min), general (120/min)
+- Structured error responses with machine-readable error codes
+- WebSocket reconnection with automatic data resync
+- [WebSocket protocol documentation](docs/websocket-protocol.md)
 
 ## Quick Start
 
@@ -135,16 +146,18 @@ bastion/
 │   └── migrations/      # SQL migrations (auto-applied)
 ├── web/                 # React web client
 │   └── src/
-│       ├── api/         # Axios client, API functions
+│       ├── api/         # Axios client, WebSocket client
 │       ├── components/  # UI components
 │       ├── hooks/       # React hooks
 │       ├── pages/       # Route pages
 │       ├── stores/      # Zustand state management
+│       ├── utils/       # Storage, event bus, notifications, errors
 │       └── styles/      # CSS
+├── docs/                # Protocol and API documentation
 └── deploy/              # Docker Compose, Dockerfiles, Caddy
 ```
 
-**Backend**: Go, chi v5 router, pgx v5 (PostgreSQL), Redis, WebSocket (coder/websocket), zerolog, golang-migrate
+**Backend**: Go, chi v5 router, pgx v5 (PostgreSQL), Redis, WebSocket (coder/websocket), httprate, zerolog, golang-migrate
 
 **Frontend**: React 19, TypeScript, Vite 6, Tailwind CSS 4, Zustand 5, Axios, Radix UI, markdown-it, highlight.js
 
@@ -158,16 +171,19 @@ Migrations are embedded into the Go binary at compile time, so they work in both
 
 ## API
 
-All endpoints are under `/api/`. Authentication uses Bearer JWT tokens.
+All endpoints are under `/api/v1/`. Authentication uses Bearer JWT tokens. Requests to the legacy `/api/*` prefix are automatically redirected to `/api/v1/*`.
 
 See the full endpoint list in the [project documentation](https://bastions.org) (coming soon) or browse `server/internal/api/router.go` for the complete route table.
 
 Key public endpoints:
-- `GET /health` — health check
-- `GET /api/features` — feature flags (which optional features are enabled)
-- `POST /api/auth/register` — create account
-- `POST /api/auth/login` — sign in
-- `GET /api/ws` — WebSocket connection (authenticated)
+- `GET /api/v1/features` — feature flags (which optional features are enabled)
+- `POST /api/v1/auth/register` — create account
+- `POST /api/v1/auth/login` — sign in
+- `GET /api/v1/ws` — WebSocket connection (authenticated)
+
+Error responses use structured format: `{"error": {"code": "ERROR_CODE", "message": "..."}}`
+
+For WebSocket protocol details (events, heartbeat, reconnection), see [docs/websocket-protocol.md](docs/websocket-protocol.md).
 
 ## License
 
