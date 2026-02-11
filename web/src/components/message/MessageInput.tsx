@@ -274,7 +274,7 @@ export function MessageInput() {
       : 'Message';
 
   return (
-    <div className="shrink-0 px-4 pb-6">
+    <div className="shrink-0 px-4 pb-2">
       {/* Reply bar */}
       {replyingTo && (
         <div className="mb-2 flex items-center gap-2 rounded bg-[var(--bg-secondary)] px-3 py-2 text-sm">
