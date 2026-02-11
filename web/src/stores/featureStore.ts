@@ -17,7 +17,7 @@ export const useFeatureStore = create<FeatureState>((set) => ({
   loaded: false,
   fetchFeatures: async () => {
     try {
-      const response = await apiClient.get<Features>('/api/features');
+      const response = await apiClient.get<Features>('/features');
       set({ features: response.data, loaded: true });
     } catch {
       // Default to all disabled if unreachable
