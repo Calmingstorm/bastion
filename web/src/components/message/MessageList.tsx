@@ -55,7 +55,6 @@ export function MessageList({ onToggleMembers, onToggleSidebar }: MessageListPro
 
   // Use targeted selectors to avoid re-renders from unrelated store changes
   const selectedChannelId = useServerStore((s) => s.selectedChannelId);
-  const selectedServerId = useServerStore((s) => s.selectedServerId);
   const channels = useServerStore((s) => s.channels);
   const selectedDMId = useDMStore((s) => s.selectedDMId);
   const dmChannels = useDMStore((s) => s.dmChannels);
