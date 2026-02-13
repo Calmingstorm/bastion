@@ -115,6 +115,10 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 			r.Post("/webhooks/{webhookID}/{token}", webhookHandler.Execute)
 		})
 
+		// API documentation (public, no auth)
+		r.Get("/docs", ServeAPIDocs)
+		r.Get("/docs/openapi.yaml", ServeOpenAPISpec)
+
 		// Protected API routes (with timeout)
 		r.Group(func(r chi.Router) {
 			r.Use(auth.CombinedAuthMiddleware(cfg.JWT.Secret, db))

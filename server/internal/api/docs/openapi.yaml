@@ -1,0 +1,945 @@
+openapi: 3.0.3
+info:
+  title: Bastion API
+  description: |
+    API documentation for Bastion bot and webhook integrations.
+
+    ## Authentication
+
+    **Bot tokens** use the `Bot` scheme:
+    ```
+    Authorization: Bot bot_xxxxxxxxxxxx
+    ```
+
+    Bot tokens are issued when creating a bot in Server Settings > Integrations.
+    They are shown once — copy and store securely. You can regenerate a token
+    at any time (which invalidates the previous one).
+
+    **Webhook tokens** are embedded in the URL and require no header:
+    ```
+    POST /api/v1/webhooks/{webhookID}/{token}
+    ```
+
+    **User JWTs** use the `Bearer` scheme (for management endpoints):
+    ```
+    Authorization: Bearer <jwt>
+    ```
+
+    ## WebSocket
+
+    Bots can connect to the real-time WebSocket for live events:
+    ```
+    GET /api/v1/ws?token=bot_xxxxxxxxxxxx
+    ```
+
+    ## Rate Limits
+
+    | Scope | Limit |
+    |-------|-------|
+    | Webhook execution | 30 requests/min per IP |
+    | Protected API (global) | 120 requests/min per user |
+    | Message send | 10 messages/10s per user |
+    | File upload | 5 uploads/min per user |
+
+    When rate-limited, the server returns `429 Too Many Requests`.
+
+  version: "1.0"
+  contact:
+    name: Bastion
+    url: https://bastions.org
+
+servers:
+  - url: /api/v1
+    description: API v1
+
+tags:
+  - name: Webhooks
+    description: Create, manage, and execute webhooks
+  - name: Bots
+    description: Create and manage bot integrations
+  - name: Messages
+    description: Send and list messages (bot-accessible)
+  - name: Channels
+    description: List channels (bot-accessible)
+  - name: Members
+    description: List server members (bot-accessible)
+  - name: WebSocket
+    description: Real-time event stream
+
+paths:
+  # ── Webhook Execution (public) ──────────────────────────────────────
+  /webhooks/{webhookID}/{token}:
+    post:
+      tags: [Webhooks]
+      summary: Execute webhook
+      description: |
+        Send a message to the webhook's channel. This endpoint is public —
+        no Authorization header is needed. The token in the URL authenticates
+        the request.
+
+        Rate limit: **30 requests/min** per IP.
+      operationId: executeWebhook
+      parameters:
+        - $ref: '#/components/parameters/webhookID'
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Webhook secret token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookExecuteRequest'
+            example:
+              content: "Build #142 passed"
+              username: "CI Bot"
+              avatarUrl: "https://example.com/ci-avatar.png"
+      responses:
+        '200':
+          description: Message sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          description: Rate limited
+
+  # ── Webhook CRUD ────────────────────────────────────────────────────
+  /servers/{serverID}/webhooks:
+    post:
+      tags: [Webhooks]
+      summary: Create webhook
+      description: Creates a webhook for a channel. Requires `ManageServer` permission.
+      operationId: createWebhook
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWebhookRequest'
+            example:
+              name: "GitHub Notifications"
+              channelId: "550e8400-e29b-41d4-a716-446655440000"
+      responses:
+        '201':
+          description: Webhook created (includes token)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Webhook'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    get:
+      tags: [Webhooks]
+      summary: List webhooks
+      description: Lists all webhooks for a server. Tokens are hidden. Requires `ManageServer` permission.
+      operationId: listWebhooks
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+      responses:
+        '200':
+          description: Webhook list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Webhook'
+
+  /servers/{serverID}/webhooks/{webhookID}:
+    get:
+      tags: [Webhooks]
+      summary: Get webhook
+      description: Get a single webhook including its token. Requires `ManageServer` permission.
+      operationId: getWebhook
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+        - $ref: '#/components/parameters/webhookID'
+      responses:
+        '200':
+          description: Webhook details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Webhook'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      tags: [Webhooks]
+      summary: Update webhook
+      description: Update a webhook's name or channel. Requires `ManageServer` permission.
+      operationId: updateWebhook
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+        - $ref: '#/components/parameters/webhookID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateWebhookRequest'
+      responses:
+        '200':
+          description: Webhook updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Webhook'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Webhooks]
+      summary: Delete webhook
+      description: Delete a webhook. Requires `ManageServer` permission.
+      operationId: deleteWebhook
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+        - $ref: '#/components/parameters/webhookID'
+      responses:
+        '200':
+          description: Webhook deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── Bot CRUD ────────────────────────────────────────────────────────
+  /servers/{serverID}/bots:
+    post:
+      tags: [Bots]
+      summary: Create bot
+      description: |
+        Creates a bot for the server. The bot token is returned **once** in the
+        response — store it securely. Requires `ManageServer` permission.
+      operationId: createBot
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBotRequest'
+            example:
+              username: "ModBot"
+              description: "Automated moderation assistant"
+      responses:
+        '201':
+          description: Bot created (includes token — shown once)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Bot'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    get:
+      tags: [Bots]
+      summary: List bots
+      description: Lists all bots in the server. Requires `ManageServer` permission.
+      operationId: listBots
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+      responses:
+        '200':
+          description: Bot list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Bot'
+
+  /servers/{serverID}/bots/{botID}:
+    get:
+      tags: [Bots]
+      summary: Get bot
+      description: Get a single bot's details. Requires `ManageServer` permission.
+      operationId: getBot
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+        - $ref: '#/components/parameters/botID'
+      responses:
+        '200':
+          description: Bot details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Bot'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      tags: [Bots]
+      summary: Update bot
+      description: Update a bot's username or description. Requires `ManageServer` permission.
+      operationId: updateBot
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+        - $ref: '#/components/parameters/botID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateBotRequest'
+      responses:
+        '200':
+          description: Bot updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Bot'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Bots]
+      summary: Delete bot
+      description: Delete a bot. Requires `ManageServer` permission.
+      operationId: deleteBot
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+        - $ref: '#/components/parameters/botID'
+      responses:
+        '200':
+          description: Bot deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /servers/{serverID}/bots/{botID}/regenerate-token:
+    post:
+      tags: [Bots]
+      summary: Regenerate bot token
+      description: |
+        Generates a new token for the bot. The old token is immediately
+        invalidated. The new token is returned **once** — store it securely.
+        Requires `ManageServer` permission.
+      operationId: regenerateBotToken
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+        - $ref: '#/components/parameters/botID'
+      responses:
+        '200':
+          description: New token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                    example: "bot_abc123def456..."
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── Bot-Accessible Endpoints ────────────────────────────────────────
+  /channels/{channelID}/messages:
+    get:
+      tags: [Messages]
+      summary: List messages
+      description: |
+        Fetch messages in a channel. Supports cursor-based pagination via the
+        `before` query parameter. Returns up to 50 messages per request.
+      operationId: listMessages
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/channelID'
+        - name: before
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: Fetch messages before this message ID (cursor pagination)
+      responses:
+        '200':
+          description: Message list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Message'
+
+    post:
+      tags: [Messages]
+      summary: Send message
+      description: |
+        Send a message to a channel. Rate limit: **10 messages per 10 seconds**.
+      operationId: sendMessage
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/channelID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageRequest'
+            example:
+              content: "Hello from my bot!"
+      responses:
+        '201':
+          description: Message sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          description: Rate limited
+
+  /servers/{serverID}/channels:
+    get:
+      tags: [Channels]
+      summary: List channels
+      description: List all channels in a server. Bot must be a member of the server.
+      operationId: listChannels
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+      responses:
+        '200':
+          description: Channel list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Channel'
+
+  /servers/{serverID}/members:
+    get:
+      tags: [Members]
+      summary: List members
+      description: List all members in a server. Bot must be a member of the server.
+      operationId: listMembers
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+      responses:
+        '200':
+          description: Member list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Member'
+
+  # ── WebSocket ───────────────────────────────────────────────────────
+  /ws:
+    get:
+      tags: [WebSocket]
+      summary: Connect to WebSocket
+      description: |
+        Opens a WebSocket connection for real-time events. Bots authenticate
+        via query parameter:
+        ```
+        GET /api/v1/ws?token=bot_xxxxxxxxxxxx
+        ```
+
+        **Events received:**
+        - `MESSAGE_CREATE` — new message in any accessible channel
+        - `MESSAGE_UPDATE` — message edited
+        - `MESSAGE_DELETE` — message deleted
+        - `MEMBER_JOIN` / `MEMBER_LEAVE` — member changes
+        - `CHANNEL_CREATE` / `CHANNEL_UPDATE` / `CHANNEL_DELETE`
+        - `SERVER_UPDATE`
+        - `TYPING_START` — user is typing
+
+        Messages are JSON with `type` and `data` fields:
+        ```json
+        {
+          "type": "MESSAGE_CREATE",
+          "data": { "id": "...", "channelId": "...", "content": "...", ... }
+        }
+        ```
+      operationId: connectWebSocket
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Bot token (bot_xxx) or JWT access token
+      responses:
+        '101':
+          description: WebSocket upgrade
+
+components:
+  securitySchemes:
+    BotToken:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: 'Bot token: `Bot bot_xxxxxxxxxxxx`'
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT access token from login
+
+  parameters:
+    serverID:
+      name: serverID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Server ID
+    webhookID:
+      name: webhookID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Webhook ID
+    botID:
+      name: botID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Bot ID
+    channelID:
+      name: channelID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Channel ID
+
+  schemas:
+    # ── Request Bodies ──────────────────────────────────────────────
+    WebhookExecuteRequest:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+          minLength: 1
+          maxLength: 4000
+          description: Message content
+        username:
+          type: string
+          description: Override the webhook's display name for this message
+        avatarUrl:
+          type: string
+          format: uri
+          description: Override the webhook's avatar for this message
+
+    CreateWebhookRequest:
+      type: object
+      required: [name, channelId]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Webhook display name
+        channelId:
+          type: string
+          format: uuid
+          description: Target channel ID
+
+    UpdateWebhookRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        channelId:
+          type: string
+          format: uuid
+
+    CreateBotRequest:
+      type: object
+      required: [username]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 32
+          description: Bot username (visible as a member)
+        description:
+          type: string
+          description: Bot description (optional)
+
+    UpdateBotRequest:
+      type: object
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 32
+        description:
+          type: string
+
+    SendMessageRequest:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+          minLength: 1
+          maxLength: 4000
+        replyToId:
+          type: string
+          format: uuid
+          description: ID of message to reply to
+
+    # ── Response Models ─────────────────────────────────────────────
+    Webhook:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        serverId:
+          type: string
+          format: uuid
+        channelId:
+          type: string
+          format: uuid
+        creatorId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        avatarUrl:
+          type: string
+          nullable: true
+        token:
+          type: string
+          description: Only included on creation and single-get
+        userId:
+          type: string
+          format: uuid
+          description: Internal pseudo-user ID for the webhook
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    Bot:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        serverId:
+          type: string
+          format: uuid
+        creatorId:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+          description: Internal bot user ID
+        username:
+          type: string
+        avatarUrl:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        tokenHint:
+          type: string
+          description: Last 8 characters of the token
+        token:
+          type: string
+          description: Full token — only included on creation
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    Message:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        channelId:
+          type: string
+          format: uuid
+        author:
+          $ref: '#/components/schemas/Author'
+        content:
+          type: string
+        editedAt:
+          type: string
+          format: date-time
+          nullable: true
+        replyToId:
+          type: string
+          format: uuid
+          nullable: true
+        replyTo:
+          $ref: '#/components/schemas/ReplyInfo'
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/Attachment'
+        reactions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Reaction'
+        createdAt:
+          type: string
+          format: date-time
+
+    Author:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        displayName:
+          type: string
+          nullable: true
+        avatarUrl:
+          type: string
+          nullable: true
+        isBot:
+          type: boolean
+
+    ReplyInfo:
+      type: object
+      nullable: true
+      properties:
+        id:
+          type: string
+          format: uuid
+        content:
+          type: string
+        author:
+          $ref: '#/components/schemas/Author'
+
+    Attachment:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        messageId:
+          type: string
+          format: uuid
+        filename:
+          type: string
+        contentType:
+          type: string
+        size:
+          type: integer
+          format: int64
+        url:
+          type: string
+
+    Reaction:
+      type: object
+      properties:
+        emoji:
+          type: string
+        count:
+          type: integer
+        users:
+          type: array
+          items:
+            type: string
+
+    Channel:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        serverId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        topic:
+          type: string
+          nullable: true
+        type:
+          type: string
+          enum: [text, voice]
+        position:
+          type: integer
+        categoryId:
+          type: string
+          format: uuid
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    Member:
+      type: object
+      properties:
+        serverId:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        username:
+          type: string
+        displayName:
+          type: string
+          nullable: true
+        avatarUrl:
+          type: string
+          nullable: true
+        nickname:
+          type: string
+          nullable: true
+        role:
+          type: string
+        status:
+          type: string
+        isBot:
+          type: boolean
+        joinedAt:
+          type: string
+          format: date-time
+
+    DeleteResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "deleted"
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              description: Machine-readable error code
+              example: "VALIDATION_ERROR"
+            message:
+              type: string
+              description: Human-readable error message
+
+  responses:
+    ValidationError:
+      description: Validation error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: "VALIDATION_ERROR"
+              message: "name is required and must be 1-100 characters"
+    Unauthorized:
+      description: Missing or invalid authentication
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: "UNAUTHORIZED"
+              message: "invalid token"
+    Forbidden:
+      description: Insufficient permissions
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: "FORBIDDEN"
+              message: "missing required permission"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: "NOT_FOUND"
+              message: "webhook not found"
