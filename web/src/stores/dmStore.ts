@@ -24,7 +24,7 @@ export const useDMStore = create<DMState>((set) => ({
     set({ isLoading: true, error: null });
     try {
       const channels = await apiGetDMs();
-      set({ dmChannels: channels, isLoading: false });
+      set({ dmChannels: Array.isArray(channels) ? channels : [], isLoading: false });
     } catch {
       set({ isLoading: false, error: 'Failed to load DMs' });
     }

@@ -2,11 +2,12 @@ import { useEffect, useState, Component } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { BrowserRouter, HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from './stores/authStore';
-import { isTauri } from './platform';
+import { isTauri, getPlatform } from './platform';
 import { LoginPage } from './pages/LoginPage';
 import { RegisterPage } from './pages/RegisterPage';
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
 import { ResetPasswordPage } from './pages/ResetPasswordPage';
+import { ServerSetupPage } from './pages/ServerSetupPage';
 import { AppPage } from './pages/AppPage';
 import { InvitePage } from './pages/InvitePage';
 
@@ -75,17 +76,22 @@ export default function App() {
 
   const Router = isTauri() ? HashRouter : BrowserRouter;
 
+  // On desktop, redirect to setup if no server URL is configured
+  const needsSetup = isTauri() && !getPlatform().storage.getItem('serverUrl');
+  const defaultRoute = needsSetup ? '/setup' : '/app';
+
   return (
     <ErrorBoundary>
       <Router>
         <Routes>
+          <Route path="/setup" element={<ServerSetupPage />} />
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
           <Route path="/forgot-password" element={<ForgotPasswordPage />} />
           <Route path="/reset-password" element={<ResetPasswordPage />} />
           <Route path="/invite/:code" element={<InvitePage />} />
           <Route path="/app" element={<AppPage />} />
-          <Route path="*" element={<Navigate to="/app" replace />} />
+          <Route path="*" element={<Navigate to={defaultRoute} replace />} />
         </Routes>
       </Router>
     </ErrorBoundary>

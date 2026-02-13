@@ -1,5 +1,7 @@
 import type { Platform } from './types';
 import { webPlatform } from './web';
+import { setApiBaseURL } from '../api/client';
+import { setWSServerUrl } from '../api/websocket';
 
 let currentPlatform: Platform = webPlatform;
 
@@ -15,6 +17,13 @@ export async function initPlatform(): Promise<void> {
       initDesktopPlatform: () => Promise<Platform>;
     };
     currentPlatform = await mod.initDesktopPlatform();
+
+    // Configure API client and WebSocket with the stored server URL
+    const serverUrl = currentPlatform.storage.getItem('serverUrl');
+    if (serverUrl) {
+      setApiBaseURL(serverUrl);
+      setWSServerUrl(serverUrl);
+    }
   }
 }
 
