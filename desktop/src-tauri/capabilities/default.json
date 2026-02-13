@@ -24,8 +24,7 @@
     "shell:allow-open",
     "updater:default",
     "deep-link:default",
-    "single-instance:default",
-    "window-state:default",
+"window-state:default",
     "clipboard-manager:default",
     "clipboard-manager:allow-write-text",
     "clipboard-manager:allow-read-text"

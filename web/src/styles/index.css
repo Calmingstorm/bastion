@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@source "../";
 @import "./markdown.css";
 
 :root,

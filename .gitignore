@@ -38,6 +38,12 @@ Thumbs.db
 coverage/
 .nyc_output/
 
+# Desktop (Tauri)
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+
 # Build artifacts
 *.exe
 *.dll
