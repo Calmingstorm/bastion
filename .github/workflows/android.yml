@@ -1,0 +1,77 @@
+name: Android
+
+on:
+  push:
+    tags:
+      - "android-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: sdkmanager --install "ndk;27.0.12077973"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: |
+            web/package-lock.json
+            android/package-lock.json
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: android/src-tauri -> target
+
+      - name: Install web dependencies
+        run: npm ci
+        working-directory: web
+
+      - name: Install android dependencies
+        run: npm ci
+        working-directory: android
+
+      - name: Initialize Tauri Android project
+        run: npx tauri android init
+        working-directory: android
+
+      - name: Build APK
+        run: npx tauri android build --apk
+        working-directory: android
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
+
+      - name: Upload APK to release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          tag_name: ${{ github.ref_name }}
+          name: "Bastion Android ${{ github.ref_name }}"
+          body: "Android client release."
+          files: |
+            android/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -5,7 +5,7 @@ export interface PlatformStorage {
 }
 
 export interface Platform {
-  name: 'web' | 'desktop';
+  name: 'web' | 'desktop' | 'mobile';
   storage: PlatformStorage;
   requestNotificationPermission(): Promise<boolean>;
   showNotification(title: string, body: string, icon?: string): void;

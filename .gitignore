@@ -44,6 +44,12 @@ desktop/dist/
 desktop/src-tauri/target/
 desktop/src-tauri/gen/
 
+# Android (Tauri)
+android/node_modules/
+android/dist/
+android/src-tauri/target/
+android/src-tauri/gen/
+
 # Build artifacts
 *.exe
 *.dll

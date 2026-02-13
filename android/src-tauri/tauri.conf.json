@@ -1,0 +1,41 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-utils/schema.json",
+  "productName": "Bastion",
+  "version": "0.1.0",
+  "identifier": "org.bastions.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1430",
+    "beforeDevCommand": "npx vite --port 1430",
+    "beforeBuildCommand": "npx vite build"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss: http: https:; img-src 'self' https: data: blob:; font-src 'self' data:; media-src 'self' https: blob:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "android": {
+      "minSdkVersion": 24
+    },
+    "category": "SocialNetworking",
+    "shortDescription": "Self-hosted chat platform for communities",
+    "longDescription": "Bastion is a self-hosted, open-source chat platform for communities."
+  },
+  "plugins": {
+    "deep-link": {
+      "mobile": {
+        "schemes": ["bastion"]
+      }
+    }
+  }
+}

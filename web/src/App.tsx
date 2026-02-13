@@ -2,7 +2,7 @@ import { useEffect, useState, Component } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { BrowserRouter, HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from './stores/authStore';
-import { isTauri, isDesktopReady, getPlatform } from './platform';
+import { isTauri, isDesktopReady, isMobileReady, getPlatform } from './platform';
 import { LoginPage } from './pages/LoginPage';
 import { RegisterPage } from './pages/RegisterPage';
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
@@ -74,8 +74,8 @@ export default function App() {
     );
   }
 
-  // Desktop: if platform init failed, show error
-  if (isTauri() && !isDesktopReady()) {
+  // Desktop/Mobile: if platform init failed, show error
+  if (isTauri() && !isDesktopReady() && !isMobileReady()) {
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-[var(--bg-tertiary)]">
         <div className="max-w-md rounded-lg bg-[var(--bg-secondary)] p-6 text-center">
@@ -83,7 +83,7 @@ export default function App() {
             Platform Error
           </h2>
           <p className="mb-4 text-sm text-[var(--text-muted)]">
-            Failed to initialize the desktop platform. Check the console for details.
+            Failed to initialize the platform. Check the console for details.
           </p>
           <button
             onClick={() => window.location.reload()}
