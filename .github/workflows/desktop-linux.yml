@@ -3,7 +3,7 @@ name: Desktop Linux
 on:
   push:
     tags:
-      - "desktop-v*"
+      - "desktop-linux-v*"
 
 permissions:
   contents: write

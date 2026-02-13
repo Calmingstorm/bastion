@@ -3,7 +3,7 @@ name: Desktop Windows
 on:
   push:
     tags:
-      - "desktop-v*"
+      - "desktop-windows-v*"
 
 permissions:
   contents: write
