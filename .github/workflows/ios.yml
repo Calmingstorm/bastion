@@ -1,0 +1,63 @@
+name: iOS
+
+on:
+  push:
+    tags:
+      - "ios-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build iOS App
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: |
+            web/package-lock.json
+            ios/package-lock.json
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,x86_64-apple-ios,aarch64-apple-ios-sim
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ios/src-tauri -> target
+
+      - name: Install web dependencies
+        run: npm ci
+        working-directory: web
+
+      - name: Install iOS dependencies
+        run: npm ci
+        working-directory: ios
+
+      - name: Initialize Tauri iOS project
+        run: npx tauri ios init
+        working-directory: ios
+
+      - name: Build iOS app
+        run: npx tauri ios build
+        working-directory: ios
+
+      - name: Upload build artifact to release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          tag_name: ${{ github.ref_name }}
+          name: "Bastion iOS ${{ github.ref_name }}"
+          body: "iOS client release (unsigned)."
+          files: |
+            ios/src-tauri/gen/apple/build/**/*.app
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

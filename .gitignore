@@ -50,6 +50,12 @@ android/dist/
 android/src-tauri/target/
 android/src-tauri/gen/
 
+# iOS (Tauri)
+ios/node_modules/
+ios/dist/
+ios/src-tauri/target/
+ios/src-tauri/gen/
+
 # Build artifacts
 *.exe
 *.dll
