@@ -31,11 +31,5 @@
     "shortDescription": "Self-hosted chat platform for communities",
     "longDescription": "Bastion is a self-hosted, open-source chat platform for communities."
   },
-  "plugins": {
-    "deep-link": {
-      "mobile": {
-        "schemes": ["bastion"]
-      }
-    }
-  }
+  "plugins": {}
 }
