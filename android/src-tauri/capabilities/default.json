@@ -15,7 +15,6 @@
     "store:default",
     "shell:default",
     "shell:allow-open",
-    "deep-link:default",
     "clipboard-manager:default",
     "clipboard-manager:allow-write-text",
     "clipboard-manager:allow-read-text"
