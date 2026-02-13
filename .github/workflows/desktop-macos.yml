@@ -1,0 +1,53 @@
+name: Desktop macOS
+
+on:
+  push:
+    tags:
+      - "desktop-macos-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build macOS Desktop
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: |
+            web/package-lock.json
+            desktop/package-lock.json
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+
+      - name: Install web dependencies
+        run: npm ci
+        working-directory: web
+
+      - name: Install desktop dependencies
+        run: npm ci
+        working-directory: desktop
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: "Bastion Desktop ${{ github.ref_name }}"
+          releaseBody: "Desktop client release."
+          releaseDraft: true
+          prerelease: false
