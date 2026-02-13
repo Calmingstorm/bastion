@@ -72,6 +72,8 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 	searchHandler := NewSearchHandler(db)
 	unfurlHandler := NewUnfurlHandler(cfg)
 	pinHandler := NewPinHandler(db, hub)
+	webhookHandler := NewWebhookHandler(db, hub)
+	botHandler := NewBotHandler(db)
 
 	// Backward-compat redirect: /api/* -> /api/v1/*
 	r.HandleFunc("/api/*", func(w http.ResponseWriter, r *http.Request) {
@@ -107,9 +109,15 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 		// Serve uploaded files (public, UUID-named so unguessable)
 		r.Get("/uploads/*", userHandler.ServeUpload)
 
+		// Public webhook execution (rate-limited per webhook)
+		r.Group(func(r chi.Router) {
+			r.Use(httprate.LimitByIP(30, time.Minute))
+			r.Post("/webhooks/{webhookID}/{token}", webhookHandler.Execute)
+		})
+
 		// Protected API routes (with timeout)
 		r.Group(func(r chi.Router) {
-			r.Use(auth.Middleware(cfg.JWT.Secret))
+			r.Use(auth.CombinedAuthMiddleware(cfg.JWT.Secret, db))
 			r.Use(middleware.Timeout(30 * time.Second))
 			r.Use(RateLimitByUserID(120, time.Minute))
 
@@ -182,6 +190,21 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 
 				// Audit log
 				r.Get("/{serverID}/audit-log", auditLogHandler.List)
+
+				// Webhooks
+				r.Post("/{serverID}/webhooks", webhookHandler.Create)
+				r.Get("/{serverID}/webhooks", webhookHandler.List)
+				r.Get("/{serverID}/webhooks/{webhookID}", webhookHandler.Get)
+				r.Patch("/{serverID}/webhooks/{webhookID}", webhookHandler.Update)
+				r.Delete("/{serverID}/webhooks/{webhookID}", webhookHandler.Delete)
+
+				// Bots
+				r.Post("/{serverID}/bots", botHandler.Create)
+				r.Get("/{serverID}/bots", botHandler.List)
+				r.Get("/{serverID}/bots/{botID}", botHandler.Get)
+				r.Patch("/{serverID}/bots/{botID}", botHandler.Update)
+				r.Delete("/{serverID}/bots/{botID}", botHandler.Delete)
+				r.Post("/{serverID}/bots/{botID}/regenerate-token", botHandler.RegenerateToken)
 			})
 
 			// Invites (top-level for join/delete)
@@ -226,7 +249,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 
 		// WebSocket (protected, NO timeout — connection must stay alive)
 		r.Group(func(r chi.Router) {
-			r.Use(auth.Middleware(cfg.JWT.Secret))
+			r.Use(auth.CombinedAuthMiddleware(cfg.JWT.Secret, db))
 			r.Get("/ws", func(w http.ResponseWriter, r *http.Request) {
 				userID := auth.UserIDFromContext(r.Context())
 				realtime.ServeWS(hub, w, r, userID, db, rdb)

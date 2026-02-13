@@ -80,6 +80,7 @@ type Author struct {
 	Username    string    `json:"username"`
 	DisplayName *string   `json:"displayName,omitempty"`
 	AvatarURL   *string   `json:"avatarUrl,omitempty"`
+	IsBot       bool      `json:"isBot,omitempty"`
 }
 
 type ServerMember struct {
@@ -136,6 +137,7 @@ type MemberWithUser struct {
 	Nickname      *string    `json:"nickname,omitempty"`
 	Role          string     `json:"role"`
 	Status        string     `json:"status"`
+	IsBot         bool       `json:"isBot,omitempty"`
 	TimedOutUntil *time.Time `json:"timedOutUntil,omitempty"`
 	JoinedAt      time.Time  `json:"joinedAt"`
 	Roles         []RoleInfo `json:"roles,omitempty"`
@@ -225,5 +227,39 @@ const (
 	AuditMemberLeave      = "MEMBER_LEAVE"
 	AuditMessagePin       = "MESSAGE_PIN"
 	AuditMessageUnpin     = "MESSAGE_UNPIN"
-	AuditNicknameUpdate   = "NICKNAME_UPDATE"
+	AuditNicknameUpdate       = "NICKNAME_UPDATE"
+	AuditWebhookCreate        = "WEBHOOK_CREATE"
+	AuditWebhookUpdate        = "WEBHOOK_UPDATE"
+	AuditWebhookDelete        = "WEBHOOK_DELETE"
+	AuditBotCreate            = "BOT_CREATE"
+	AuditBotUpdate            = "BOT_UPDATE"
+	AuditBotDelete            = "BOT_DELETE"
+	AuditBotTokenRegenerate   = "BOT_TOKEN_REGENERATE"
 )
+
+type Webhook struct {
+	ID        uuid.UUID `json:"id"`
+	ServerID  uuid.UUID `json:"serverId"`
+	ChannelID uuid.UUID `json:"channelId"`
+	CreatorID uuid.UUID `json:"creatorId"`
+	Name      string    `json:"name"`
+	AvatarURL *string   `json:"avatarUrl,omitempty"`
+	Token     string    `json:"token,omitempty"`
+	UserID    uuid.UUID `json:"userId"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+type Bot struct {
+	ID          uuid.UUID `json:"id"`
+	ServerID    uuid.UUID `json:"serverId"`
+	CreatorID   uuid.UUID `json:"creatorId"`
+	UserID      uuid.UUID `json:"userId"`
+	Username    string    `json:"username"`
+	AvatarURL   *string   `json:"avatarUrl,omitempty"`
+	Description *string   `json:"description,omitempty"`
+	TokenHint   string    `json:"tokenHint"`
+	Token       string    `json:"token,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}

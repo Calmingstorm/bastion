@@ -785,5 +785,85 @@ export async function apiReorderChannels(
   await apiClient.put(`/servers/${serverId}/channels/reorder`, positions);
 }
 
+// ---- Webhook API ----
+
+import type { Webhook, Bot } from '../types';
+
+export async function apiGetWebhooks(serverId: string): Promise<Webhook[]> {
+  const response = await apiClient.get<Webhook[]>(`/servers/${serverId}/webhooks`);
+  return response.data;
+}
+
+export async function apiCreateWebhook(
+  serverId: string,
+  data: { name: string; channelId: string }
+): Promise<Webhook> {
+  const response = await apiClient.post<Webhook>(`/servers/${serverId}/webhooks`, data);
+  return response.data;
+}
+
+export async function apiUpdateWebhook(
+  serverId: string,
+  webhookId: string,
+  data: { name?: string; channelId?: string }
+): Promise<Webhook> {
+  const response = await apiClient.patch<Webhook>(
+    `/servers/${serverId}/webhooks/${webhookId}`,
+    data
+  );
+  return response.data;
+}
+
+export async function apiDeleteWebhook(
+  serverId: string,
+  webhookId: string
+): Promise<void> {
+  await apiClient.delete(`/servers/${serverId}/webhooks/${webhookId}`);
+}
+
+// ---- Bot API ----
+
+export async function apiGetBots(serverId: string): Promise<Bot[]> {
+  const response = await apiClient.get<Bot[]>(`/servers/${serverId}/bots`);
+  return response.data;
+}
+
+export async function apiCreateBot(
+  serverId: string,
+  data: { username: string; description?: string }
+): Promise<Bot> {
+  const response = await apiClient.post<Bot>(`/servers/${serverId}/bots`, data);
+  return response.data;
+}
+
+export async function apiUpdateBot(
+  serverId: string,
+  botId: string,
+  data: { username?: string; description?: string }
+): Promise<Bot> {
+  const response = await apiClient.patch<Bot>(
+    `/servers/${serverId}/bots/${botId}`,
+    data
+  );
+  return response.data;
+}
+
+export async function apiDeleteBot(
+  serverId: string,
+  botId: string
+): Promise<void> {
+  await apiClient.delete(`/servers/${serverId}/bots/${botId}`);
+}
+
+export async function apiRegenerateBotToken(
+  serverId: string,
+  botId: string
+): Promise<{ token: string }> {
+  const response = await apiClient.post<{ token: string }>(
+    `/servers/${serverId}/bots/${botId}/regenerate-token`
+  );
+  return response.data;
+}
+
 export { getAccessToken, getRefreshToken, setTokens, clearTokens };
 export default apiClient;

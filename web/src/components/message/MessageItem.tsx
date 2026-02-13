@@ -283,6 +283,11 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
                 {displayName}
               </span>
             </UserProfileCard>
+            {author?.isBot && (
+              <span className="rounded bg-[var(--accent)]/20 px-1.5 py-0.5 text-[10px] font-bold text-[var(--accent)]">
+                BOT
+              </span>
+            )}
             <span className="text-xs text-[var(--text-muted)]">
               {formatFullTimestamp(createdAt)}
             </span>

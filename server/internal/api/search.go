@@ -29,6 +29,7 @@ type searchResult struct {
 	Username    string    `json:"username"`
 	DisplayName *string   `json:"displayName"`
 	AvatarURL   *string   `json:"avatarUrl"`
+	IsBot       bool      `json:"isBot,omitempty"`
 	ChannelName string    `json:"channelName"`
 	ServerName  *string   `json:"serverName"`
 }
@@ -63,7 +64,7 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 
 	// Build query based on filters
 	baseSQL := `SELECT m.id, m.channel_id, m.content, m.created_at,
-		u.id, u.username, u.display_name, u.avatar_url,
+		u.id, u.username, u.display_name, u.avatar_url, u.is_bot,
 		c.name, s.name
 		FROM messages m
 		INNER JOIN users u ON u.id = m.author_id
@@ -140,7 +141,7 @@ func scanSearchResults(rows interface {
 		var createdAt time.Time
 		if err := rows.Scan(
 			&r.ID, &r.ChannelID, &r.Content, &createdAt,
-			&r.AuthorID, &r.Username, &r.DisplayName, &r.AvatarURL,
+			&r.AuthorID, &r.Username, &r.DisplayName, &r.AvatarURL, &r.IsBot,
 			&r.ChannelName, &r.ServerName,
 		); err != nil {
 			return nil, err

@@ -201,7 +201,7 @@ func (h *UserHandler) GetMembers(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := h.db.Query(r.Context(),
 		`SELECT sm.server_id, sm.user_id, u.username, u.display_name, u.avatar_url,
-		        sm.nickname, sm.role, u.status, sm.timed_out_until, sm.joined_at
+		        sm.nickname, sm.role, u.status, u.is_bot, sm.timed_out_until, sm.joined_at
 		 FROM server_members sm
 		 INNER JOIN users u ON u.id = sm.user_id
 		 WHERE sm.server_id = $1
@@ -218,7 +218,7 @@ func (h *UserHandler) GetMembers(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var m models.MemberWithUser
 		if err := rows.Scan(&m.ServerID, &m.UserID, &m.Username, &m.DisplayName,
-			&m.AvatarURL, &m.Nickname, &m.Role, &m.Status, &m.TimedOutUntil, &m.JoinedAt); err != nil {
+			&m.AvatarURL, &m.Nickname, &m.Role, &m.Status, &m.IsBot, &m.TimedOutUntil, &m.JoinedAt); err != nil {
 			log.Error().Err(err).Msg("failed to scan member")
 			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return

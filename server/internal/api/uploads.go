@@ -88,12 +88,12 @@ func (h *UploadHandler) SendWithAttachments(w http.ResponseWriter, r *http.Reque
 			RETURNING id, channel_id, author_id, content, edited_at, created_at
 		)
 		SELECT m.id, m.channel_id, m.content, m.edited_at, m.created_at,
-			   u.id, u.username, u.display_name, u.avatar_url
+			   u.id, u.username, u.display_name, u.avatar_url, u.is_bot
 		FROM new_msg m
 		INNER JOIN users u ON u.id = m.author_id`,
 		channelID, userID, content,
 	).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.CreatedAt,
-		&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL)
+		&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL, &author.IsBot)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to insert message")
 		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))

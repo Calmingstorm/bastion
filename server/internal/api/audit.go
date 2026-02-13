@@ -74,7 +74,7 @@ func (h *AuditLogHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	baseQuery := `SELECT al.id, al.server_id, al.actor_id, al.action_type, al.target_type,
 		al.target_id, al.changes, al.reason, al.created_at,
-		u.id, u.username, u.display_name, u.avatar_url
+		u.id, u.username, u.display_name, u.avatar_url, u.is_bot
 		FROM audit_log al
 		INNER JOIN users u ON u.id = al.actor_id
 		WHERE al.server_id = $1`
@@ -113,7 +113,7 @@ func (h *AuditLogHandler) List(w http.ResponseWriter, r *http.Request) {
 		var actor models.Author
 		if err := rows.Scan(&e.ID, &e.ServerID, &e.ActorID, &e.ActionType,
 			&e.TargetType, &e.TargetID, &e.Changes, &e.Reason, &e.CreatedAt,
-			&actor.ID, &actor.Username, &actor.DisplayName, &actor.AvatarURL); err != nil {
+			&actor.ID, &actor.Username, &actor.DisplayName, &actor.AvatarURL, &actor.IsBot); err != nil {
 			log.Error().Err(err).Msg("failed to scan audit log entry")
 			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return

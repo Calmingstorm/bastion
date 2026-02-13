@@ -34,6 +34,7 @@ export interface MessageAuthor {
   username: string;
   displayName?: string;
   avatarUrl?: string;
+  isBot?: boolean;
 }
 
 export interface Attachment {
@@ -128,6 +129,7 @@ export interface MemberWithUser {
   nickname?: string;
   role: string;
   status: string;
+  isBot?: boolean;
   timedOutUntil?: string;
   joinedAt: string;
   roles?: RoleInfo[];
@@ -179,6 +181,33 @@ export interface AuditLogEntry {
   changes?: Record<string, unknown>;
   reason?: string;
   createdAt: string;
+}
+
+export interface Webhook {
+  id: string;
+  serverId: string;
+  channelId: string;
+  creatorId: string;
+  name: string;
+  avatarUrl?: string;
+  token?: string;
+  userId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Bot {
+  id: string;
+  serverId: string;
+  creatorId: string;
+  userId: string;
+  username: string;
+  avatarUrl?: string;
+  description?: string;
+  tokenHint: string;
+  token?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface SearchResult {

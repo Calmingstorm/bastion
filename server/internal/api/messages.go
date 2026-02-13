@@ -74,7 +74,7 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 	var rows pgx.Rows
 
 	baseQuery := `SELECT m.id, m.channel_id, m.content, m.edited_at, m.created_at,
-		 u.id, u.username, u.display_name, u.avatar_url,
+		 u.id, u.username, u.display_name, u.avatar_url, u.is_bot,
 		 m.reply_to_id, rm.id, rm.content, ru.id, ru.username, ru.display_name, ru.avatar_url
 		 FROM messages m
 		 INNER JOIN users u ON u.id = m.author_id
@@ -131,7 +131,7 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 		var replyContent, replyUsername *string
 		var replyDisplayName, replyAvatarURL *string
 		if err := rows.Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.CreatedAt,
-			&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL,
+			&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL, &author.IsBot,
 			&replyToID, &replyID, &replyContent, &replyAuthorID, &replyUsername, &replyDisplayName, &replyAvatarURL); err != nil {
 			log.Error().Err(err).Msg("failed to scan message")
 			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
@@ -267,12 +267,12 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 			RETURNING id, channel_id, author_id, content, edited_at, reply_to_id, created_at
 		)
 		SELECT m.id, m.channel_id, m.content, m.edited_at, m.reply_to_id, m.created_at,
-			   u.id, u.username, u.display_name, u.avatar_url
+			   u.id, u.username, u.display_name, u.avatar_url, u.is_bot
 		FROM new_msg m
 		INNER JOIN users u ON u.id = m.author_id`,
 		channelID, userID, req.Content, req.ReplyToID,
 	).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.ReplyToID, &msg.CreatedAt,
-		&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL)
+		&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL, &author.IsBot)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to insert message")
 		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
@@ -371,10 +371,11 @@ func (h *MessageHandler) Edit(w http.ResponseWriter, r *http.Request) {
 			(SELECT u.id FROM users u WHERE u.id = author_id),
 			(SELECT u.username FROM users u WHERE u.id = author_id),
 			(SELECT u.display_name FROM users u WHERE u.id = author_id),
-			(SELECT u.avatar_url FROM users u WHERE u.id = author_id)`,
+			(SELECT u.avatar_url FROM users u WHERE u.id = author_id),
+			(SELECT u.is_bot FROM users u WHERE u.id = author_id)`,
 		req.Content, messageID,
 	).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.CreatedAt,
-		&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL)
+		&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL, &author.IsBot)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to update message")
 		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))

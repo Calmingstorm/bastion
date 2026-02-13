@@ -233,6 +233,11 @@ function MemberItem({ member, serverId, canModerate, isOwner }: {
           >
             {displayName}
           </span>
+          {member.isBot && (
+            <span className="ml-1 shrink-0 rounded bg-[var(--accent)]/20 px-1 py-0.5 text-[9px] font-bold text-[var(--accent)]">
+              BOT
+            </span>
+          )}
           {isTimedOut && (
             <span title="Timed out" className="ml-auto shrink-0 text-[var(--text-muted)]">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

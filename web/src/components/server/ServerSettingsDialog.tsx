@@ -21,10 +21,17 @@ import {
   apiUpdateChannel,
   apiDeleteChannel,
   apiDeleteServer,
+  apiGetWebhooks,
+  apiCreateWebhook,
+  apiDeleteWebhook,
+  apiGetBots,
+  apiCreateBot,
+  apiDeleteBot,
+  apiRegenerateBotToken,
 } from '../../api/client';
 import { useServerStore } from '../../stores/serverStore';
 import { resolveMediaUrl } from '../../platform';
-import type { Role, ServerBan, AuditLogEntry, MemberWithUser, Channel } from '../../types';
+import type { Role, ServerBan, AuditLogEntry, MemberWithUser, Channel, Webhook, Bot } from '../../types';
 
 // Permission bitfield constants — must match server/internal/permissions/permissions.go
 const PERMISSIONS = {
@@ -63,7 +70,7 @@ const PERMISSION_LABELS: { key: keyof typeof PERMISSIONS; label: string; desc: s
   { key: 'Administrator', label: 'Administrator', desc: 'Full access — bypasses all checks' },
 ];
 
-type Tab = 'overview' | 'channels' | 'roles' | 'members' | 'bans' | 'audit';
+type Tab = 'overview' | 'channels' | 'roles' | 'members' | 'bans' | 'webhooks' | 'integrations' | 'audit';
 
 interface ServerSettingsDialogProps {
   open: boolean;
@@ -80,6 +87,8 @@ export function ServerSettingsDialog({ open, onOpenChange, serverId }: ServerSet
     roles: 'Roles',
     members: 'Members',
     bans: 'Bans',
+    webhooks: 'Webhooks',
+    integrations: 'Integrations',
     audit: 'Audit Log',
   };
 
@@ -115,6 +124,8 @@ export function ServerSettingsDialog({ open, onOpenChange, serverId }: ServerSet
             {tab === 'roles' && <RolesTab serverId={serverId} />}
             {tab === 'members' && <MembersTab serverId={serverId} />}
             {tab === 'bans' && <BansTab serverId={serverId} />}
+            {tab === 'webhooks' && <WebhooksTab serverId={serverId} />}
+            {tab === 'integrations' && <IntegrationsTab serverId={serverId} />}
             {tab === 'audit' && <AuditTab serverId={serverId} />}
           </div>
 
@@ -782,6 +793,8 @@ function AuditTab({ serverId }: { serverId: string }) {
     MEMBER_KICK: 'Kicked member', MEMBER_BAN: 'Banned member', MEMBER_UNBAN: 'Unbanned member', MEMBER_TIMEOUT: 'Timed out member',
     SERVER_UPDATE: 'Updated server', CHANNEL_CREATE: 'Created channel', CHANNEL_UPDATE: 'Updated channel', CHANNEL_DELETE: 'Deleted channel',
     MESSAGE_DELETE: 'Deleted message',
+    WEBHOOK_CREATE: 'Created webhook', WEBHOOK_UPDATE: 'Updated webhook', WEBHOOK_DELETE: 'Deleted webhook',
+    BOT_CREATE: 'Created bot', BOT_UPDATE: 'Updated bot', BOT_DELETE: 'Deleted bot', BOT_TOKEN_REGENERATE: 'Regenerated bot token',
   };
 
   const actionTypes = ['', ...Object.keys(ACTION_LABELS)];
@@ -812,6 +825,274 @@ function AuditTab({ serverId }: { serverId: string }) {
                   {entry.reason && <span className="ml-1 text-[var(--text-muted)]">— {entry.reason}</span>}
                 </div>
                 <span className="text-xs text-[var(--text-muted)]">{new Date(entry.createdAt).toLocaleString()}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---- Webhooks ---- */
+
+function WebhooksTab({ serverId }: { serverId: string }) {
+  const [webhooks, setWebhooks] = useState<Webhook[]>([]);
+  const [channels, setChannels] = useState<Channel[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [newName, setNewName] = useState('');
+  const [newChannelId, setNewChannelId] = useState('');
+  const [isCreating, setIsCreating] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    Promise.all([apiGetWebhooks(serverId), apiGetChannels(serverId)])
+      .then(([wh, ch]) => {
+        setWebhooks(wh);
+        setChannels(ch.sort((a, b) => a.position - b.position));
+        if (ch.length > 0 && !newChannelId) setNewChannelId(ch[0].id);
+      })
+      .catch(() => {})
+      .finally(() => setIsLoading(false));
+  }, [serverId]);
+
+  const handleCreate = async () => {
+    const name = newName.trim();
+    if (!name || !newChannelId) return;
+    setIsCreating(true);
+    try {
+      const wh = await apiCreateWebhook(serverId, { name, channelId: newChannelId });
+      setWebhooks((prev) => [wh, ...prev]);
+      setNewName('');
+    } catch { /* handled */ } finally {
+      setIsCreating(false);
+    }
+  };
+
+  const handleDelete = async (webhookId: string) => {
+    try {
+      await apiDeleteWebhook(serverId, webhookId);
+      setWebhooks((prev) => prev.filter((w) => w.id !== webhookId));
+    } catch { /* handled */ }
+    setDeleteConfirm(null);
+  };
+
+  const copyWebhookUrl = (webhook: Webhook) => {
+    const baseUrl = window.location.origin;
+    const url = `${baseUrl}/api/v1/webhooks/${webhook.id}/${webhook.token}`;
+    navigator.clipboard.writeText(url);
+    setCopiedId(webhook.id);
+    setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  if (isLoading) return <Spinner />;
+
+  const channelName = (id: string) => channels.find((c) => c.id === id)?.name || 'unknown';
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-lg font-bold text-[var(--text-primary)]">Webhooks — {webhooks.length}</h2>
+      <p className="text-xs text-[var(--text-muted)]">
+        Webhooks allow external services to send messages to channels using a simple POST request.
+      </p>
+
+      {/* Create form */}
+      <div className="rounded-md border border-[var(--border)] bg-[var(--bg-secondary)] p-4">
+        <h3 className="mb-3 text-sm font-bold text-[var(--text-primary)]">Create Webhook</h3>
+        <div className="flex gap-2">
+          <input type="text" value={newName} onChange={(e) => setNewName(e.target.value)}
+            placeholder="Webhook name"
+            className="min-w-0 flex-1 rounded-[3px] bg-[var(--bg-tertiary)] px-3 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] outline-none focus:ring-1 focus:ring-[var(--accent)]"
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleCreate(); } }} />
+          <select value={newChannelId} onChange={(e) => setNewChannelId(e.target.value)}
+            className="rounded-[3px] bg-[var(--bg-tertiary)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:ring-1 focus:ring-[var(--accent)]">
+            {channels.map((ch) => <option key={ch.id} value={ch.id}>#{ch.name}</option>)}
+          </select>
+          <button onClick={handleCreate} disabled={isCreating || !newName.trim()}
+            className="shrink-0 rounded-[3px] bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--accent-hover)] disabled:opacity-50">
+            Create
+          </button>
+        </div>
+      </div>
+
+      {webhooks.length === 0 ? (
+        <p className="py-8 text-sm text-[var(--text-muted)]">No webhooks yet.</p>
+      ) : (
+        <div className="space-y-1">
+          {webhooks.map((wh) => (
+            <div key={wh.id} className="flex items-center justify-between rounded bg-[var(--bg-secondary)] px-3 py-2">
+              <div>
+                <span className="text-sm font-medium text-[var(--text-primary)]">{wh.name}</span>
+                <p className="text-xs text-[var(--text-muted)]">#{channelName(wh.channelId)} &middot; {new Date(wh.createdAt).toLocaleDateString()}</p>
+              </div>
+              <div className="flex gap-1">
+                <button onClick={() => copyWebhookUrl(wh)}
+                  className="rounded px-2 py-1 text-xs text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)] hover:text-[var(--text-primary)]">
+                  {copiedId === wh.id ? 'Copied!' : 'Copy URL'}
+                </button>
+                {deleteConfirm === wh.id ? (
+                  <div className="flex gap-1">
+                    <button onClick={() => handleDelete(wh.id)}
+                      className="rounded px-2 py-1 text-xs font-medium text-[var(--danger)] hover:bg-[var(--danger)]/10">Confirm</button>
+                    <button onClick={() => setDeleteConfirm(null)}
+                      className="rounded px-2 py-1 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)]">Cancel</button>
+                  </div>
+                ) : (
+                  <button onClick={() => setDeleteConfirm(wh.id)}
+                    className="rounded px-2 py-1 text-xs text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)] hover:text-[var(--danger)]">Delete</button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---- Integrations (Bots) ---- */
+
+function IntegrationsTab({ serverId }: { serverId: string }) {
+  const [bots, setBots] = useState<Bot[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [newUsername, setNewUsername] = useState('');
+  const [newDescription, setNewDescription] = useState('');
+  const [isCreating, setIsCreating] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  const [tokenModal, setTokenModal] = useState<{ token: string; botName: string } | null>(null);
+  const [tokenCopied, setTokenCopied] = useState(false);
+
+  useEffect(() => {
+    apiGetBots(serverId)
+      .then(setBots)
+      .catch(() => {})
+      .finally(() => setIsLoading(false));
+  }, [serverId]);
+
+  const handleCreate = async () => {
+    const username = newUsername.trim();
+    if (!username) return;
+    setIsCreating(true);
+    try {
+      const bot = await apiCreateBot(serverId, {
+        username,
+        description: newDescription.trim() || undefined,
+      });
+      setBots((prev) => [bot, ...prev]);
+      setNewUsername('');
+      setNewDescription('');
+      if (bot.token) {
+        setTokenModal({ token: bot.token, botName: bot.username });
+      }
+    } catch { /* handled */ } finally {
+      setIsCreating(false);
+    }
+  };
+
+  const handleDelete = async (botId: string) => {
+    try {
+      await apiDeleteBot(serverId, botId);
+      setBots((prev) => prev.filter((b) => b.id !== botId));
+    } catch { /* handled */ }
+    setDeleteConfirm(null);
+  };
+
+  const handleRegenerate = async (botId: string, botName: string) => {
+    try {
+      const { token } = await apiRegenerateBotToken(serverId, botId);
+      setTokenModal({ token, botName });
+    } catch { /* handled */ }
+  };
+
+  const copyToken = () => {
+    if (tokenModal) {
+      navigator.clipboard.writeText(tokenModal.token);
+      setTokenCopied(true);
+      setTimeout(() => setTokenCopied(false), 2000);
+    }
+  };
+
+  if (isLoading) return <Spinner />;
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-lg font-bold text-[var(--text-primary)]">Bot Integrations — {bots.length}</h2>
+      <p className="text-xs text-[var(--text-muted)]">
+        Bots can access the full API using a token. They appear as members and are subject to role permissions.
+      </p>
+
+      {/* Token reveal modal */}
+      {tokenModal && (
+        <div className="rounded-md border border-[var(--accent)]/30 bg-[var(--bg-secondary)] p-4">
+          <h3 className="mb-1 text-sm font-bold text-[var(--text-primary)]">Bot Token — {tokenModal.botName}</h3>
+          <p className="mb-2 text-xs text-[var(--danger)]">
+            This token will only be shown once. Copy it now and store it securely.
+          </p>
+          <div className="flex gap-2">
+            <code className="min-w-0 flex-1 rounded-[3px] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--text-primary)] select-all break-all">
+              {tokenModal.token}
+            </code>
+            <button onClick={copyToken}
+              className="shrink-0 rounded-[3px] bg-[var(--accent)] px-3 py-2 text-xs font-medium text-white hover:bg-[var(--accent-hover)]">
+              {tokenCopied ? 'Copied!' : 'Copy'}
+            </button>
+          </div>
+          <button onClick={() => { setTokenModal(null); setTokenCopied(false); }}
+            className="mt-2 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)]">Dismiss</button>
+        </div>
+      )}
+
+      {/* Create form */}
+      <div className="rounded-md border border-[var(--border)] bg-[var(--bg-secondary)] p-4">
+        <h3 className="mb-3 text-sm font-bold text-[var(--text-primary)]">Create Bot</h3>
+        <div className="space-y-2">
+          <input type="text" value={newUsername} onChange={(e) => setNewUsername(e.target.value)}
+            placeholder="Bot username"
+            className="w-full rounded-[3px] bg-[var(--bg-tertiary)] px-3 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] outline-none focus:ring-1 focus:ring-[var(--accent)]"
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleCreate(); } }} />
+          <input type="text" value={newDescription} onChange={(e) => setNewDescription(e.target.value)}
+            placeholder="Description (optional)"
+            className="w-full rounded-[3px] bg-[var(--bg-tertiary)] px-3 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] outline-none focus:ring-1 focus:ring-[var(--accent)]" />
+          <button onClick={handleCreate} disabled={isCreating || !newUsername.trim()}
+            className="rounded-[3px] bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--accent-hover)] disabled:opacity-50">
+            Create Bot
+          </button>
+        </div>
+      </div>
+
+      {bots.length === 0 ? (
+        <p className="py-8 text-sm text-[var(--text-muted)]">No bots yet.</p>
+      ) : (
+        <div className="space-y-1">
+          {bots.map((bot) => (
+            <div key={bot.id} className="flex items-center justify-between rounded bg-[var(--bg-secondary)] px-3 py-2">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-[var(--text-primary)]">{bot.username}</span>
+                  <span className="rounded bg-[var(--accent)]/20 px-1.5 py-0.5 text-[10px] font-bold text-[var(--accent)]">BOT</span>
+                </div>
+                {bot.description && <p className="text-xs text-[var(--text-muted)]">{bot.description}</p>}
+                <p className="text-xs text-[var(--text-muted)]">
+                  Token: ...{bot.tokenHint} &middot; {new Date(bot.createdAt).toLocaleDateString()}
+                </p>
+              </div>
+              <div className="flex gap-1">
+                <button onClick={() => handleRegenerate(bot.id, bot.username)}
+                  className="rounded px-2 py-1 text-xs text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)] hover:text-[var(--text-primary)]">
+                  Regenerate Token
+                </button>
+                {deleteConfirm === bot.id ? (
+                  <div className="flex gap-1">
+                    <button onClick={() => handleDelete(bot.id)}
+                      className="rounded px-2 py-1 text-xs font-medium text-[var(--danger)] hover:bg-[var(--danger)]/10">Confirm</button>
+                    <button onClick={() => setDeleteConfirm(null)}
+                      className="rounded px-2 py-1 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)]">Cancel</button>
+                  </div>
+                ) : (
+                  <button onClick={() => setDeleteConfirm(bot.id)}
+                    className="rounded px-2 py-1 text-xs text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)] hover:text-[var(--danger)]">Delete</button>
+                )}
               </div>
             </div>
           ))}
