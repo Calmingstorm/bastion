@@ -4,6 +4,7 @@ import type { Server, Channel } from '../../types';
 import { useServerStore } from '../../stores/serverStore';
 import { useUnreadStore } from '../../stores/unreadStore';
 import { useAuthStore } from '../../stores/authStore';
+import { resolveMediaUrl } from '../../platform';
 
 interface ServerIconProps {
   server: Server;
@@ -117,7 +118,7 @@ export function ServerIcon({ server, isSelected, onClick }: ServerIconProps) {
               >
                 {server.iconUrl ? (
                   <img
-                    src={server.iconUrl}
+                    src={resolveMediaUrl(server.iconUrl)}
                     alt={server.name}
                     className="h-12 w-12 rounded-xl object-cover"
                   />

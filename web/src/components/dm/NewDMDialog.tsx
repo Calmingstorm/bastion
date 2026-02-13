@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { apiSearchUsers, apiCreateDM } from '../../api/client';
 import { useDMStore } from '../../stores/dmStore';
+import { resolveMediaUrl } from '../../platform';
 import type { MessageAuthor } from '../../types';
 
 interface NewDMDialogProps {
@@ -134,7 +135,7 @@ export function NewDMDialog({ open, onOpenChange }: NewDMDialogProps) {
                       className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-[var(--bg-input)]"
                     >
                       {user.avatarUrl ? (
-                        <img src={user.avatarUrl} alt={name} className="h-6 w-6 rounded-full object-cover" />
+                        <img src={resolveMediaUrl(user.avatarUrl)} alt={name} className="h-6 w-6 rounded-full object-cover" />
                       ) : (
                         <div className="flex h-6 w-6 items-center justify-center rounded-full bg-[var(--accent)] text-xs font-semibold text-white">{initial}</div>
                       )}

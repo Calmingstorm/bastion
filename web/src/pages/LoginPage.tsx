@@ -2,12 +2,18 @@ import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { LoginForm } from '../components/auth/LoginForm';
 import { useAuthStore } from '../stores/authStore';
+import { isTauri, getPlatform } from '../platform';
 
 export function LoginPage() {
   const { isAuthenticated } = useAuthStore();
   const navigate = useNavigate();
 
   useEffect(() => {
+    // On desktop, redirect to setup if no server URL configured
+    if (isTauri() && !getPlatform().storage.getItem('serverUrl')) {
+      navigate('/setup', { replace: true });
+      return;
+    }
     if (isAuthenticated) {
       navigate('/app', { replace: true });
     }

@@ -285,7 +285,7 @@ export function MessageInput() {
           </svg>
           <span className="text-[var(--text-muted)]">Replying to</span>
           <span className="font-medium text-[var(--text-primary)]">
-            {replyingTo.author.displayName || replyingTo.author.username}
+            {replyingTo.author?.displayName || replyingTo.author?.username || 'Unknown'}
           </span>
           <span className="min-w-0 flex-1 truncate text-[var(--text-muted)]">
             {replyingTo.content.length > 80 ? replyingTo.content.slice(0, 80) + '...' : replyingTo.content}

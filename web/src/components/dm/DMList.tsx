@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useDMStore } from '../../stores/dmStore';
 import { useUnreadStore } from '../../stores/unreadStore';
+import { resolveMediaUrl } from '../../platform';
 import { PresenceDot } from '../user/PresenceDot';
 import { UserPanel } from '../user/UserPanel';
 import { NewDMDialog } from './NewDMDialog';
@@ -69,7 +70,7 @@ export function DMList() {
                   <div className="relative shrink-0">
                     {recipient?.avatarUrl ? (
                       <img
-                        src={recipient.avatarUrl}
+                        src={resolveMediaUrl(recipient.avatarUrl)}
                         alt={name}
                         className="h-8 w-8 rounded-full object-cover"
                       />

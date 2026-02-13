@@ -4,6 +4,7 @@ import { apiGetUser, apiCreateDM, apiKickMember, apiBanMember, apiTimeoutMember 
 import { useAuthStore } from '../../stores/authStore';
 import { useDMStore } from '../../stores/dmStore';
 import { useServerStore } from '../../stores/serverStore';
+import { resolveMediaUrl } from '../../platform';
 import { PresenceDot } from './PresenceDot';
 import type { User, RoleInfo } from '../../types';
 
@@ -42,7 +43,7 @@ export function UserProfileCard({ userId, roles, joinedAt, serverId, canModerate
   };
 
   const initial = user
-    ? (user.displayName || user.username).charAt(0).toUpperCase()
+    ? (user.displayName || user.username || '?').charAt(0).toUpperCase()
     : '?';
 
   const formatJoinDate = (dateStr: string) => {
@@ -67,7 +68,7 @@ export function UserProfileCard({ userId, roles, joinedAt, serverId, canModerate
             <div className="absolute -top-8">
               {user?.avatarUrl ? (
                 <img
-                  src={user.avatarUrl}
+                  src={resolveMediaUrl(user.avatarUrl)}
                   alt={user.displayName || user.username}
                   className="h-16 w-16 rounded-full border-4 border-[var(--bg-primary)] object-cover"
                 />

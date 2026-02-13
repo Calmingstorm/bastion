@@ -1,4 +1,5 @@
 import type { MemberWithUser } from '../../types';
+import { resolveMediaUrl } from '../../platform';
 
 interface MentionAutocompleteProps {
   members: MemberWithUser[];
@@ -46,10 +47,10 @@ export function MentionAutocomplete({ members, query, selectedIndex, onSelect }:
           {entry.isSpecial ? (
             <div className="flex h-6 w-6 items-center justify-center rounded-full bg-[var(--accent)] text-[10px] font-bold text-white">@</div>
           ) : entry.avatarUrl ? (
-            <img src={entry.avatarUrl} alt={entry.displayName} className="h-6 w-6 rounded-full object-cover" />
+            <img src={resolveMediaUrl(entry.avatarUrl)} alt={entry.displayName} className="h-6 w-6 rounded-full object-cover" />
           ) : (
             <div className="flex h-6 w-6 items-center justify-center rounded-full bg-[var(--accent)] text-[10px] font-bold text-white">
-              {entry.displayName.charAt(0).toUpperCase()}
+              {(entry.displayName || '?').charAt(0).toUpperCase()}
             </div>
           )}
           <div className="min-w-0 flex-1">

@@ -1,4 +1,5 @@
 import type { Attachment } from '../../types';
+import { resolveMediaUrl } from '../../platform';
 
 interface AttachmentPreviewProps {
   attachment: Attachment;
@@ -17,13 +18,13 @@ export function AttachmentPreview({ attachment }: AttachmentPreviewProps) {
   if (isImage) {
     return (
       <a
-        href={attachment.url}
+        href={resolveMediaUrl(attachment.url)}
         target="_blank"
         rel="noopener noreferrer"
         className="mt-1 block max-w-md"
       >
         <img
-          src={attachment.url}
+          src={resolveMediaUrl(attachment.url)}
           alt={attachment.filename}
           className="max-h-80 rounded-md object-contain"
           loading="lazy"
@@ -35,7 +36,7 @@ export function AttachmentPreview({ attachment }: AttachmentPreviewProps) {
   if (isVideo) {
     return (
       <video
-        src={attachment.url}
+        src={resolveMediaUrl(attachment.url)}
         controls
         className="mt-1 max-h-80 max-w-md rounded-md"
       />
@@ -45,7 +46,7 @@ export function AttachmentPreview({ attachment }: AttachmentPreviewProps) {
   // Generic file download card
   return (
     <a
-      href={attachment.url}
+      href={resolveMediaUrl(attachment.url)}
       target="_blank"
       rel="noopener noreferrer"
       className="mt-1 flex w-fit items-center gap-3 rounded-md border border-[var(--border)] bg-[var(--bg-secondary)] p-3 transition-colors hover:bg-[var(--bg-input)]"

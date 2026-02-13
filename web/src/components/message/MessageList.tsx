@@ -97,8 +97,8 @@ export function MessageList({ onToggleMembers, onToggleSidebar }: MessageListPro
   const usernameMap = useMemo(() => {
     const map: Record<string, string> = {};
     channelMessages.forEach((msg) => {
-      if (!map[msg.author.id]) {
-        map[msg.author.id] = msg.author.displayName || msg.author.username;
+      if (msg.author && !map[msg.author.id]) {
+        map[msg.author.id] = msg.author.displayName || msg.author.username || 'Unknown';
       }
     });
     return map;

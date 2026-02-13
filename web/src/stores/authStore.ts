@@ -100,32 +100,48 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const refreshToken = storage.getItem('refreshToken');
     const userStr = storage.getItem('user');
 
-    if (accessToken && refreshToken) {
-      let user: User | null = null;
-      if (userStr) {
-        try {
-          user = JSON.parse(userStr) as User;
-        } catch {
-          // Invalid JSON, will fetch from API
-        }
-      }
+    // Reject obviously invalid tokens (e.g. literal "undefined", empty, HTML pages)
+    const isValidToken = (t: string | null): boolean => {
+      if (!t || t.length < 10) return false;
+      if (t === 'undefined' || t === 'null') return false;
+      if (t.startsWith('<') || t.startsWith('{')) return false;
+      return true;
+    };
 
-      set({
-        accessToken,
-        refreshToken,
-        user,
-        isAuthenticated: true,
-      });
+    if (!isValidToken(accessToken) || !isValidToken(refreshToken)) {
+      // Corrupted tokens — clear and bail
+      clearTokens();
+      return;
+    }
 
-      // Validate token by fetching current user
+    let user: User | null = null;
+    if (userStr) {
       try {
-        const freshUser = await apiGetMe();
-        storage.setItem('user', JSON.stringify(freshUser));
-        set({ user: freshUser });
+        const parsed = JSON.parse(userStr);
+        // Validate the parsed user has required fields
+        if (parsed && typeof parsed === 'object' && parsed.id && parsed.username) {
+          user = parsed as User;
+        }
       } catch {
-        // Token is invalid, clear everything
-        get().logout();
+        // Invalid JSON, will fetch from API
       }
+    }
+
+    set({
+      accessToken,
+      refreshToken,
+      user,
+      isAuthenticated: true,
+    });
+
+    // Validate token by fetching current user
+    try {
+      const freshUser = await apiGetMe();
+      storage.setItem('user', JSON.stringify(freshUser));
+      set({ user: freshUser });
+    } catch {
+      // Token is invalid, clear everything
+      get().logout();
     }
   },
 

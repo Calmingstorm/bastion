@@ -20,7 +20,8 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
 
   fetchReadStates: async () => {
     try {
-      const states = await apiGetReadStates();
+      const rawStates = await apiGetReadStates();
+      const states = Array.isArray(rawStates) ? rawStates : [];
       const map: Record<string, ReadState> = {};
       states.forEach((rs) => {
         map[rs.channelId] = rs;

@@ -12,6 +12,11 @@ export default defineConfig({
     alias: {
       // All source imports resolve to the shared web/src directory
       '@': path.resolve(__dirname, '../web/src'),
+      // Tauri packages are in desktop/node_modules, but source files live in web/src/
+      '@tauri-apps/plugin-store': path.resolve(__dirname, 'node_modules/@tauri-apps/plugin-store'),
+      '@tauri-apps/plugin-notification': path.resolve(__dirname, 'node_modules/@tauri-apps/plugin-notification'),
+      '@tauri-apps/plugin-shell': path.resolve(__dirname, 'node_modules/@tauri-apps/plugin-shell'),
+      '@tauri-apps/api': path.resolve(__dirname, 'node_modules/@tauri-apps/api'),
     },
   },
 

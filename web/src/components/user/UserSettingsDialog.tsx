@@ -4,6 +4,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { apiUpdateProfile, apiUploadAvatar, apiChangePassword, apiChangeEmail, apiDeleteAccount, clearTokens } from '../../api/client';
 import { useLayoutStore } from '../../stores/layoutStore';
 import { useThemeStore } from '../../stores/themeStore';
+import { resolveMediaUrl } from '../../platform';
 import { storage } from '../../utils/storage';
 
 interface UserSettingsDialogProps {
@@ -108,7 +109,7 @@ function ProfileTab({ onClose }: { onClose: () => void }) {
   };
 
   if (!user) return null;
-  const initial = (user.displayName || user.username).charAt(0).toUpperCase();
+  const initial = (user.displayName || user.username || '?').charAt(0).toUpperCase();
 
   return (
     <form onSubmit={handleSubmit} className="max-w-lg space-y-4">
@@ -118,7 +119,7 @@ function ProfileTab({ onClose }: { onClose: () => void }) {
       <div className="flex items-center gap-4">
         <label className="group relative cursor-pointer">
           {avatarPreview || user.avatarUrl ? (
-            <img src={avatarPreview || user.avatarUrl!} alt="Avatar" className="h-16 w-16 rounded-full object-cover" />
+            <img src={avatarPreview || resolveMediaUrl(user.avatarUrl)!} alt="Avatar" className="h-16 w-16 rounded-full object-cover" />
           ) : (
             <div className="flex h-16 w-16 items-center justify-center rounded-full bg-[var(--accent)] text-xl font-bold text-white">{initial}</div>
           )}

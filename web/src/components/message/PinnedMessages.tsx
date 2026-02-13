@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { apiGetPinnedMessages, apiUnpinMessage } from '../../api/client';
+import { resolveMediaUrl } from '../../platform';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import type { PinnedMessage } from '../../types';
 import { eventBus } from '../../utils/eventBus';
@@ -78,7 +79,7 @@ export function PinnedMessages({ open, onOpenChange, channelId }: PinnedMessages
                     <div key={pin.id} className="rounded-md border border-[var(--border)] bg-[var(--bg-secondary)] p-3">
                       <div className="flex items-center gap-2">
                         {pin.author?.avatarUrl ? (
-                          <img src={pin.author.avatarUrl} alt={displayName} className="h-6 w-6 rounded-full object-cover" />
+                          <img src={resolveMediaUrl(pin.author.avatarUrl)} alt={displayName} className="h-6 w-6 rounded-full object-cover" />
                         ) : (
                           <div className="flex h-6 w-6 items-center justify-center rounded-full bg-[var(--accent)] text-xs font-semibold text-white">{initial}</div>
                         )}

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useAuthStore } from '../../stores/authStore';
 import { useThemeStore } from '../../stores/themeStore';
 import { usePresenceStore } from '../../stores/presenceStore';
+import { resolveMediaUrl } from '../../platform';
 import { UserSettingsDialog } from './UserSettingsDialog';
 
 export function UserPanel() {
@@ -14,14 +15,14 @@ export function UserPanel() {
 
   if (!user) return null;
 
-  const initial = (user.displayName || user.username).charAt(0).toUpperCase();
+  const initial = (user.displayName || user.username || '?').charAt(0).toUpperCase();
 
   return (
     <>
       <div className="flex items-center gap-2 border-t border-[var(--border)] bg-[var(--bg-tertiary)]/50 px-2 py-2">
         <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--accent)] text-xs font-semibold text-white">
           {user.avatarUrl ? (
-            <img src={user.avatarUrl} alt={user.username} className="h-8 w-8 rounded-full object-cover" />
+            <img src={resolveMediaUrl(user.avatarUrl)} alt={user.username} className="h-8 w-8 rounded-full object-cover" />
           ) : (
             initial
           )}

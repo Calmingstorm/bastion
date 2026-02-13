@@ -1,14 +1,16 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { getPlatform } from '../platform';
 import { setApiBaseURL } from '../api/client';
 import { setWSServerUrl } from '../api/websocket';
 
-export function ServerSetupPage() {
+interface ServerSetupPageProps {
+  onComplete?: () => void;
+}
+
+export function ServerSetupPage({ onComplete }: ServerSetupPageProps) {
   const [url, setUrl] = useState('');
   const [error, setError] = useState('');
   const [testing, setTesting] = useState(false);
-  const navigate = useNavigate();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -29,10 +31,12 @@ export function ServerSetupPage() {
 
     setTesting(true);
     try {
-      const res = await fetch(`${trimmed}/health`, {
+      // Use no-cors to avoid CORS blocking from the Tauri webview origin.
+      // We only need to verify the server is reachable, not read the response.
+      await fetch(`${trimmed}/api/v1/health`, {
+        mode: 'no-cors',
         signal: AbortSignal.timeout(5000),
       });
-      if (!res.ok) throw new Error(`Server returned ${res.status}`);
     } catch {
       setError('Could not reach the server. Check the URL and try again.');
       setTesting(false);
@@ -44,7 +48,13 @@ export function ServerSetupPage() {
     setApiBaseURL(trimmed);
     setWSServerUrl(trimmed);
     setTesting(false);
-    navigate('/login', { replace: true });
+
+    if (onComplete) {
+      onComplete();
+    } else {
+      // Full reload to re-run all initialization with the new URL
+      window.location.reload();
+    }
   };
 
   return (

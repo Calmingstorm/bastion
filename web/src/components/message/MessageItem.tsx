@@ -11,6 +11,7 @@ import { UserProfileCard } from '../user/UserProfileCard';
 import { useMessageStore } from '../../stores/messageStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
+import { resolveMediaUrl } from '../../platform';
 import { apiPinMessage } from '../../api/client';
 
 interface MessageItemProps {
@@ -82,9 +83,9 @@ function formatFullTimestamp(dateStr: string): string {
 
 export function MessageItem({ message, isCompact }: MessageItemProps) {
   const { author, content, createdAt, editedAt, attachments } = message;
-  const displayName = author.displayName || author.username;
+  const displayName = author?.displayName || author?.username || 'Unknown';
   const initial = displayName.charAt(0).toUpperCase();
-  const avatarColor = getAvatarColor(author.id);
+  const avatarColor = getAvatarColor(author?.id || '0');
   const selectedServerId = useServerStore((s) => s.selectedServerId);
   const servers = useServerStore((s) => s.servers);
   const server = servers.find((s) => s.id === selectedServerId);
@@ -197,7 +198,7 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
               <path d="M20 18v-2a4 4 0 00-4-4H4" />
             </svg>
             <span className="font-medium text-[var(--text-secondary)]">
-              {message.replyTo.author.displayName || message.replyTo.author.username}
+              {message.replyTo.author?.displayName || message.replyTo.author?.username || 'Unknown'}
             </span>
             <span className="truncate max-w-xs">{message.replyTo.content}</span>
           </div>
@@ -253,12 +254,12 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
       <div className="group relative flex gap-4 py-1 pr-12 pl-4 mt-4 hover:bg-[var(--bg-secondary)]/30">
         <MessageActions message={message} onEdit={handleEdit} onDelete={() => setShowDeleteDialog(true)} onReply={handleReply} />
         {/* Avatar */}
-        <UserContextMenu userId={author.id} username={author.username} serverId={selectedServerId || undefined} isOwner={server?.ownerId === author.id} canModerate={canModerate}>
-          <UserProfileCard userId={author.id} serverId={selectedServerId || undefined} canModerate={canModerate} isOwner={server?.ownerId === author.id}>
+        <UserContextMenu userId={author?.id || ''} username={author?.username || 'Unknown'} serverId={selectedServerId || undefined} isOwner={server?.ownerId === author?.id} canModerate={canModerate}>
+          <UserProfileCard userId={author?.id || ''} serverId={selectedServerId || undefined} canModerate={canModerate} isOwner={server?.ownerId === author?.id}>
             <div className="cursor-pointer">
-              {author.avatarUrl ? (
+              {author?.avatarUrl ? (
                 <img
-                  src={author.avatarUrl}
+                  src={resolveMediaUrl(author?.avatarUrl)}
                   alt={displayName}
                   className="mt-0.5 h-10 w-10 shrink-0 rounded-full object-cover"
                 />
@@ -277,7 +278,7 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
         {/* Content */}
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline gap-2">
-            <UserProfileCard userId={author.id} serverId={selectedServerId || undefined} canModerate={canModerate} isOwner={server?.ownerId === author.id}>
+            <UserProfileCard userId={author?.id || ''} serverId={selectedServerId || undefined} canModerate={canModerate} isOwner={server?.ownerId === author?.id}>
               <span className="font-medium text-[var(--text-primary)] hover:underline cursor-pointer">
                 {displayName}
               </span>

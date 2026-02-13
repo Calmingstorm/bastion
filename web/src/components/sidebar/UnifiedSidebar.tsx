@@ -3,6 +3,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { useDMStore } from '../../stores/dmStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useUnreadStore } from '../../stores/unreadStore';
+import { resolveMediaUrl } from '../../platform';
 import { ChannelItem } from '../channel/ChannelItem';
 import { PresenceDot } from '../user/PresenceDot';
 import { UserPanel } from '../user/UserPanel';
@@ -30,16 +31,19 @@ function getColorForId(id: string): string {
 }
 
 export function UnifiedSidebar() {
-  const servers = useServerStore((s) => s.servers);
+  const rawServers = useServerStore((s) => s.servers);
+  const servers = Array.isArray(rawServers) ? rawServers : [];
   const selectedServerId = useServerStore((s) => s.selectedServerId);
-  const channels = useServerStore((s) => s.channels);
+  const rawChannels = useServerStore((s) => s.channels);
+  const channels = Array.isArray(rawChannels) ? rawChannels : [];
   const selectedChannelId = useServerStore((s) => s.selectedChannelId);
   const selectServer = useServerStore((s) => s.selectServer);
   const selectChannel = useServerStore((s) => s.selectChannel);
   const isLoadingChannels = useServerStore((s) => s.isLoadingChannels);
   const user = useAuthStore((s) => s.user);
 
-  const dmChannels = useDMStore((s) => s.dmChannels);
+  const rawDMs = useDMStore((s) => s.dmChannels);
+  const dmChannels = Array.isArray(rawDMs) ? rawDMs : [];
   const selectedDMId = useDMStore((s) => s.selectedDMId);
   const selectDM = useDMStore((s) => s.selectDM);
   const closeDM = useDMStore((s) => s.closeDM);
@@ -71,7 +75,8 @@ export function UnifiedSidebar() {
   useEffect(() => {
     if (!expandedServerId) return;
     apiGetCategories(expandedServerId).then((cats) => {
-      setCategories(cats.sort((a, b) => a.position - b.position));
+      const safeCats = Array.isArray(cats) ? cats : [];
+      setCategories(safeCats.sort((a, b) => a.position - b.position));
     }).catch(() => {});
   }, [expandedServerId]);
 
@@ -177,7 +182,7 @@ export function UnifiedSidebar() {
                         <div className="relative shrink-0">
                           {recipient?.avatarUrl ? (
                             <img
-                              src={recipient.avatarUrl}
+                              src={resolveMediaUrl(recipient.avatarUrl)}
                               alt={name}
                               className="h-7 w-7 rounded-full object-cover"
                             />
@@ -281,7 +286,7 @@ export function UnifiedSidebar() {
                   </svg>
                   {server.iconUrl ? (
                     <img
-                      src={server.iconUrl}
+                      src={resolveMediaUrl(server.iconUrl)}
                       alt={server.name}
                       className="h-5 w-5 shrink-0 rounded-md object-cover"
                     />

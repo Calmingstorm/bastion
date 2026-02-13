@@ -225,7 +225,7 @@ export async function apiGetUser(userId: string): Promise<User> {
 
 export async function apiGetServers(): Promise<Server[]> {
   const response = await apiClient.get<Server[]>('/servers');
-  return response.data;
+  return Array.isArray(response.data) ? response.data : [];
 }
 
 export async function apiCreateServer(name: string): Promise<Server> {
@@ -244,7 +244,7 @@ export async function apiGetChannels(serverId: string): Promise<Channel[]> {
   const response = await apiClient.get<Channel[]>(
     `/servers/${serverId}/channels`
   );
-  return response.data;
+  return Array.isArray(response.data) ? response.data : [];
 }
 
 export async function apiCreateChannel(
@@ -293,7 +293,7 @@ export async function apiGetMessages(
     `/channels/${channelId}/messages`,
     { params }
   );
-  return response.data;
+  return Array.isArray(response.data) ? response.data : [];
 }
 
 export async function apiSendMessage(
@@ -383,7 +383,7 @@ export async function apiCreateDM(recipientIds: string[]): Promise<DMChannel> {
 
 export async function apiGetDMs(): Promise<DMChannel[]> {
   const response = await apiClient.get<DMChannel[]>('/dm');
-  return response.data;
+  return Array.isArray(response.data) ? response.data : [];
 }
 
 export async function apiCloseDM(channelId: string): Promise<void> {
@@ -406,7 +406,7 @@ export async function apiAckChannel(
 
 export async function apiGetReadStates(): Promise<ReadState[]> {
   const response = await apiClient.get<ReadState[]>('/users/me/read-states');
-  return response.data;
+  return Array.isArray(response.data) ? response.data : [];
 }
 
 // ---- Members API ----

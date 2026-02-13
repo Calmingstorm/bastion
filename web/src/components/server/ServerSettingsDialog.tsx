@@ -23,6 +23,7 @@ import {
   apiDeleteServer,
 } from '../../api/client';
 import { useServerStore } from '../../stores/serverStore';
+import { resolveMediaUrl } from '../../platform';
 import type { Role, ServerBan, AuditLogEntry, MemberWithUser, Channel } from '../../types';
 
 // Permission bitfield constants — must match server/internal/permissions/permissions.go
@@ -147,7 +148,7 @@ function OverviewTab({ serverId }: { serverId: string }) {
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
-  const currentIcon = iconPreview || server?.iconUrl;
+  const currentIcon = iconPreview || resolveMediaUrl(server?.iconUrl);
   const serverInitial = (server?.name || '?').charAt(0).toUpperCase();
 
   const handleIconChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -672,7 +673,7 @@ function MembersTab({ serverId }: { serverId: string }) {
             <div key={member.userId} className="flex items-center justify-between rounded px-3 py-2 transition-colors hover:bg-[var(--bg-secondary)]">
               <div className="flex items-center gap-3">
                 {member.avatarUrl ? (
-                  <img src={member.avatarUrl} alt={displayName} className="h-8 w-8 rounded-full object-cover" />
+                  <img src={resolveMediaUrl(member.avatarUrl)} alt={displayName} className="h-8 w-8 rounded-full object-cover" />
                 ) : (
                   <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--accent)] text-xs font-semibold text-white">{initial}</div>
                 )}

@@ -45,7 +45,8 @@ export const useServerStore = create<ServerState>((set, get) => ({
   fetchServers: async () => {
     set({ isLoadingServers: true, error: null });
     try {
-      const servers = await apiGetServers();
+      const rawServers = await apiGetServers();
+      const servers = Array.isArray(rawServers) ? rawServers : [];
 
       // If no server is selected and we have servers, merge server list +
       // initial selection into a single state update to avoid cascading renders.
@@ -62,8 +63,8 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
         // Fetch channels for the auto-selected server
         try {
-          const channels = await apiGetChannels(servers[0].id);
-          const sorted = channels.sort((a, b) => a.position - b.position);
+          const rawChannels = await apiGetChannels(servers[0].id);
+          const sorted = (Array.isArray(rawChannels) ? rawChannels : []).sort((a, b) => a.position - b.position);
           set({
             channels: sorted,
             isLoadingChannels: false,
@@ -90,8 +91,8 @@ export const useServerStore = create<ServerState>((set, get) => ({
       error: null,
     });
     try {
-      const channels = await apiGetChannels(id);
-      const sorted = channels.sort((a, b) => a.position - b.position);
+      const rawChannels = await apiGetChannels(id);
+      const sorted = (Array.isArray(rawChannels) ? rawChannels : []).sort((a, b) => a.position - b.position);
       // Merge channels + auto-select into a single state update
       set({
         channels: sorted,

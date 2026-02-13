@@ -4,6 +4,7 @@ import { usePresenceStore } from '../../stores/presenceStore';
 import { useAuthStore } from '../../stores/authStore';
 import { apiGetMembers } from '../../api/client';
 import { eventBus } from '../../utils/eventBus';
+import { resolveMediaUrl } from '../../platform';
 import { UserProfileCard } from '../user/UserProfileCard';
 import { UserContextMenu } from '../user/UserContextMenu';
 import { PresenceDot } from '../user/PresenceDot';
@@ -212,7 +213,7 @@ function MemberItem({ member, serverId, canModerate, isOwner }: {
           <div className="relative shrink-0">
             {member.avatarUrl ? (
               <img
-                src={member.avatarUrl}
+                src={resolveMediaUrl(member.avatarUrl)}
                 alt={displayName}
                 className="h-8 w-8 rounded-full object-cover"
               />

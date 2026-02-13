@@ -46,7 +46,8 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     }));
 
     try {
-      const fetched = await apiGetMessages(channelId, before, MESSAGE_LIMIT);
+      const rawFetched = await apiGetMessages(channelId, before, MESSAGE_LIMIT);
+      const fetched = Array.isArray(rawFetched) ? rawFetched : [];
       // API returns messages in DESC order (newest first); reverse to ASC (oldest first)
       fetched.reverse();
 

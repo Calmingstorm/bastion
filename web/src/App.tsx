@@ -2,7 +2,7 @@ import { useEffect, useState, Component } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { BrowserRouter, HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from './stores/authStore';
-import { isTauri, getPlatform } from './platform';
+import { isTauri, isDesktopReady, getPlatform } from './platform';
 import { LoginPage } from './pages/LoginPage';
 import { RegisterPage } from './pages/RegisterPage';
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
@@ -74,11 +74,39 @@ export default function App() {
     );
   }
 
-  const Router = isTauri() ? HashRouter : BrowserRouter;
+  // Desktop: if platform init failed, show error
+  if (isTauri() && !isDesktopReady()) {
+    return (
+      <div className="flex h-screen w-screen items-center justify-center bg-[var(--bg-tertiary)]">
+        <div className="max-w-md rounded-lg bg-[var(--bg-secondary)] p-6 text-center">
+          <h2 className="mb-2 text-lg font-bold text-[var(--danger)]">
+            Platform Error
+          </h2>
+          <p className="mb-4 text-sm text-[var(--text-muted)]">
+            Failed to initialize the desktop platform. Check the console for details.
+          </p>
+          <button
+            onClick={() => window.location.reload()}
+            className="rounded bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--accent-hover)]"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
 
-  // On desktop, redirect to setup if no server URL is configured
-  const needsSetup = isTauri() && !getPlatform().storage.getItem('serverUrl');
-  const defaultRoute = needsSetup ? '/setup' : '/app';
+  // Desktop hard gate: if no server URL configured, show setup page
+  // OUTSIDE the router — no routing can bypass this
+  if (isTauri() && !getPlatform().storage.getItem('serverUrl')) {
+    return (
+      <ErrorBoundary>
+        <ServerSetupPage />
+      </ErrorBoundary>
+    );
+  }
+
+  const Router = isTauri() ? HashRouter : BrowserRouter;
 
   return (
     <ErrorBoundary>
@@ -91,7 +119,7 @@ export default function App() {
           <Route path="/reset-password" element={<ResetPasswordPage />} />
           <Route path="/invite/:code" element={<InvitePage />} />
           <Route path="/app" element={<AppPage />} />
-          <Route path="*" element={<Navigate to={defaultRoute} replace />} />
+          <Route path="*" element={<Navigate to="/app" replace />} />
         </Routes>
       </Router>
     </ErrorBoundary>

@@ -2,12 +2,17 @@ import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { RegisterForm } from '../components/auth/RegisterForm';
 import { useAuthStore } from '../stores/authStore';
+import { isTauri, getPlatform } from '../platform';
 
 export function RegisterPage() {
   const { isAuthenticated } = useAuthStore();
   const navigate = useNavigate();
 
   useEffect(() => {
+    if (isTauri() && !getPlatform().storage.getItem('serverUrl')) {
+      navigate('/setup', { replace: true });
+      return;
+    }
     if (isAuthenticated) {
       navigate('/app', { replace: true });
     }
