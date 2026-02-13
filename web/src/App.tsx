@@ -1,7 +1,8 @@
 import { useEffect, useState, Component } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from './stores/authStore';
+import { isTauri } from './platform';
 import { LoginPage } from './pages/LoginPage';
 import { RegisterPage } from './pages/RegisterPage';
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
@@ -72,9 +73,11 @@ export default function App() {
     );
   }
 
+  const Router = isTauri() ? HashRouter : BrowserRouter;
+
   return (
     <ErrorBoundary>
-      <BrowserRouter>
+      <Router>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
@@ -84,7 +87,7 @@ export default function App() {
           <Route path="/app" element={<AppPage />} />
           <Route path="*" element={<Navigate to="/app" replace />} />
         </Routes>
-      </BrowserRouter>
+      </Router>
     </ErrorBoundary>
   );
 }

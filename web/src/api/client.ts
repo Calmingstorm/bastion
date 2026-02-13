@@ -20,8 +20,16 @@ import type {
   PinnedMessage,
 } from '../types';
 
+// Configurable base URL — desktop sets this from stored server URL
+let apiBaseURL = (import.meta.env.VITE_API_URL || '') + '/api/v1';
+
+export function setApiBaseURL(url: string): void {
+  apiBaseURL = url.replace(/\/+$/, '') + '/api/v1';
+  apiClient.defaults.baseURL = apiBaseURL;
+}
+
 const apiClient = axios.create({
-  baseURL: (import.meta.env.VITE_API_URL || '') + '/api/v1',
+  baseURL: apiBaseURL,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -121,7 +129,7 @@ apiClient.interceptors.response.use(
 
       try {
         const response = await axios.post<{ accessToken: string }>(
-          `${import.meta.env.VITE_API_URL || ''}/api/v1/auth/refresh`,
+          `${apiBaseURL}/auth/refresh`,
           { refreshToken }
         );
         const { accessToken } = response.data;

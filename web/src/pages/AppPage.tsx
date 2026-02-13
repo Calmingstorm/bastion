@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { isTauri } from '../platform';
 import { useAuthStore } from '../stores/authStore';
 import { useServerStore } from '../stores/serverStore';
 import { useWSStore } from '../stores/wsStore';
@@ -49,8 +50,10 @@ export function AppPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthenticated, accessToken]);
 
-  // Handle logout from anywhere (e.g., token expiration)
+  // Handle logout from other browser tabs (not needed on desktop — single instance)
   useEffect(() => {
+    if (isTauri()) return;
+
     const handleStorageChange = (e: StorageEvent) => {
       if (e.key === 'accessToken' && !e.newValue) {
         logout();

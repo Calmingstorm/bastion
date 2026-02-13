@@ -1,23 +1,13 @@
 import { useEffect, useCallback } from 'react';
+import { getPlatform } from '../platform';
 
 export function useNotifications() {
   useEffect(() => {
-    if ('Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission();
-    }
+    getPlatform().requestNotificationPermission();
   }, []);
 
   const notify = useCallback((title: string, body?: string) => {
-    if (
-      'Notification' in window &&
-      Notification.permission === 'granted' &&
-      document.hidden
-    ) {
-      new Notification(title, {
-        body,
-        icon: '/favicon.ico',
-      });
-    }
+    getPlatform().showNotification(title, body || '');
   }, []);
 
   return { notify };

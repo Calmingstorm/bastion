@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { apiCreateInvite, apiGetInvites, apiDeleteInvite } from '../../api/client';
+import { getPlatform } from '../../platform';
 import type { ServerInvite } from '../../types';
 
 interface InviteDialogProps {
@@ -42,7 +43,8 @@ export function InviteDialog({ open, onOpenChange, serverId }: InviteDialogProps
   };
 
   const handleCopy = (code: string) => {
-    const link = `${window.location.origin}/invite/${code}`;
+    const origin = getPlatform().getOrigin();
+    const link = `${origin}/invite/${code}`;
     navigator.clipboard.writeText(link);
     setCopied(code);
     setTimeout(() => setCopied(null), 2000);

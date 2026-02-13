@@ -3,6 +3,26 @@ import { storage } from '../utils/storage';
 
 type EventHandler = (data: unknown) => void;
 
+// Configurable server URL for desktop — set before connecting
+let serverUrlOverride: string | null = null;
+
+export function setWSServerUrl(url: string): void {
+  serverUrlOverride = url;
+}
+
+function buildWSUrl(token: string): string {
+  if (serverUrlOverride) {
+    const parsed = new URL(serverUrlOverride);
+    const protocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${protocol}//${parsed.host}/api/v1/ws?token=${encodeURIComponent(token)}`;
+  }
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const host = import.meta.env.VITE_API_URL
+    ? new URL(import.meta.env.VITE_API_URL).host
+    : window.location.host;
+  return `${protocol}//${host}/api/v1/ws?token=${encodeURIComponent(token)}`;
+}
+
 export class WebSocketClient {
   private ws: WebSocket | null = null;
   private url: string = '';
@@ -19,13 +39,7 @@ export class WebSocketClient {
   connect(token: string): void {
     this.token = token;
     this.intentionalClose = false;
-
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = import.meta.env.VITE_API_URL
-      ? new URL(import.meta.env.VITE_API_URL).host
-      : window.location.host;
-    this.url = `${protocol}//${host}/api/v1/ws?token=${encodeURIComponent(token)}`;
-
+    this.url = buildWSUrl(token);
     this.doConnect();
   }
 
@@ -105,12 +119,7 @@ export class WebSocketClient {
       // Read fresh token from storage in case it was refreshed during disconnect
       const freshToken = storage.getItem('accessToken');
       if (freshToken) this.token = freshToken;
-      // Rebuild URL with fresh token
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const host = import.meta.env.VITE_API_URL
-        ? new URL(import.meta.env.VITE_API_URL).host
-        : window.location.host;
-      this.url = `${protocol}//${host}/api/v1/ws?token=${encodeURIComponent(this.token)}`;
+      this.url = buildWSUrl(this.token);
       this.doConnect();
     }, delay);
   }
