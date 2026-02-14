@@ -58,24 +58,37 @@ jobs:
         run: npx tauri android init
         working-directory: android
 
-      - name: Build APK
-        run: npx tauri android build --apk
+      - name: Dump generated Android project structure
+        run: |
+          echo "=== Generated files ==="
+          find android/src-tauri/gen/android -name "*.kt" -o -name "*.xml" -o -name "*.gradle*" | sort
+          echo "=== AndroidManifest.xml ==="
+          cat android/src-tauri/gen/android/app/src/main/AndroidManifest.xml || true
+          echo "=== MainActivity.kt ==="
+          cat android/src-tauri/gen/android/app/src/main/java/org/bastions/app/MainActivity.kt || true
+          echo "=== WryActivity.kt ==="
+          cat android/src-tauri/gen/android/app/src/main/java/org/bastions/app/generated/WryActivity.kt || true
+          echo "=== RustWebView.kt ==="
+          cat android/src-tauri/gen/android/app/src/main/java/org/bastions/app/generated/RustWebView.kt || true
+          echo "=== Vite dist contents ==="
+          ls -la android/dist/ || true
+          cat android/dist/index.html || true
+        working-directory: .
+
+      - name: Build debug APK
+        run: npx tauri android build --apk --debug
         working-directory: android
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
 
-      - name: Sign APK
+      - name: Find and rename debug APK
+        id: find_apk
         run: |
-          keytool -genkeypair -v -keystore release.keystore -alias bastion \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass bastion123 -keypass bastion123 \
-            -dname "CN=Bastion, O=Bastion, L=Unknown, ST=Unknown, C=US"
-          APK_IN=android/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk
-          APK_OUT=android/src-tauri/gen/android/app/build/outputs/apk/universal/release/Bastion-v0.1.0-universal.apk
-          $ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools/ | tail -1)/apksigner sign \
-            --ks release.keystore --ks-key-alias bastion \
-            --ks-pass pass:bastion123 --key-pass pass:bastion123 \
-            --out "$APK_OUT" "$APK_IN"
+          APK=$(find android/src-tauri/gen/android -name "*.apk" -path "*/debug/*" | head -1)
+          echo "Found APK: $APK"
+          APK_DIR=$(dirname "$APK")
+          cp "$APK" "$APK_DIR/Bastion-debug.apk"
+          echo "apk_path=$APK_DIR/Bastion-debug.apk" >> $GITHUB_OUTPUT
 
       - name: Upload APK to release
         uses: softprops/action-gh-release@v2
@@ -83,8 +96,8 @@ jobs:
           draft: true
           tag_name: ${{ github.ref_name }}
           name: "Bastion Android ${{ github.ref_name }}"
-          body: "Android client release."
+          body: "Android client debug build."
           files: |
-            android/src-tauri/gen/android/app/build/outputs/apk/universal/release/Bastion-v0.1.0-universal.apk
+            ${{ steps.find_apk.outputs.apk_path }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
