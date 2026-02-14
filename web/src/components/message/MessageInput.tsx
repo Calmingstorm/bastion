@@ -45,6 +45,7 @@ export function MessageInput() {
   const [slashQuery, setSlashQuery] = useState('');
   const [slashIndex, setSlashIndex] = useState(0);
   const [pendingCommand, setPendingCommand] = useState<ApplicationCommand | null>(null);
+  const [commandError, setCommandError] = useState<string | null>(null);
 
   const activeChannelId = selectedChannelId || selectedDMId;
   const selectedChannel = channels.find((c) => c.id === selectedChannelId);
@@ -190,6 +191,7 @@ export function MessageInput() {
   const executeSlashCommand = async (cmd: ApplicationCommand) => {
     if (!activeChannelId || !selectedServerId) return;
     setIsSending(true);
+    setCommandError(null);
     try {
       await apiExecuteInteraction(selectedServerId, {
         commandId: cmd.id,
@@ -200,8 +202,12 @@ export function MessageInput() {
       if (textareaRef.current) {
         textareaRef.current.style.height = 'auto';
       }
-    } catch {
-      // On failure, leave the command in the input so user can retry
+    } catch (err: unknown) {
+      // Show error to user — leave command in input for retry
+      const axiosErr = err as { response?: { data?: { message?: string } }; message?: string };
+      const msg = axiosErr?.response?.data?.message || axiosErr?.message || 'Command failed';
+      setCommandError(msg);
+      setTimeout(() => setCommandError(null), 5000);
     } finally {
       setIsSending(false);
     }
@@ -455,6 +461,19 @@ export function MessageInput() {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* Command error message */}
+      {commandError && (
+        <div className="mb-1 flex items-center gap-2 rounded bg-[var(--danger)]/10 px-3 py-1.5 text-sm text-[var(--danger)]">
+          <span>{commandError}</span>
+          <button onClick={() => setCommandError(null)} className="ml-auto text-[var(--danger)] hover:opacity-80">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
         </div>
       )}
 

@@ -527,11 +527,29 @@ func (h *InteractionHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		TargetID: targetID,
 	}
 
+	// Check if the bot has an active WebSocket connection
+	if !h.hub.IsUserOnline(botUserID) {
+		// Clean up the token we just created — bot can't receive it
+		h.db.Exec(r.Context(), `DELETE FROM interaction_tokens WHERE id = $1`, interactionID)
+		log.Warn().
+			Str("botUserID", botUserID.String()).
+			Str("commandName", cmd.Name).
+			Msg("interaction target bot is not connected")
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse("BOT_OFFLINE", "the bot is not currently connected"))
+		return
+	}
+
 	// Send INTERACTION_CREATE to the bot's user
 	h.hub.BroadcastToUser(botUserID, realtime.Event{
 		Type: realtime.EventInteractionCreate,
 		Data: interaction,
 	})
+
+	log.Debug().
+		Str("botUserID", botUserID.String()).
+		Str("commandName", cmd.Name).
+		Str("invokerID", userID.String()).
+		Msg("dispatched INTERACTION_CREATE to bot")
 
 	w.WriteHeader(http.StatusNoContent)
 }

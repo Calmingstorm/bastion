@@ -196,21 +196,35 @@ func (h *Hub) UnsubscribeUser(userID, channelID uuid.UUID) {
 func (h *Hub) BroadcastToUser(userID uuid.UUID, event Event) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	if clients, ok := h.users[userID]; ok {
-		for client := range clients {
-			select {
-			case client.send <- event:
-			default:
-				client.dropCount++
-				log.Warn().
-					Str("userID", client.userID.String()).
-					Str("eventType", event.Type).
-					Int("dropCount", client.dropCount).
-					Msg("dropping event, client send buffer full")
-				if client.dropCount >= 10 {
-					client.conn.Close(websocket.StatusTryAgainLater, "too many dropped events")
-				}
+	clients, ok := h.users[userID]
+	if !ok || len(clients) == 0 {
+		log.Debug().
+			Str("userID", userID.String()).
+			Str("eventType", event.Type).
+			Msg("BroadcastToUser: no connected clients for user")
+		return
+	}
+	for client := range clients {
+		select {
+		case client.send <- event:
+		default:
+			client.dropCount++
+			log.Warn().
+				Str("userID", client.userID.String()).
+				Str("eventType", event.Type).
+				Int("dropCount", client.dropCount).
+				Msg("dropping event, client send buffer full")
+			if client.dropCount >= 10 {
+				client.conn.Close(websocket.StatusTryAgainLater, "too many dropped events")
 			}
 		}
 	}
+}
+
+// IsUserOnline returns true if the given user has at least one active WebSocket connection.
+func (h *Hub) IsUserOnline(userID uuid.UUID) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	clients, ok := h.users[userID]
+	return ok && len(clients) > 0
 }
