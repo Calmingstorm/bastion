@@ -342,6 +342,7 @@ export function MessageList({ onToggleMembers, onToggleSidebar }: MessageListPro
         ref={containerRef}
         onScroll={handleScroll}
         className="flex-1 overflow-y-auto pb-6"
+        style={{ overflowAnchor: 'auto' }}
       >
         {/* Loading indicator at top */}
         {channelIsLoading && (

@@ -58,7 +58,7 @@ export function ServerSetupPage({ onComplete }: ServerSetupPageProps) {
   };
 
   return (
-    <div className="flex h-screen w-screen items-center justify-center bg-[var(--bg-tertiary)]">
+    <div className="flex min-h-screen items-center justify-center bg-[var(--bg-tertiary)] p-4">
       <form
         onSubmit={handleSubmit}
         className="w-full max-w-sm rounded-lg bg-[var(--bg-secondary)] p-8"

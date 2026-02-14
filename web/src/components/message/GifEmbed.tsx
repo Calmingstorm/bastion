@@ -54,7 +54,7 @@ export function GifEmbed({ url }: GifEmbedProps) {
   }
 
   return (
-    <div className="image-embed my-1">
+    <div className="image-embed my-1 min-h-[200px]">
       <img
         src={mediaUrl}
         alt=""

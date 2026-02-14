@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, type FormEvent } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
+import { useBreakpoints } from '../../hooks/useMediaQuery';
 import {
   apiUpdateServer,
   apiUploadServerIcon,
@@ -62,6 +63,7 @@ interface ServerSettingsDialogProps {
 
 export function ServerSettingsDialog({ open, onOpenChange, serverId }: ServerSettingsDialogProps) {
   const [tab, setTab] = useState<Tab>('overview');
+  const { isMobile } = useBreakpoints();
 
   const TAB_LABELS: Record<Tab, string> = {
     overview: 'Overview',
@@ -78,47 +80,97 @@ export function ServerSettingsDialog({ open, onOpenChange, serverId }: ServerSet
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/70" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 flex h-[80vh] w-full max-w-5xl -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-md bg-[var(--bg-primary)] shadow-xl">
-          {/* Sidebar */}
-          <div className="flex w-52 shrink-0 flex-col border-r border-[var(--border)] bg-[var(--bg-secondary)] p-3">
-            <Dialog.Title className="mb-3 px-2 text-xs font-bold uppercase tracking-wide text-[var(--text-muted)]">
-              Server Settings
-            </Dialog.Title>
-            {(Object.keys(TAB_LABELS) as Tab[]).map((t) => (
-              <button
-                key={t}
-                onClick={() => setTab(t)}
-                className={`rounded px-2 py-1.5 text-left text-sm font-medium transition-colors ${
-                  tab === t
-                    ? 'bg-[var(--bg-input)] text-[var(--text-primary)]'
-                    : 'text-[var(--text-secondary)] hover:bg-[var(--bg-input)]/50 hover:text-[var(--text-primary)]'
-                }`}
-              >
-                {TAB_LABELS[t]}
-              </button>
-            ))}
-          </div>
+        <Dialog.Content className={`fixed z-50 overflow-hidden bg-[var(--bg-primary)] shadow-xl ${
+          isMobile
+            ? 'inset-0 flex flex-col'
+            : 'left-1/2 top-1/2 flex h-[80vh] w-full max-w-5xl -translate-x-1/2 -translate-y-1/2 rounded-md'
+        }`}>
+          {isMobile ? (
+            <>
+              {/* Mobile: horizontal tab bar at top */}
+              <div className="flex shrink-0 items-center justify-between border-b border-[var(--border)] bg-[var(--bg-secondary)] px-3 pt-3 pb-0">
+                <Dialog.Title className="shrink-0 text-xs font-bold uppercase tracking-wide text-[var(--text-muted)]">
+                  Server Settings
+                </Dialog.Title>
+                <Dialog.Close asChild>
+                  <button className="shrink-0 rounded p-1 text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                  </button>
+                </Dialog.Close>
+              </div>
+              <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-[var(--border)] bg-[var(--bg-secondary)] px-3 py-2">
+                {(Object.keys(TAB_LABELS) as Tab[]).map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setTab(t)}
+                    className={`shrink-0 whitespace-nowrap rounded px-3 py-1.5 text-sm font-medium transition-colors ${
+                      tab === t
+                        ? 'bg-[var(--bg-input)] text-[var(--text-primary)]'
+                        : 'text-[var(--text-secondary)] hover:bg-[var(--bg-input)]/50 hover:text-[var(--text-primary)]'
+                    }`}
+                  >
+                    {TAB_LABELS[t]}
+                  </button>
+                ))}
+              </div>
+              {/* Mobile content */}
+              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4">
+                {tab === 'overview' && <OverviewTab serverId={serverId} />}
+                {tab === 'channels' && <ChannelsTab serverId={serverId} />}
+                {tab === 'roles' && <RolesTab serverId={serverId} />}
+                {tab === 'members' && <MembersTab serverId={serverId} />}
+                {tab === 'bans' && <BansTab serverId={serverId} />}
+                {tab === 'webhooks' && <WebhooksTab serverId={serverId} />}
+                {tab === 'integrations' && <IntegrationsTab serverId={serverId} />}
+                {tab === 'audit' && <AuditTab serverId={serverId} />}
+              </div>
+            </>
+          ) : (
+            <>
+              {/* Desktop: vertical sidebar */}
+              <div className="flex w-52 shrink-0 flex-col border-r border-[var(--border)] bg-[var(--bg-secondary)] p-3">
+                <Dialog.Title className="mb-3 px-2 text-xs font-bold uppercase tracking-wide text-[var(--text-muted)]">
+                  Server Settings
+                </Dialog.Title>
+                {(Object.keys(TAB_LABELS) as Tab[]).map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setTab(t)}
+                    className={`rounded px-2 py-1.5 text-left text-sm font-medium transition-colors ${
+                      tab === t
+                        ? 'bg-[var(--bg-input)] text-[var(--text-primary)]'
+                        : 'text-[var(--text-secondary)] hover:bg-[var(--bg-input)]/50 hover:text-[var(--text-primary)]'
+                    }`}
+                  >
+                    {TAB_LABELS[t]}
+                  </button>
+                ))}
+              </div>
 
-          {/* Content */}
-          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-8">
-            {tab === 'overview' && <OverviewTab serverId={serverId} />}
-            {tab === 'channels' && <ChannelsTab serverId={serverId} />}
-            {tab === 'roles' && <RolesTab serverId={serverId} />}
-            {tab === 'members' && <MembersTab serverId={serverId} />}
-            {tab === 'bans' && <BansTab serverId={serverId} />}
-            {tab === 'webhooks' && <WebhooksTab serverId={serverId} />}
-            {tab === 'integrations' && <IntegrationsTab serverId={serverId} />}
-            {tab === 'audit' && <AuditTab serverId={serverId} />}
-          </div>
+              {/* Desktop content */}
+              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-8">
+                {tab === 'overview' && <OverviewTab serverId={serverId} />}
+                {tab === 'channels' && <ChannelsTab serverId={serverId} />}
+                {tab === 'roles' && <RolesTab serverId={serverId} />}
+                {tab === 'members' && <MembersTab serverId={serverId} />}
+                {tab === 'bans' && <BansTab serverId={serverId} />}
+                {tab === 'webhooks' && <WebhooksTab serverId={serverId} />}
+                {tab === 'integrations' && <IntegrationsTab serverId={serverId} />}
+                {tab === 'audit' && <AuditTab serverId={serverId} />}
+              </div>
 
-          {/* Close */}
-          <Dialog.Close asChild>
-            <button className="absolute right-3 top-3 rounded p-1 text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-              </svg>
-            </button>
-          </Dialog.Close>
+              {/* Close */}
+              <Dialog.Close asChild>
+                <button className="absolute right-3 top-3 rounded p-1 text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </Dialog.Close>
+            </>
+          )}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

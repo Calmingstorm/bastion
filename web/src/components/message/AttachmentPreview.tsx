@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type { Attachment } from '../../types';
 import { resolveMediaUrl } from '../../platform';
 
@@ -16,21 +17,7 @@ export function AttachmentPreview({ attachment }: AttachmentPreviewProps) {
   const isVideo = attachment.contentType.startsWith('video/');
 
   if (isImage) {
-    return (
-      <a
-        href={resolveMediaUrl(attachment.url)}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="mt-1 block max-w-md"
-      >
-        <img
-          src={resolveMediaUrl(attachment.url)}
-          alt={attachment.filename}
-          className="max-h-80 rounded-md object-contain"
-          loading="lazy"
-        />
-      </a>
-    );
+    return <ImageAttachment url={resolveMediaUrl(attachment.url)} filename={attachment.filename} />;
   }
 
   if (isVideo) {
@@ -74,6 +61,29 @@ export function AttachmentPreview({ attachment }: AttachmentPreviewProps) {
         <p className="text-xs text-[var(--text-muted)]">
           {formatFileSize(attachment.size)}
         </p>
+      </div>
+    </a>
+  );
+}
+
+function ImageAttachment({ url, filename }: { url: string | undefined; filename: string }) {
+  const [loaded, setLoaded] = useState(false);
+
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="mt-1 block max-w-md"
+    >
+      <div className={`rounded-md ${!loaded ? 'min-h-[12rem] bg-[var(--bg-tertiary)]' : ''}`}>
+        <img
+          src={url}
+          alt={filename}
+          className="max-h-80 rounded-md object-contain"
+          loading="lazy"
+          onLoad={() => setLoaded(true)}
+        />
       </div>
     </a>
   );

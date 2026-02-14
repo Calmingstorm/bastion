@@ -123,6 +123,13 @@
 }
 
 /* Image/GIF embeds */
+.markdown-content .image-embed {
+  min-height: 200px;
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+  width: fit-content;
+}
+
 .markdown-content .image-embed img {
   max-width: 400px;
   max-height: 300px;
