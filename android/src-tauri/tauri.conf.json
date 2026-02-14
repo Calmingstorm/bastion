@@ -7,7 +7,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1430",
     "beforeDevCommand": "npx vite --port 1430",
-    "beforeBuildCommand": "npx vite build"
+    "beforeBuildCommand": "node -e \"const fs=require('fs');fs.mkdirSync('dist',{recursive:true});fs.writeFileSync('dist/index.html','<!DOCTYPE html><html><head><meta name=viewport content=width=device-width,initial-scale=1></head><body style=margin:0;background:blue;color:white;font-size:32px;padding:40px;font-family:sans-serif><h1>BASTION TEST</h1><p>If you see this, the WebView works.</p><p>Tauri version: 2.x</p></body></html>')\""
   },
   "app": {
     "withGlobalTauri": true,
