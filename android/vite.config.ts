@@ -8,6 +8,10 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig({
   plugins: [react(), tailwindcss()],
 
+  build: {
+    target: ['es2017', 'chrome64'],
+  },
+
   define: {
     __TAURI_MOBILE__: true,
   },

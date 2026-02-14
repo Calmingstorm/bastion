@@ -12,7 +12,7 @@
   "app": {
     "withGlobalTauri": true,
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss: http: https:; img-src 'self' https: data: blob:; font-src 'self' data:; media-src 'self' https: blob:"
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss: http: https:; img-src 'self' https: data: blob:; font-src 'self' data:; media-src 'self' https: blob:"
     }
   },
   "bundle": {
