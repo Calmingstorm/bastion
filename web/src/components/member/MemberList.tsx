@@ -4,6 +4,8 @@ import { usePresenceStore } from '../../stores/presenceStore';
 import { useAuthStore } from '../../stores/authStore';
 import { apiGetMembers } from '../../api/client';
 import { eventBus } from '../../utils/eventBus';
+import { usePermissionStore } from '../../stores/permissionStore';
+import { PERMISSIONS } from '../../utils/permissions';
 import { resolveMediaUrl } from '../../platform';
 import { UserProfileCard } from '../user/UserProfileCard';
 import { UserContextMenu } from '../user/UserContextMenu';
@@ -16,6 +18,7 @@ export function MemberList() {
   const [isLoading, setIsLoading] = useState(false);
   const presences = usePresenceStore((s) => s.presences);
   const currentUser = useAuthStore((s) => s.user);
+  const serverPerms = usePermissionStore((s) => selectedServerId ? s.permissions[selectedServerId] ?? 0 : 0);
 
   const fetchMemberList = useCallback(() => {
     if (!selectedServerId) return;
@@ -51,6 +54,10 @@ export function MemberList() {
   const servers = useServerStore.getState().servers;
   const server = servers.find((s) => s.id === selectedServerId);
   const isCurrentUserOwner = server && currentUser && server.ownerId === currentUser.id;
+  const canModerate = !!isCurrentUserOwner
+    || (serverPerms & PERMISSIONS.KickMembers) === PERMISSIONS.KickMembers
+    || (serverPerms & PERMISSIONS.BanMembers) === PERMISSIONS.BanMembers
+    || (serverPerms & PERMISSIONS.TimeoutMembers) === PERMISSIONS.TimeoutMembers;
 
   const owners = members.filter((m) => server && m.userId === server.ownerId);
   const nonOwners = members.filter((m) => !(server && m.userId === server.ownerId));
@@ -119,7 +126,7 @@ export function MemberList() {
                 title={`Owner — ${owners.length}`}
                 members={owners}
                 serverId={selectedServerId}
-                canModerate={!!isCurrentUserOwner}
+                canModerate={canModerate}
                 serverOwnerId={server?.ownerId}
               />
             )}
@@ -130,7 +137,7 @@ export function MemberList() {
                 members={group.members}
                 color={group.color}
                 serverId={selectedServerId}
-                canModerate={!!isCurrentUserOwner}
+                canModerate={canModerate}
                 serverOwnerId={server?.ownerId}
               />
             ))}
@@ -139,7 +146,7 @@ export function MemberList() {
                 title={`Members — ${noRoleMembers.length}`}
                 members={noRoleMembers}
                 serverId={selectedServerId}
-                canModerate={!!isCurrentUserOwner}
+                canModerate={canModerate}
                 serverOwnerId={server?.ownerId}
               />
             )}

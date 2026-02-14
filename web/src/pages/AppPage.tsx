@@ -6,6 +6,7 @@ import { useServerStore } from '../stores/serverStore';
 import { useWSStore } from '../stores/wsStore';
 import { useUnreadStore } from '../stores/unreadStore';
 import { useDMStore } from '../stores/dmStore';
+import { usePermissionStore } from '../stores/permissionStore';
 import { AppLayout } from '../components/layout/AppLayout';
 
 export function AppPage() {
@@ -21,6 +22,7 @@ export function AppPage() {
   const resetUnread = useUnreadStore((s) => s.reset);
   const fetchDMs = useDMStore((s) => s.fetchDMs);
   const resetDMs = useDMStore((s) => s.reset);
+  const resetPermissions = usePermissionStore((s) => s.reset);
   const navigate = useNavigate();
 
   // Redirect to login if not authenticated
@@ -43,6 +45,7 @@ export function AppPage() {
         resetServers();
         resetUnread();
         resetDMs();
+        resetPermissions();
       };
     }
     return undefined;

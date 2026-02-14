@@ -12,6 +12,8 @@ import { InviteDialog } from '../server/InviteDialog';
 import { ServerSettingsDialog } from '../server/ServerSettingsDialog';
 import { NewDMDialog } from '../dm/NewDMDialog';
 import { apiGetCategories } from '../../api/client';
+import { usePermissionStore } from '../../stores/permissionStore';
+import { PERMISSIONS } from '../../utils/permissions';
 import bastionLogo from '../../assets/bastion-logo.svg';
 import type { ChannelCategory } from '../../types';
 
@@ -50,6 +52,7 @@ export function UnifiedSidebar() {
   const fetchDMs = useDMStore((s) => s.fetchDMs);
 
   const unreadChannels = useUnreadStore((s) => s.unreadChannels);
+  const permissionMap = usePermissionStore((s) => s.permissions);
 
   const [expandedServerId, setExpandedServerId] = useState<string | null>(selectedServerId);
   const [dmExpanded, setDmExpanded] = useState(true);
@@ -257,6 +260,9 @@ export function UnifiedSidebar() {
         {servers.map((server) => {
           const isExpanded = expandedServerId === server.id;
           const isOwner = user && server.ownerId === user.id;
+          const serverPerms = permissionMap[server.id] ?? 0;
+          const canManageServer = !!isOwner || (serverPerms & PERMISSIONS.ManageServer) === PERMISSIONS.ManageServer;
+          const canManageChannels = !!isOwner || (serverPerms & PERMISSIONS.ManageChannels) === PERMISSIONS.ManageChannels;
 
           // Unread indicator for collapsed servers: check if any known channel has unreads
           // When expanded, channels are in the store; when collapsed, we can't check reliably
@@ -336,7 +342,7 @@ export function UnifiedSidebar() {
                         <line x1="23" y1="11" x2="17" y2="11" />
                       </svg>
                     </button>
-                    {isOwner && (
+                    {canManageServer && (
                       <button
                         onClick={() => setSettingsServerId(server.id)}
                         className="rounded p-1 text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
@@ -406,7 +412,7 @@ export function UnifiedSidebar() {
                                   onClick={() =>
                                     handleSelectChannel(channel.id)
                                   }
-                                  canManage={!!isOwner}
+                                  canManage={canManageChannels}
                                   serverId={server.id}
                                 />
                               ))}
@@ -452,7 +458,7 @@ export function UnifiedSidebar() {
                                     onClick={() =>
                                       handleSelectChannel(channel.id)
                                     }
-                                    canManage={!!isOwner}
+                                    canManage={canManageChannels}
                                     serverId={server.id}
                                   />
                                 ))}

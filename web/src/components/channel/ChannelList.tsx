@@ -20,6 +20,8 @@ import { InviteDialog } from '../server/InviteDialog';
 import { ServerSettingsDialog } from '../server/ServerSettingsDialog';
 import { UserPanel } from '../user/UserPanel';
 import { apiGetCategories, apiReorderChannels } from '../../api/client';
+import { usePermissionStore } from '../../stores/permissionStore';
+import { PERMISSIONS } from '../../utils/permissions';
 import type { Channel, ChannelCategory } from '../../types';
 
 function SortableChannelItem({ channel, isSelected, onClick, canManage, serverId }: {
@@ -87,6 +89,8 @@ export function ChannelList() {
 
   const selectedServer = servers.find((s) => s.id === selectedServerId);
   const isOwner = selectedServer && user && selectedServer.ownerId === user.id;
+  const serverPerms = usePermissionStore((s) => selectedServerId ? s.permissions[selectedServerId] ?? 0 : 0);
+  const canManageChannels = !!isOwner || (serverPerms & PERMISSIONS.ManageChannels) === PERMISSIONS.ManageChannels;
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
@@ -187,7 +191,7 @@ export function ChannelList() {
               <line x1="23" y1="11" x2="17" y2="11" />
             </svg>
           </button>
-          {isOwner && (
+          {(!!isOwner || (serverPerms & PERMISSIONS.ManageServer) === PERMISSIONS.ManageServer) && (
             <button
               onClick={() => setSettingsOpen(true)}
               className="rounded p-1 text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)] hover:text-[var(--text-secondary)]"
@@ -237,7 +241,7 @@ export function ChannelList() {
         ) : channels.length === 0 ? (
           <p className="px-2 py-4 text-center text-sm text-[var(--text-muted)]">
             No channels yet.
-            {isOwner && ' Click + to create one.'}
+            {canManageChannels && ' Click + to create one.'}
           </p>
         ) : (
           <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
@@ -252,7 +256,7 @@ export function ChannelList() {
                       <span className="text-[11px] font-bold uppercase tracking-wide text-[var(--text-muted)]">
                         Text Channels
                       </span>
-                      {isOwner && (
+                      {canManageChannels && (
                         <button
                           onClick={() => setShowCreate(!showCreate)}
                           className="text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
@@ -271,7 +275,7 @@ export function ChannelList() {
                           channel={channel}
                           isSelected={channel.id === selectedChannelId}
                           onClick={() => selectChannel(channel.id)}
-                          canManage={!!isOwner}
+                          canManage={canManageChannels}
                           serverId={selectedServerId || undefined}
                         />
                       ))}
@@ -310,7 +314,7 @@ export function ChannelList() {
                             channel={channel}
                             isSelected={channel.id === selectedChannelId}
                             onClick={() => selectChannel(channel.id)}
-                            canManage={!!isOwner}
+                            canManage={canManageChannels}
                             serverId={selectedServerId || undefined}
                           />
                         ))}

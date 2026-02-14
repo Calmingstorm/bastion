@@ -11,6 +11,8 @@ import { UserProfileCard } from '../user/UserProfileCard';
 import { useMessageStore } from '../../stores/messageStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
+import { usePermissionStore } from '../../stores/permissionStore';
+import { PERMISSIONS } from '../../utils/permissions';
 import { resolveMediaUrl } from '../../platform';
 import { apiPinMessage } from '../../api/client';
 
@@ -90,7 +92,11 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
   const servers = useServerStore((s) => s.servers);
   const server = servers.find((s) => s.id === selectedServerId);
   const currentUser = useAuthStore((s) => s.user);
-  const canModerate = !!(server && currentUser && server.ownerId === currentUser.id);
+  const serverPerms = usePermissionStore((s) => selectedServerId ? s.permissions[selectedServerId] ?? 0 : 0);
+  const canModerate = !!(server && currentUser && server.ownerId === currentUser.id)
+    || (serverPerms & PERMISSIONS.KickMembers) === PERMISSIONS.KickMembers
+    || (serverPerms & PERMISSIONS.BanMembers) === PERMISSIONS.BanMembers
+    || (serverPerms & PERMISSIONS.TimeoutMembers) === PERMISSIONS.TimeoutMembers;
 
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState(content);

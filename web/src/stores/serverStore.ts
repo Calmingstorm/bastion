@@ -9,6 +9,7 @@ import {
   apiDeleteServer,
 } from '../api/client';
 import { extractErrorMessage } from '../utils/errors';
+import { usePermissionStore } from './permissionStore';
 
 interface ServerState {
   servers: Server[];
@@ -61,6 +62,9 @@ export const useServerStore = create<ServerState>((set, get) => ({
           error: null,
         });
 
+        // Fetch permissions for the auto-selected server
+        usePermissionStore.getState().fetchPermissions(servers[0].id);
+
         // Fetch channels for the auto-selected server
         try {
           const rawChannels = await apiGetChannels(servers[0].id);
@@ -90,6 +94,8 @@ export const useServerStore = create<ServerState>((set, get) => ({
       isLoadingChannels: true,
       error: null,
     });
+    // Fetch permissions for the selected server
+    usePermissionStore.getState().fetchPermissions(id);
     try {
       const rawChannels = await apiGetChannels(id);
       const sorted = (Array.isArray(rawChannels) ? rawChannels : []).sort((a, b) => a.position - b.position);

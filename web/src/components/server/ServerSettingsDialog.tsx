@@ -31,33 +31,15 @@ import {
 } from '../../api/client';
 import { useServerStore } from '../../stores/serverStore';
 import { resolveMediaUrl } from '../../platform';
+import { PERMISSIONS } from '../../utils/permissions';
 import type { Role, ServerBan, AuditLogEntry, MemberWithUser, Channel, Webhook, Bot } from '../../types';
-
-// Permission bitfield constants — must match server/internal/permissions/permissions.go
-const PERMISSIONS = {
-  ViewChannel:      1 << 0,
-  SendMessages:     1 << 1,
-  ManageMessages:   1 << 2,
-  ManageChannels:   1 << 3,
-  ManageServer:     1 << 4,
-  ManageRoles:      1 << 5,
-  CreateInvites:    1 << 6,
-  KickMembers:      1 << 7,
-  BanMembers:       1 << 8,
-  Administrator:    1 << 9,
-  AttachFiles:      1 << 10,
-  ManageCategories: 1 << 11,
-  ManageNicknames:  1 << 12,
-  ChangeNickname:   1 << 13,
-  TimeoutMembers:   1 << 14,
-} as const;
 
 const PERMISSION_LABELS: { key: keyof typeof PERMISSIONS; label: string; desc: string }[] = [
   { key: 'ViewChannel', label: 'View Channels', desc: 'Allows viewing text channels' },
   { key: 'SendMessages', label: 'Send Messages', desc: 'Allows sending messages' },
   { key: 'AttachFiles', label: 'Attach Files', desc: 'Allows uploading files' },
   { key: 'CreateInvites', label: 'Create Invites', desc: 'Allows creating invite links' },
-  { key: 'ChangeNickname', label: 'Change Nickname', desc: 'Allows changing own nickname' },
+  { key: 'MentionEveryone', label: 'Mention Everyone', desc: 'Allows @everyone and @here mentions' },
   { key: 'ManageMessages', label: 'Manage Messages', desc: "Allows deleting others' messages" },
   { key: 'ManageChannels', label: 'Manage Channels', desc: 'Create, edit, and delete channels' },
   { key: 'ManageCategories', label: 'Manage Categories', desc: 'Manage channel categories' },

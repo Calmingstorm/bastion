@@ -2,6 +2,8 @@ import { useState } from 'react';
 import * as Popover from '@radix-ui/react-popover';
 import { useAuthStore } from '../../stores/authStore';
 import { useServerStore } from '../../stores/serverStore';
+import { usePermissionStore } from '../../stores/permissionStore';
+import { PERMISSIONS } from '../../utils/permissions';
 import { EmojiPicker } from './EmojiPicker';
 import type { Message } from '../../types';
 
@@ -22,7 +24,9 @@ export function MessageActions({ message, onEdit, onDelete, onReply, onPin, isPi
   const isAuthor = user?.id === message.author.id;
   const selectedServer = servers.find((s) => s.id === selectedServerId);
   const isOwner = selectedServer && user && selectedServer.ownerId === user.id;
-  const canDelete = isAuthor || isOwner;
+  const serverPerms = usePermissionStore((s) => selectedServerId ? s.permissions[selectedServerId] ?? 0 : 0);
+  const canManageMessages = !!isOwner || (serverPerms & PERMISSIONS.ManageMessages) === PERMISSIONS.ManageMessages;
+  const canDelete = isAuthor || canManageMessages;
 
   return (
     <div className="absolute -top-3 right-4 flex items-center gap-0.5 rounded border border-[var(--border)] bg-[var(--bg-secondary)] p-0.5 opacity-0 shadow-sm transition-opacity group-hover:opacity-100">
@@ -64,7 +68,7 @@ export function MessageActions({ message, onEdit, onDelete, onReply, onPin, isPi
         </svg>
       </button>
 
-      {onPin && (isOwner || canDelete) && (
+      {onPin && canDelete && (
         <button
           onClick={onPin}
           className="rounded p-1 text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)] hover:text-[var(--text-secondary)]"
