@@ -29,13 +29,16 @@ export function isMobileReady(): boolean {
 export async function initPlatform(): Promise<void> {
   if (isTauri()) {
     try {
-      if (isMobile()) {
-        const mod = await import('./mobile');
-        currentPlatform = await mod.initMobilePlatform();
-      } else {
-        const mod = await import('./desktop');
-        currentPlatform = await mod.initDesktopPlatform();
-      }
+      const platformPromise = isMobile()
+        ? import('./mobile').then((mod) => mod.initMobilePlatform())
+        : import('./desktop').then((mod) => mod.initDesktopPlatform());
+
+      // Timeout prevents a black screen if IPC bridge isn't ready (e.g. Android)
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Platform init timed out')), 5000),
+      );
+
+      currentPlatform = await Promise.race([platformPromise, timeout]);
       tauriInitialized = true;
 
       // Configure API client and WebSocket with the stored server URL
