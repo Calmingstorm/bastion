@@ -783,7 +783,7 @@ export async function apiSearchUsers(query: string): Promise<MessageAuthor[]> {
 
 export async function apiReorderChannels(
   serverId: string,
-  positions: { id: string; position: number }[]
+  positions: { id: string; position: number; categoryId?: string }[]
 ): Promise<void> {
   await apiClient.put(`/servers/${serverId}/channels/reorder`, positions);
 }
