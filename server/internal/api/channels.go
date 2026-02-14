@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -26,13 +27,15 @@ func NewChannelHandler(db *pgxpool.Pool, hub *realtime.Hub) *ChannelHandler {
 }
 
 type createChannelRequest struct {
-	Name  string  `json:"name"`
-	Topic *string `json:"topic,omitempty"`
+	Name       string  `json:"name"`
+	Topic      *string `json:"topic,omitempty"`
+	CategoryID *string `json:"categoryId,omitempty"`
 }
 
 type updateChannelRequest struct {
-	Name  *string `json:"name,omitempty"`
-	Topic *string `json:"topic,omitempty"`
+	Name       *string `json:"name,omitempty"`
+	Topic      *string `json:"topic,omitempty"`
+	CategoryID *string `json:"categoryId,omitempty"`
 }
 
 // broadcastToServer sends an event to all channels in a server so all connected users see it.
@@ -136,6 +139,26 @@ func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate categoryId if provided
+	var categoryID *uuid.UUID
+	if req.CategoryID != nil && *req.CategoryID != "" {
+		catID, err := uuid.Parse(*req.CategoryID)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid category ID"))
+			return
+		}
+		var exists bool
+		err = h.db.QueryRow(r.Context(),
+			`SELECT EXISTS(SELECT 1 FROM channel_categories WHERE id = $1 AND server_id = $2)`,
+			catID, serverID,
+		).Scan(&exists)
+		if err != nil || !exists {
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "category not found in this server"))
+			return
+		}
+		categoryID = &catID
+	}
+
 	// Get the next position
 	var maxPos int
 	err = h.db.QueryRow(r.Context(),
@@ -149,10 +172,10 @@ func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	var ch models.Channel
 	err = h.db.QueryRow(r.Context(),
-		`INSERT INTO channels (server_id, name, topic, position)
-		 VALUES ($1, $2, $3, $4)
+		`INSERT INTO channels (server_id, name, topic, position, category_id)
+		 VALUES ($1, $2, $3, $4, $5)
 		 RETURNING id, server_id, name, topic, type, position, category_id, created_at`,
-		serverID, req.Name, req.Topic, maxPos+1,
+		serverID, req.Name, req.Topic, maxPos+1, categoryID,
 	).Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Topic, &ch.Type, &ch.Position, &ch.CategoryID, &ch.CreatedAt)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create channel")
@@ -204,30 +227,60 @@ func (h *ChannelHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build dynamic update
-	var ch models.Channel
-	if req.Name != nil && req.Topic != nil {
-		err = h.db.QueryRow(r.Context(),
-			`UPDATE channels SET name = $1, topic = $2 WHERE id = $3 AND server_id = $4
-			 RETURNING id, server_id, name, topic, type, position, category_id, created_at`,
-			*req.Name, *req.Topic, channelID, serverID,
-		).Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Topic, &ch.Type, &ch.Position, &ch.CategoryID, &ch.CreatedAt)
-	} else if req.Name != nil {
-		err = h.db.QueryRow(r.Context(),
-			`UPDATE channels SET name = $1 WHERE id = $2 AND server_id = $3
-			 RETURNING id, server_id, name, topic, type, position, category_id, created_at`,
-			*req.Name, channelID, serverID,
-		).Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Topic, &ch.Type, &ch.Position, &ch.CategoryID, &ch.CreatedAt)
-	} else if req.Topic != nil {
-		err = h.db.QueryRow(r.Context(),
-			`UPDATE channels SET topic = $1 WHERE id = $2 AND server_id = $3
-			 RETURNING id, server_id, name, topic, type, position, category_id, created_at`,
-			*req.Topic, channelID, serverID,
-		).Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Topic, &ch.Type, &ch.Position, &ch.CategoryID, &ch.CreatedAt)
-	} else {
+	sets := []string{}
+	args := []any{}
+	argIdx := 1
+
+	if req.Name != nil {
+		sets = append(sets, fmt.Sprintf("name = $%d", argIdx))
+		args = append(args, *req.Name)
+		argIdx++
+	}
+	if req.Topic != nil {
+		sets = append(sets, fmt.Sprintf("topic = $%d", argIdx))
+		args = append(args, *req.Topic)
+		argIdx++
+	}
+	if req.CategoryID != nil {
+		if *req.CategoryID == "" {
+			// Empty string = remove from category
+			sets = append(sets, fmt.Sprintf("category_id = $%d", argIdx))
+			args = append(args, nil)
+			argIdx++
+		} else {
+			catID, err := uuid.Parse(*req.CategoryID)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid category ID"))
+				return
+			}
+			var exists bool
+			err = h.db.QueryRow(r.Context(),
+				`SELECT EXISTS(SELECT 1 FROM channel_categories WHERE id = $1 AND server_id = $2)`,
+				catID, serverID,
+			).Scan(&exists)
+			if err != nil || !exists {
+				writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "category not found in this server"))
+				return
+			}
+			sets = append(sets, fmt.Sprintf("category_id = $%d", argIdx))
+			args = append(args, catID)
+			argIdx++
+		}
+	}
+
+	if len(sets) == 0 {
 		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "nothing to update"))
 		return
 	}
 
+	args = append(args, channelID, serverID)
+	query := "UPDATE channels SET " + strings.Join(sets, ", ") +
+		fmt.Sprintf(" WHERE id = $%d AND server_id = $%d", argIdx, argIdx+1) +
+		" RETURNING id, server_id, name, topic, type, position, category_id, created_at"
+
+	var ch models.Channel
+	err = h.db.QueryRow(r.Context(), query, args...).Scan(
+		&ch.ID, &ch.ServerID, &ch.Name, &ch.Topic, &ch.Type, &ch.Position, &ch.CategoryID, &ch.CreatedAt)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to update channel")
 		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "channel not found"))
@@ -316,8 +369,9 @@ func (h *ChannelHandler) Delete(w http.ResponseWriter, r *http.Request) {
 }
 
 type reorderEntry struct {
-	ID       string `json:"id"`
-	Position int    `json:"position"`
+	ID         string  `json:"id"`
+	Position   int     `json:"position"`
+	CategoryID *string `json:"categoryId,omitempty"`
 }
 
 func (h *ChannelHandler) Reorder(w http.ResponseWriter, r *http.Request) {
@@ -357,10 +411,26 @@ func (h *ChannelHandler) Reorder(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid channel ID: "+entry.ID))
 			return
 		}
-		_, err = tx.Exec(r.Context(),
-			`UPDATE channels SET position = $1 WHERE id = $2 AND server_id = $3`,
-			entry.Position, chID, serverID,
-		)
+		if entry.CategoryID != nil {
+			var catID *uuid.UUID
+			if *entry.CategoryID != "" {
+				parsed, err := uuid.Parse(*entry.CategoryID)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid category ID"))
+					return
+				}
+				catID = &parsed
+			}
+			_, err = tx.Exec(r.Context(),
+				`UPDATE channels SET position = $1, category_id = $2 WHERE id = $3 AND server_id = $4`,
+				entry.Position, catID, chID, serverID,
+			)
+		} else {
+			_, err = tx.Exec(r.Context(),
+				`UPDATE channels SET position = $1 WHERE id = $2 AND server_id = $3`,
+				entry.Position, chID, serverID,
+			)
+		}
 		if err != nil {
 			log.Error().Err(err).Str("channelID", chID.String()).Msg("failed to update channel position")
 			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))

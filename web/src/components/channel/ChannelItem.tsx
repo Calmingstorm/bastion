@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, type KeyboardEvent } from 'react';
 import * as ContextMenu from '@radix-ui/react-context-menu';
-import type { Channel } from '../../types';
+import type { Channel, ChannelCategory } from '../../types';
 import { useUnreadStore } from '../../stores/unreadStore';
 import { apiUpdateChannel, apiDeleteChannel } from '../../api/client';
 import { useServerStore } from '../../stores/serverStore';
@@ -11,9 +11,10 @@ interface ChannelItemProps {
   onClick: () => void;
   canManage?: boolean;
   serverId?: string;
+  categories?: ChannelCategory[];
 }
 
-export function ChannelItem({ channel, isSelected, onClick, canManage, serverId }: ChannelItemProps) {
+export function ChannelItem({ channel, isSelected, onClick, canManage, serverId, categories }: ChannelItemProps) {
   const hasUnread = useUnreadStore((s) => s.unreadChannels.has(channel.id));
   const mentionCount = useUnreadStore((s) => s.readStates[channel.id]?.mentionCount || 0);
   const [isEditing, setIsEditing] = useState(false);
@@ -48,6 +49,16 @@ export function ChannelItem({ channel, isSelected, onClick, canManage, serverId 
       useServerStore.getState().removeChannel(channel.id);
     } catch { /* handled */ }
     setShowDeleteConfirm(false);
+  };
+
+  const handleMoveToCategory = async (categoryId: string | null) => {
+    if (!serverId) return;
+    try {
+      const updated = await apiUpdateChannel(serverId, channel.id, {
+        categoryId: categoryId ?? '',
+      });
+      useServerStore.getState().updateChannel(updated);
+    } catch { /* handled */ }
   };
 
   const handleEditKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
@@ -166,6 +177,40 @@ export function ChannelItem({ channel, isSelected, onClick, canManage, serverId 
             >
               Edit Channel
             </ContextMenu.Item>
+            {categories && categories.length > 0 && (
+              <ContextMenu.Sub>
+                <ContextMenu.SubTrigger className="flex w-full cursor-default items-center justify-between rounded px-2.5 py-1.5 text-sm outline-none text-[var(--text-secondary)] hover:bg-[var(--accent)] hover:text-white">
+                  Move to Category
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" className="ml-2">
+                    <path d="M10 6l6 6-6 6z" />
+                  </svg>
+                </ContextMenu.SubTrigger>
+                <ContextMenu.Portal>
+                  <ContextMenu.SubContent className="z-50 min-w-[160px] rounded-lg border border-[var(--border)] bg-[var(--bg-tertiary)] p-1.5 shadow-xl">
+                    <ContextMenu.Item
+                      onSelect={() => handleMoveToCategory(null)}
+                      className={`flex w-full cursor-default items-center rounded px-2.5 py-1.5 text-sm outline-none hover:bg-[var(--accent)] hover:text-white ${
+                        !channel.categoryId ? 'text-[var(--accent)]' : 'text-[var(--text-secondary)]'
+                      }`}
+                    >
+                      No Category
+                    </ContextMenu.Item>
+                    <ContextMenu.Separator className="my-1 h-px bg-[var(--border)]" />
+                    {categories.map((cat) => (
+                      <ContextMenu.Item
+                        key={cat.id}
+                        onSelect={() => handleMoveToCategory(cat.id)}
+                        className={`flex w-full cursor-default items-center rounded px-2.5 py-1.5 text-sm outline-none hover:bg-[var(--accent)] hover:text-white ${
+                          channel.categoryId === cat.id ? 'text-[var(--accent)]' : 'text-[var(--text-secondary)]'
+                        }`}
+                      >
+                        {cat.name}
+                      </ContextMenu.Item>
+                    ))}
+                  </ContextMenu.SubContent>
+                </ContextMenu.Portal>
+              </ContextMenu.Sub>
+            )}
             <ContextMenu.Separator className="my-1 h-px bg-[var(--border)]" />
             <ContextMenu.Item
               onSelect={() => setShowDeleteConfirm(true)}

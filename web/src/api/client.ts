@@ -250,11 +250,14 @@ export async function apiGetChannels(serverId: string): Promise<Channel[]> {
 export async function apiCreateChannel(
   serverId: string,
   name: string,
-  topic?: string
+  topic?: string,
+  categoryId?: string
 ): Promise<Channel> {
+  const body: Record<string, string | undefined> = { name, topic };
+  if (categoryId) body.categoryId = categoryId;
   const response = await apiClient.post<Channel>(
     `/servers/${serverId}/channels`,
-    { name, topic }
+    body
   );
   return response.data;
 }
@@ -262,7 +265,7 @@ export async function apiCreateChannel(
 export async function apiUpdateChannel(
   serverId: string,
   channelId: string,
-  data: { name?: string; topic?: string }
+  data: { name?: string; topic?: string; categoryId?: string }
 ): Promise<Channel> {
   const response = await apiClient.patch<Channel>(
     `/servers/${serverId}/channels/${channelId}`,

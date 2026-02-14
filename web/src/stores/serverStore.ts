@@ -23,7 +23,7 @@ interface ServerState {
   selectServer: (id: string) => Promise<void>;
   selectChannel: (id: string) => void;
   createServer: (name: string) => Promise<void>;
-  createChannel: (serverId: string, name: string, topic?: string) => Promise<void>;
+  createChannel: (serverId: string, name: string, topic?: string, categoryId?: string) => Promise<void>;
   updateServer: (server: Server) => void;
   addChannel: (channel: Channel) => void;
   updateChannel: (channel: Channel) => void;
@@ -130,9 +130,9 @@ export const useServerStore = create<ServerState>((set, get) => ({
     }
   },
 
-  createChannel: async (serverId: string, name: string, topic?: string) => {
+  createChannel: async (serverId: string, name: string, topic?: string, categoryId?: string) => {
     try {
-      const channel = await apiCreateChannel(serverId, name, topic);
+      const channel = await apiCreateChannel(serverId, name, topic, categoryId);
       set((state) => ({
         channels: [...state.channels, channel].sort(
           (a, b) => a.position - b.position
