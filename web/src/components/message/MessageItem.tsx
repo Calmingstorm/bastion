@@ -3,6 +3,7 @@ import type { Message } from '../../types';
 import { MessageActions } from './MessageActions';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { AttachmentPreview } from './AttachmentPreview';
+import { EmbedCard } from './EmbedCard';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { GifEmbed } from './GifEmbed';
 import { ReactionBar } from './ReactionBar';
@@ -85,7 +86,7 @@ function formatFullTimestamp(dateStr: string): string {
 
 export function MessageItem({ message, isCompact }: MessageItemProps) {
   const { author, content, createdAt, editedAt, attachments } = message;
-  const displayName = author?.displayName || author?.username || 'Unknown';
+  const displayName = message.authorOverride?.username || author?.displayName || author?.username || 'Unknown';
   const initial = displayName.charAt(0).toUpperCase();
   const avatarColor = getAvatarColor(author?.id || '0');
   const selectedServerId = useServerStore((s) => s.selectedServerId);
@@ -221,6 +222,13 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
             </span>
           )}
         </div>
+        {message.embeds && message.embeds.length > 0 && (
+          <div className="flex flex-col gap-1">
+            {message.embeds.map((embed, i) => (
+              <EmbedCard key={i} embed={embed} />
+            ))}
+          </div>
+        )}
         {attachments && attachments.length > 0 && (
           <div className="flex flex-col gap-1">
             {attachments.map((att) => (
@@ -263,9 +271,9 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
         <UserContextMenu userId={author?.id || ''} username={author?.username || 'Unknown'} serverId={selectedServerId || undefined} isOwner={server?.ownerId === author?.id} canModerate={canModerate}>
           <UserProfileCard userId={author?.id || ''} serverId={selectedServerId || undefined} canModerate={canModerate} isOwner={server?.ownerId === author?.id}>
             <div className="cursor-pointer">
-              {author?.avatarUrl ? (
+              {(message.authorOverride?.avatarUrl || author?.avatarUrl) ? (
                 <img
-                  src={resolveMediaUrl(author?.avatarUrl)}
+                  src={resolveMediaUrl(message.authorOverride?.avatarUrl || author?.avatarUrl || '')}
                   alt={displayName}
                   className="mt-0.5 h-10 w-10 shrink-0 rounded-full object-cover"
                 />

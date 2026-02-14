@@ -49,18 +49,50 @@ type Channel struct {
 	CreatedAt  time.Time  `json:"createdAt"`
 }
 
+type Embed struct {
+	Title       string       `json:"title,omitempty"`
+	Description string       `json:"description,omitempty"`
+	URL         string       `json:"url,omitempty"`
+	Color       int          `json:"color,omitempty"`
+	Fields      []EmbedField `json:"fields,omitempty"`
+	Footer      *EmbedFooter `json:"footer,omitempty"`
+	Thumbnail   *EmbedImage  `json:"thumbnail,omitempty"`
+	Image       *EmbedImage  `json:"image,omitempty"`
+}
+
+type EmbedField struct {
+	Name   string `json:"name"`
+	Value  string `json:"value"`
+	Inline bool   `json:"inline,omitempty"`
+}
+
+type EmbedFooter struct {
+	Text string `json:"text"`
+}
+
+type EmbedImage struct {
+	URL string `json:"url"`
+}
+
+type AuthorOverride struct {
+	Username  string `json:"username"`
+	AvatarURL string `json:"avatarUrl,omitempty"`
+}
+
 type Message struct {
-	ID          uuid.UUID    `json:"id"`
-	ChannelID   uuid.UUID    `json:"channelId"`
-	AuthorID    uuid.UUID    `json:"-"`
-	Author      *Author      `json:"author"`
-	Content     string       `json:"content"`
-	EditedAt    *time.Time   `json:"editedAt,omitempty"`
-	ReplyToID   *uuid.UUID   `json:"replyToId,omitempty"`
-	ReplyTo     *ReplyInfo   `json:"replyTo,omitempty"`
-	Attachments []Attachment `json:"attachments,omitempty"`
-	Reactions   []Reaction   `json:"reactions,omitempty"`
-	CreatedAt   time.Time    `json:"createdAt"`
+	ID             uuid.UUID       `json:"id"`
+	ChannelID      uuid.UUID       `json:"channelId"`
+	AuthorID       uuid.UUID       `json:"-"`
+	Author         *Author         `json:"author"`
+	Content        string          `json:"content"`
+	Embeds         []Embed         `json:"embeds,omitempty"`
+	AuthorOverride *AuthorOverride `json:"authorOverride,omitempty"`
+	EditedAt       *time.Time      `json:"editedAt,omitempty"`
+	ReplyToID      *uuid.UUID      `json:"replyToId,omitempty"`
+	ReplyTo        *ReplyInfo      `json:"replyTo,omitempty"`
+	Attachments    []Attachment    `json:"attachments,omitempty"`
+	Reactions      []Reaction      `json:"reactions,omitempty"`
+	CreatedAt      time.Time       `json:"createdAt"`
 }
 
 type ReplyInfo struct {

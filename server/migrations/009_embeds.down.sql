@@ -1,0 +1,2 @@
+ALTER TABLE messages DROP COLUMN IF EXISTS author_override;
+ALTER TABLE messages DROP COLUMN IF EXISTS embeds;

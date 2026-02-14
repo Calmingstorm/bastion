@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/Calmingstorm/bastion/server/internal/auth"
+	"github.com/Calmingstorm/bastion/server/internal/models"
 )
 
 type SearchHandler struct {
@@ -21,17 +23,18 @@ func NewSearchHandler(db *pgxpool.Pool) *SearchHandler {
 }
 
 type searchResult struct {
-	ID          uuid.UUID `json:"id"`
-	ChannelID   uuid.UUID `json:"channelId"`
-	Content     string    `json:"content"`
-	CreatedAt   string    `json:"createdAt"`
-	AuthorID    uuid.UUID `json:"authorId"`
-	Username    string    `json:"username"`
-	DisplayName *string   `json:"displayName"`
-	AvatarURL   *string   `json:"avatarUrl"`
-	IsBot       bool      `json:"isBot,omitempty"`
-	ChannelName string    `json:"channelName"`
-	ServerName  *string   `json:"serverName"`
+	ID          uuid.UUID      `json:"id"`
+	ChannelID   uuid.UUID      `json:"channelId"`
+	Content     string         `json:"content"`
+	Embeds      []models.Embed `json:"embeds,omitempty"`
+	CreatedAt   string         `json:"createdAt"`
+	AuthorID    uuid.UUID      `json:"authorId"`
+	Username    string         `json:"username"`
+	DisplayName *string        `json:"displayName"`
+	AvatarURL   *string        `json:"avatarUrl"`
+	IsBot       bool           `json:"isBot,omitempty"`
+	ChannelName string         `json:"channelName"`
+	ServerName  *string        `json:"serverName"`
 }
 
 func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
@@ -65,7 +68,7 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 	// Build query based on filters
 	baseSQL := `SELECT m.id, m.channel_id, m.content, m.created_at,
 		u.id, u.username, u.display_name, u.avatar_url, u.is_bot,
-		c.name, s.name
+		c.name, s.name, m.embeds
 		FROM messages m
 		INNER JOIN users u ON u.id = m.author_id
 		INNER JOIN channels c ON c.id = m.channel_id
@@ -139,14 +142,18 @@ func scanSearchResults(rows interface {
 	for rows.Next() {
 		var r searchResult
 		var createdAt time.Time
+		var embedsJSON []byte
 		if err := rows.Scan(
 			&r.ID, &r.ChannelID, &r.Content, &createdAt,
 			&r.AuthorID, &r.Username, &r.DisplayName, &r.AvatarURL, &r.IsBot,
-			&r.ChannelName, &r.ServerName,
+			&r.ChannelName, &r.ServerName, &embedsJSON,
 		); err != nil {
 			return nil, err
 		}
 		r.CreatedAt = createdAt.Format(time.RFC3339Nano)
+		if len(embedsJSON) > 0 {
+			json.Unmarshal(embedsJSON, &r.Embeds)
+		}
 		results = append(results, r)
 	}
 	if err := rows.Err(); err != nil {

@@ -40,6 +40,7 @@ info:
     | Protected API (global) | 120 requests/min per user |
     | Message send | 10 messages/10s per user |
     | File upload | 5 uploads/min per user |
+    | Bulk import | 10 requests/min per user |
 
     When rate-limited, the server returns `429 Too Many Requests`.
 
@@ -58,11 +59,13 @@ tags:
   - name: Bots
     description: Create and manage bot integrations
   - name: Messages
-    description: Send and list messages (bot-accessible)
+    description: Send, edit, delete, and list messages (bot-accessible)
   - name: Channels
-    description: List channels (bot-accessible)
+    description: List, create, update, and delete channels (bot-accessible)
   - name: Members
-    description: List server members (bot-accessible)
+    description: List server members and manage nicknames (bot-accessible)
+  - name: Roles
+    description: Create, update, delete, assign, and remove roles (bot-accessible)
   - name: WebSocket
     description: Real-time event stream
 
@@ -97,6 +100,10 @@ paths:
               content: "Build #142 passed"
               username: "CI Bot"
               avatarUrl: "https://example.com/ci-avatar.png"
+              embeds:
+                - title: "Build Report"
+                  description: "All tests passed"
+                  color: 65280
       responses:
         '200':
           description: Message sent
@@ -383,7 +390,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
-  # ── Bot-Accessible Endpoints ────────────────────────────────────────
+  # ── Messages ─────────────────────────────────────────────────────────
   /channels/{channelID}/messages:
     get:
       tags: [Messages]
@@ -418,7 +425,13 @@ paths:
       tags: [Messages]
       summary: Send message
       description: |
-        Send a message to a channel. Rate limit: **10 messages per 10 seconds**.
+        Send a message to a channel. Must have either `content` or `embeds` (or both).
+
+        Rate limit: **10 messages per 10 seconds**.
+
+        **Bot-only features:**
+        - `createdAt` — backdate the message (useful for historical import)
+        - `embeds` — rich embed objects
       operationId: sendMessage
       security:
         - BotToken: []
@@ -433,6 +446,10 @@ paths:
               $ref: '#/components/schemas/SendMessageRequest'
             example:
               content: "Hello from my bot!"
+              embeds:
+                - title: "Status Update"
+                  description: "Server is online"
+                  color: 65280
       responses:
         '201':
           description: Message sent
@@ -442,9 +459,172 @@ paths:
                 $ref: '#/components/schemas/Message'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '429':
           description: Rate limited
 
+  /channels/{channelID}/messages/{messageID}:
+    put:
+      tags: [Messages]
+      summary: Edit message
+      description: |
+        Edit a message. Only the message author can edit it.
+        Must have either `content` or `embeds` (or both).
+      operationId: editMessage
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/channelID'
+        - $ref: '#/components/parameters/messageID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EditMessageRequest'
+      responses:
+        '200':
+          description: Message updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Messages]
+      summary: Delete message
+      description: |
+        Delete a message. Authors can delete their own messages.
+        Users with `ManageMessages` permission can delete any message.
+      operationId: deleteMessage
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/channelID'
+        - $ref: '#/components/parameters/messageID'
+      responses:
+        '200':
+          description: Message deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /channels/{channelID}/messages/{messageID}/reactions/{emoji}:
+    put:
+      tags: [Messages]
+      summary: Add reaction
+      description: Add a reaction emoji to a message. Idempotent — adding the same reaction twice is a no-op.
+      operationId: addReaction
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/channelID'
+        - $ref: '#/components/parameters/messageID'
+        - $ref: '#/components/parameters/emoji'
+      responses:
+        '200':
+          description: Reaction added
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Messages]
+      summary: Remove reaction
+      description: Remove your reaction from a message.
+      operationId: removeReaction
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/channelID'
+        - $ref: '#/components/parameters/messageID'
+        - $ref: '#/components/parameters/emoji'
+      responses:
+        '200':
+          description: Reaction removed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── Bulk Import (bot-only) ───────────────────────────────────────────
+  /channels/{channelID}/import:
+    post:
+      tags: [Messages]
+      summary: Bulk import messages
+      description: |
+        Import up to 50 messages at once. **Bot-only endpoint.**
+
+        Each message can include:
+        - `content` and/or `embeds`
+        - `createdAt` — backdate for historical import
+        - `authorOverride` — display name/avatar without creating user records
+
+        Rate limit: **10 requests/min** per user.
+      operationId: bulkImport
+      security:
+        - BotToken: []
+      parameters:
+        - $ref: '#/components/parameters/channelID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/ImportMessage'
+              maxItems: 50
+            example:
+              - content: "Hello from the past!"
+                createdAt: "2021-06-15T14:30:00Z"
+                authorOverride:
+                  username: "OldUser"
+                  avatarUrl: "https://example.com/avatar.png"
+              - content: ""
+                embeds:
+                  - title: "Imported embed"
+                    description: "This was imported"
+                    color: 3447003
+                createdAt: "2021-06-15T14:31:00Z"
+      responses:
+        '201':
+          description: Messages imported
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Message'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          description: Rate limited
+
+  # ── Channels ─────────────────────────────────────────────────────────
   /servers/{serverID}/channels:
     get:
       tags: [Channels]
@@ -466,6 +646,93 @@ paths:
                 items:
                   $ref: '#/components/schemas/Channel'
 
+    post:
+      tags: [Channels]
+      summary: Create channel
+      description: Create a new channel in a server. Requires `ManageChannels` permission.
+      operationId: createChannel
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateChannelRequest'
+            example:
+              name: "bot-logs"
+              type: "text"
+      responses:
+        '201':
+          description: Channel created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Channel'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /servers/{serverID}/channels/{channelID}:
+    patch:
+      tags: [Channels]
+      summary: Update channel
+      description: Update a channel's name or topic. Requires `ManageChannels` permission.
+      operationId: updateChannel
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+        - $ref: '#/components/parameters/channelID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateChannelRequest'
+      responses:
+        '200':
+          description: Channel updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Channel'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Channels]
+      summary: Delete channel
+      description: Delete a channel. Requires `ManageChannels` permission.
+      operationId: deleteChannel
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+        - $ref: '#/components/parameters/channelID'
+      responses:
+        '200':
+          description: Channel deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── Members ──────────────────────────────────────────────────────────
   /servers/{serverID}/members:
     get:
       tags: [Members]
@@ -487,33 +754,417 @@ paths:
                 items:
                   $ref: '#/components/schemas/Member'
 
+  /servers/{serverID}/members/{userID}/nickname:
+    patch:
+      tags: [Members]
+      summary: Update member nickname
+      description: |
+        Set or clear a member's server nickname. Users can change their own
+        nickname. Changing another member's nickname requires `ManageNicknames`
+        permission (or server owner).
+      operationId: updateNickname
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+        - $ref: '#/components/parameters/userID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateNicknameRequest'
+            example:
+              nickname: "CoolNick"
+      responses:
+        '200':
+          description: Nickname updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nickname:
+                    type: string
+                    nullable: true
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  # ── Roles ────────────────────────────────────────────────────────────
+  /servers/{serverID}/roles:
+    get:
+      tags: [Roles]
+      summary: List roles
+      description: List all roles in a server. Bot must be a member of the server.
+      operationId: listRoles
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+      responses:
+        '200':
+          description: Role list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Role'
+
+    post:
+      tags: [Roles]
+      summary: Create role
+      description: Create a new role. Requires `ManageRoles` permission.
+      operationId: createRole
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRoleRequest'
+            example:
+              name: "Moderator"
+              color: "#3498db"
+              permissions: 6
+      responses:
+        '201':
+          description: Role created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Role'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /servers/{serverID}/roles/{roleID}:
+    patch:
+      tags: [Roles]
+      summary: Update role
+      description: Update a role's name, color, or permissions. Requires `ManageRoles` permission.
+      operationId: updateRole
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+        - $ref: '#/components/parameters/roleID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateRoleRequest'
+      responses:
+        '200':
+          description: Role updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Role'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Roles]
+      summary: Delete role
+      description: Delete a role. Cannot delete the default role. Requires `ManageRoles` permission.
+      operationId: deleteRole
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+        - $ref: '#/components/parameters/roleID'
+      responses:
+        '200':
+          description: Role deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /servers/{serverID}/roles/{roleID}/assign:
+    post:
+      tags: [Roles]
+      summary: Assign role to member
+      description: Assign a role to a server member. Requires `ManageRoles` permission.
+      operationId: assignRole
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+        - $ref: '#/components/parameters/roleID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId]
+              properties:
+                userId:
+                  type: string
+                  format: uuid
+            example:
+              userId: "550e8400-e29b-41d4-a716-446655440000"
+      responses:
+        '200':
+          description: Role assigned
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "assigned"
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /servers/{serverID}/roles/{roleID}/remove:
+    post:
+      tags: [Roles]
+      summary: Remove role from member
+      description: Remove a role from a server member. Requires `ManageRoles` permission.
+      operationId: removeRole
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+        - $ref: '#/components/parameters/roleID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId]
+              properties:
+                userId:
+                  type: string
+                  format: uuid
+            example:
+              userId: "550e8400-e29b-41d4-a716-446655440000"
+      responses:
+        '200':
+          description: Role removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "removed"
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
   # ── WebSocket ───────────────────────────────────────────────────────
   /ws:
     get:
       tags: [WebSocket]
       summary: Connect to WebSocket
       description: |
-        Opens a WebSocket connection for real-time events. Bots authenticate
-        via query parameter:
+        Opens a WebSocket connection for real-time events.
+
+        ## Connecting
+
+        Bots authenticate via query parameter:
         ```
-        GET /api/v1/ws?token=bot_xxxxxxxxxxxx
+        wss://your-server.com/api/v1/ws?token=bot_xxxxxxxxxxxx
         ```
 
-        **Events received:**
-        - `MESSAGE_CREATE` — new message in any accessible channel
-        - `MESSAGE_UPDATE` — message edited
-        - `MESSAGE_DELETE` — message deleted
-        - `MEMBER_JOIN` / `MEMBER_LEAVE` — member changes
-        - `CHANNEL_CREATE` / `CHANNEL_UPDATE` / `CHANNEL_DELETE`
-        - `SERVER_UPDATE`
-        - `TYPING_START` — user is typing
+        JWTs can also be passed via query param or `Authorization: Bearer <jwt>` header.
 
-        Messages are JSON with `type` and `data` fields:
+        ## Connection Lifecycle
+
+        1. **Connect** — server upgrades to WebSocket
+        2. **Auto-subscribe** — server automatically subscribes the bot to all
+           channels it has access to (based on server membership). No manual
+           subscription needed.
+        3. **Presence** — server sets the bot's status to `"online"` and
+           broadcasts `PRESENCE_UPDATE` to other members
+        4. **Receive events** — all events for subscribed channels stream in
+        5. **Disconnect** — server broadcasts `PRESENCE_UPDATE` with `"offline"`
+
+        There is no `CONNECTED` or `HELLO` event — the connection is ready
+        immediately after the WebSocket upgrade completes.
+
+        ## Keepalive / Heartbeat
+
+        The server sends WebSocket **PING** frames every **30 seconds**.
+        Your client library should handle PONG automatically (most do).
+        If no PONG is received within **60 seconds**, the server closes
+        the connection.
+
+        You can optionally send a `HEARTBEAT` message to refresh your
+        presence TTL (useful if your client framework doesn't auto-pong):
         ```json
-        {
-          "type": "MESSAGE_CREATE",
-          "data": { "id": "...", "channelId": "...", "content": "...", ... }
-        }
+        {"type": "HEARTBEAT", "data": {}}
+        ```
+
+        ## Message Format
+
+        All messages (both directions) are JSON with `type` and `data`:
+        ```json
+        {"type": "EVENT_TYPE", "data": { ... }}
+        ```
+
+        ## Client-to-Server Messages
+
+        Bots can send three message types:
+
+        ### HEARTBEAT
+        Refreshes presence TTL. No response.
+        ```json
+        {"type": "HEARTBEAT", "data": {}}
+        ```
+
+        ### TYPING_START
+        Broadcasts a typing indicator to the channel.
+        Debounced server-side: only fires once per 8 seconds per channel.
+        ```json
+        {"type": "TYPING_START", "data": {"channelId": "uuid"}}
+        ```
+
+        ### PRESENCE_UPDATE
+        Sets a custom presence status, broadcast to all servers the bot is in.
+        ```json
+        {"type": "PRESENCE_UPDATE", "data": {"status": "online"}}
+        ```
+        Valid statuses: `"online"`, `"away"`, `"dnd"`, `"offline"`, or any
+        custom string.
+
+        ## Server-to-Client Events
+
+        ### Message Events
+
+        | Event | Data | Description |
+        |-------|------|-------------|
+        | `MESSAGE_CREATE` | Full `Message` object | New message posted |
+        | `MESSAGE_UPDATE` | Full `Message` object | Message edited |
+        | `MESSAGE_DELETE` | `{channelId, messageId}` | Message deleted |
+        | `MESSAGE_PIN` | `{channelId, messageId, pinnedBy}` | Message pinned |
+        | `MESSAGE_UNPIN` | `{channelId, messageId}` | Message unpinned |
+
+        ### Reaction Events
+
+        | Event | Data | Description |
+        |-------|------|-------------|
+        | `REACTION_ADD` | `{channelId, messageId, userId, emoji}` | Reaction added |
+        | `REACTION_REMOVE` | `{channelId, messageId, userId, emoji}` | Reaction removed |
+
+        ### Channel Events
+
+        | Event | Data | Description |
+        |-------|------|-------------|
+        | `CHANNEL_CREATE` | Full `Channel` object | Channel created |
+        | `CHANNEL_UPDATE` | Full `Channel` object | Channel updated |
+        | `CHANNEL_DELETE` | `{channelId, serverId}` | Channel deleted |
+
+        ### Category Events
+
+        | Event | Data | Description |
+        |-------|------|-------------|
+        | `CATEGORY_CREATE` | Full category object | Category created |
+        | `CATEGORY_UPDATE` | Full category object | Category updated |
+        | `CATEGORY_DELETE` | `{categoryId, serverId}` | Category deleted |
+
+        ### Server Events
+
+        | Event | Data | Description |
+        |-------|------|-------------|
+        | `SERVER_UPDATE` | Full `Server` object | Server settings changed |
+        | `SERVER_DELETE` | `{serverId}` | Server deleted |
+
+        ### Member Events
+
+        | Event | Data | Description |
+        |-------|------|-------------|
+        | `SERVER_MEMBER_JOIN` | `{serverId, userId}` | User joined server |
+        | `SERVER_MEMBER_LEAVE` | `{serverId, userId}` | User left server |
+        | `MEMBER_KICK` | `{serverId, userId}` | User kicked |
+        | `MEMBER_BAN` | `{serverId, userId}` | User banned |
+        | `MEMBER_TIMEOUT` | `{serverId, userId, timedOutUntil}` | User timed out (`timedOutUntil` is RFC 3339) |
+        | `MEMBER_NICKNAME_UPDATE` | `{serverId, userId, nickname}` | Nickname changed |
+
+        ### Role Events
+
+        | Event | Data | Description |
+        |-------|------|-------------|
+        | `ROLE_CREATE` | Full `Role` object | Role created |
+        | `ROLE_UPDATE` | Full `Role` object | Role updated |
+        | `ROLE_DELETE` | `{roleId, serverId}` | Role deleted |
+        | `ROLE_ASSIGNED` | `{serverId, roleId, userId}` | Role assigned to user |
+        | `ROLE_REMOVED` | `{serverId, roleId, userId}` | Role removed from user |
+
+        ### Presence & Activity Events
+
+        | Event | Data | Description |
+        |-------|------|-------------|
+        | `PRESENCE_UPDATE` | `{userId, status}` | User came online/offline/changed status |
+        | `TYPING_START` | `{channelId, userId}` | User is typing |
+        | `NOTIFICATION` | `{channelId, mentionCount, senderName, channelName, content}` | Bot was @mentioned (sent only to the mentioned user) |
+
+        ### DM Events
+
+        | Event | Data | Description |
+        |-------|------|-------------|
+        | `DM_CREATE` | Full DM channel object | New DM conversation started |
+
+        ## Connection Limits
+
+        | Parameter | Value |
+        |-----------|-------|
+        | Max message size | 4096 bytes |
+        | Send buffer | 256 events |
+        | Ping interval | 30 seconds |
+        | Pong timeout | 60 seconds |
+
+        If the server cannot deliver events fast enough (buffer full), it will
+        close the connection with code `4003`. Reconnect and resume.
+
+        ## Example: Minimal Bot
+
+        ```python
+        import websocket, json
+
+        def on_message(ws, message):
+            event = json.loads(message)
+            if event["type"] == "MESSAGE_CREATE":
+                msg = event["data"]
+                print(f"#{msg['channelId']}: {msg['author']['username']}: {msg['content']}")
+
+        ws = websocket.WebSocketApp(
+            "wss://your-server.com/api/v1/ws?token=bot_xxxxxxxxxxxx",
+            on_message=on_message
+        )
+        ws.run_forever(ping_interval=30)
         ```
       operationId: connectWebSocket
       security:
@@ -576,18 +1227,47 @@ components:
         type: string
         format: uuid
       description: Channel ID
+    messageID:
+      name: messageID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Message ID
+    userID:
+      name: userID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: User ID
+    roleID:
+      name: roleID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Role ID
+    emoji:
+      name: emoji
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Emoji character (URL-encoded)
 
   schemas:
     # ── Request Bodies ──────────────────────────────────────────────
     WebhookExecuteRequest:
       type: object
-      required: [content]
       properties:
         content:
           type: string
-          minLength: 1
           maxLength: 4000
-          description: Message content
+          description: Message content (required if no embeds)
         username:
           type: string
           description: Override the webhook's display name for this message
@@ -595,6 +1275,12 @@ components:
           type: string
           format: uri
           description: Override the webhook's avatar for this message
+        embeds:
+          type: array
+          items:
+            $ref: '#/components/schemas/Embed'
+          maxItems: 10
+          description: Rich embed objects (required if no content)
 
     CreateWebhookRequest:
       type: object
@@ -646,16 +1332,128 @@ components:
 
     SendMessageRequest:
       type: object
-      required: [content]
       properties:
         content:
           type: string
-          minLength: 1
           maxLength: 4000
+          description: Message content (required if no embeds)
         replyToId:
           type: string
           format: uuid
           description: ID of message to reply to
+        embeds:
+          type: array
+          items:
+            $ref: '#/components/schemas/Embed'
+          maxItems: 10
+          description: Rich embed objects (required if no content)
+        createdAt:
+          type: string
+          format: date-time
+          description: |
+            Backdate the message (bot-only). Cannot be in the future.
+            Useful for importing historical messages.
+
+    EditMessageRequest:
+      type: object
+      properties:
+        content:
+          type: string
+          maxLength: 4000
+          description: New message content (required if no embeds)
+        embeds:
+          type: array
+          items:
+            $ref: '#/components/schemas/Embed'
+          maxItems: 10
+          description: New embed objects (required if no content)
+
+    ImportMessage:
+      type: object
+      properties:
+        content:
+          type: string
+          maxLength: 4000
+          description: Message content (required if no embeds)
+        embeds:
+          type: array
+          items:
+            $ref: '#/components/schemas/Embed'
+          maxItems: 10
+        createdAt:
+          type: string
+          format: date-time
+          description: Message timestamp (defaults to now)
+        authorOverride:
+          $ref: '#/components/schemas/AuthorOverride'
+
+    CreateChannelRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        type:
+          type: string
+          enum: [text, voice]
+          default: text
+        topic:
+          type: string
+          maxLength: 1024
+        categoryId:
+          type: string
+          format: uuid
+
+    UpdateChannelRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        topic:
+          type: string
+          maxLength: 1024
+
+    UpdateNicknameRequest:
+      type: object
+      properties:
+        nickname:
+          type: string
+          maxLength: 32
+          nullable: true
+          description: New nickname (null or empty to clear)
+
+    CreateRoleRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        color:
+          type: string
+          description: Hex color (e.g. "#3498db")
+        permissions:
+          type: integer
+          format: int64
+          description: Permission bitfield
+
+    UpdateRoleRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        color:
+          type: string
+        permissions:
+          type: integer
+          format: int64
 
     # ── Response Models ─────────────────────────────────────────────
     Webhook:
@@ -742,6 +1540,12 @@ components:
           $ref: '#/components/schemas/Author'
         content:
           type: string
+        embeds:
+          type: array
+          items:
+            $ref: '#/components/schemas/Embed'
+        authorOverride:
+          $ref: '#/components/schemas/AuthorOverride'
         editedAt:
           type: string
           format: date-time
@@ -780,6 +1584,74 @@ components:
           nullable: true
         isBot:
           type: boolean
+
+    AuthorOverride:
+      type: object
+      nullable: true
+      description: |
+        Display override for imported messages. When present, clients should
+        show this username/avatar instead of the bot's actual identity.
+      properties:
+        username:
+          type: string
+        avatarUrl:
+          type: string
+          format: uri
+
+    Embed:
+      type: object
+      description: |
+        Rich embed object. Max 10 embeds per message, max 6000 chars total
+        per embed, max 25 fields per embed.
+      properties:
+        title:
+          type: string
+          description: Embed title (bold)
+        description:
+          type: string
+          description: Embed body text (supports Markdown)
+        url:
+          type: string
+          format: uri
+          description: URL the title links to
+        color:
+          type: integer
+          description: Color as decimal integer (e.g. 65280 for green)
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/EmbedField'
+          maxItems: 25
+        footer:
+          type: object
+          properties:
+            text:
+              type: string
+        thumbnail:
+          type: object
+          properties:
+            url:
+              type: string
+              format: uri
+        image:
+          type: object
+          properties:
+            url:
+              type: string
+              format: uri
+
+    EmbedField:
+      type: object
+      required: [name, value]
+      properties:
+        name:
+          type: string
+        value:
+          type: string
+        inline:
+          type: boolean
+          default: false
+          description: Whether to display side-by-side with other inline fields
 
     ReplyInfo:
       type: object
@@ -851,6 +1723,31 @@ components:
           type: string
           format: date-time
 
+    Role:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        serverId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        color:
+          type: string
+          nullable: true
+        position:
+          type: integer
+        permissions:
+          type: integer
+          format: int64
+        isDefault:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+
     Member:
       type: object
       properties:
@@ -880,6 +1777,21 @@ components:
         joinedAt:
           type: string
           format: date-time
+        roles:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              name:
+                type: string
+              color:
+                type: string
+                nullable: true
+              position:
+                type: integer
 
     DeleteResponse:
       type: object
@@ -942,4 +1854,4 @@ components:
           example:
             error:
               code: "NOT_FOUND"
-              message: "webhook not found"
+              message: "resource not found"

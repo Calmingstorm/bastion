@@ -226,6 +226,9 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 				r.Delete("/{messageID}/reactions/{emoji}", reactionHandler.RemoveReaction)
 			})
 
+			// Bulk import (bot-only, rate limited)
+			r.With(RateLimitByUserID(10, time.Minute)).Post("/channels/{channelID}/import", messageHandler.BulkImport)
+
 			// Pinned messages
 			r.Put("/channels/{channelID}/pins/{messageID}", pinHandler.Pin)
 			r.Delete("/channels/{channelID}/pins/{messageID}", pinHandler.Unpin)

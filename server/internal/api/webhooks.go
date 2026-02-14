@@ -350,9 +350,10 @@ func (h *WebhookHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Content   string  `json:"content"`
-		Username  *string `json:"username,omitempty"`
-		AvatarURL *string `json:"avatarUrl,omitempty"`
+		Content   string         `json:"content"`
+		Username  *string        `json:"username,omitempty"`
+		AvatarURL *string        `json:"avatarUrl,omitempty"`
+		Embeds    []models.Embed `json:"embeds,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
@@ -360,13 +361,19 @@ func (h *WebhookHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req.Content = strings.TrimSpace(req.Content)
-	if req.Content == "" {
-		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "content is required"))
+	if req.Content == "" && len(req.Embeds) == 0 {
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "content or embeds required"))
 		return
 	}
 	if len(req.Content) > 4000 {
 		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "content cannot exceed 4000 characters"))
 		return
+	}
+	if len(req.Embeds) > 0 {
+		if err := validateEmbeds(req.Embeds); err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", err.Error()))
+			return
+		}
 	}
 
 	// If username override is provided, update the webhook user's display name temporarily
@@ -376,25 +383,35 @@ func (h *WebhookHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Insert message as the webhook's pseudo-user
+	var whEmbedsJSON []byte
+	if len(req.Embeds) > 0 {
+		whEmbedsJSON, _ = json.Marshal(req.Embeds)
+	}
+
 	var msg models.Message
 	var msgAuthor models.Author
+	var returnedEmbedsJSON []byte
 	err = h.db.QueryRow(r.Context(),
 		`WITH new_msg AS (
-			INSERT INTO messages (channel_id, author_id, content)
-			VALUES ($1, $2, $3)
-			RETURNING id, channel_id, author_id, content, edited_at, created_at
+			INSERT INTO messages (channel_id, author_id, content, embeds)
+			VALUES ($1, $2, $3, $4)
+			RETURNING id, channel_id, author_id, content, edited_at, embeds, created_at
 		)
 		SELECT m.id, m.channel_id, m.content, m.edited_at, m.created_at,
-			   u.id, u.username, u.display_name, u.avatar_url, u.is_bot
+			   u.id, u.username, u.display_name, u.avatar_url, u.is_bot, m.embeds
 		FROM new_msg m
 		INNER JOIN users u ON u.id = m.author_id`,
-		wh.ChannelID, wh.UserID, req.Content,
+		wh.ChannelID, wh.UserID, req.Content, whEmbedsJSON,
 	).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.CreatedAt,
-		&msgAuthor.ID, &msgAuthor.Username, &msgAuthor.DisplayName, &msgAuthor.AvatarURL, &msgAuthor.IsBot)
+		&msgAuthor.ID, &msgAuthor.Username, &msgAuthor.DisplayName, &msgAuthor.AvatarURL, &msgAuthor.IsBot, &returnedEmbedsJSON)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to insert webhook message")
 		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
+	}
+
+	if len(returnedEmbedsJSON) > 0 {
+		json.Unmarshal(returnedEmbedsJSON, &msg.Embeds)
 	}
 
 	// Apply overrides for display

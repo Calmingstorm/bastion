@@ -48,11 +48,43 @@ export interface Attachment {
   createdAt: string;
 }
 
+export interface EmbedField {
+  name: string;
+  value: string;
+  inline?: boolean;
+}
+
+export interface EmbedFooter {
+  text: string;
+}
+
+export interface EmbedImage {
+  url: string;
+}
+
+export interface Embed {
+  title?: string;
+  description?: string;
+  url?: string;
+  color?: number;
+  fields?: EmbedField[];
+  footer?: EmbedFooter;
+  thumbnail?: EmbedImage;
+  image?: EmbedImage;
+}
+
+export interface AuthorOverride {
+  username: string;
+  avatarUrl?: string;
+}
+
 export interface Message {
   id: string;
   channelId: string;
   author: MessageAuthor;
   content: string;
+  embeds?: Embed[];
+  authorOverride?: AuthorOverride;
   createdAt: string;
   editedAt?: string;
   replyToId?: string;

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -185,13 +186,15 @@ func (h *PinHandler) Unpin(w http.ResponseWriter, r *http.Request) {
 
 // pinnedMessage is the response type for the List endpoint.
 type pinnedMessage struct {
-	ID        uuid.UUID  `json:"id"`
-	ChannelID uuid.UUID  `json:"channelId"`
-	Content   string     `json:"content"`
-	EditedAt  *time.Time `json:"editedAt,omitempty"`
-	CreatedAt time.Time  `json:"createdAt"`
-	Author    *models.Author `json:"author"`
-	PinnedAt  time.Time  `json:"pinnedAt"`
+	ID             uuid.UUID              `json:"id"`
+	ChannelID      uuid.UUID              `json:"channelId"`
+	Content        string                 `json:"content"`
+	Embeds         []models.Embed         `json:"embeds,omitempty"`
+	AuthorOverride *models.AuthorOverride `json:"authorOverride,omitempty"`
+	EditedAt       *time.Time             `json:"editedAt,omitempty"`
+	CreatedAt      time.Time              `json:"createdAt"`
+	Author         *models.Author         `json:"author"`
+	PinnedAt       time.Time              `json:"pinnedAt"`
 }
 
 // List handles GET /api/channels/{channelID}/pins
@@ -224,7 +227,7 @@ func (h *PinHandler) List(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.Query(r.Context(),
 		`SELECT m.id, m.channel_id, m.content, m.edited_at, m.created_at,
 			u.id, u.username, u.display_name, u.avatar_url, u.is_bot,
-			mp.created_at
+			mp.created_at, m.embeds, m.author_override
 		 FROM message_pins mp
 		 INNER JOIN messages m ON m.id = mp.message_id
 		 INNER JOIN users u ON u.id = m.author_id
@@ -244,14 +247,21 @@ func (h *PinHandler) List(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var msg pinnedMessage
 		var author models.Author
+		var embedsJSON, authorOverrideJSON []byte
 		if err := rows.Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.CreatedAt,
 			&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL, &author.IsBot,
-			&msg.PinnedAt); err != nil {
+			&msg.PinnedAt, &embedsJSON, &authorOverrideJSON); err != nil {
 			log.Error().Err(err).Msg("failed to scan pinned message")
 			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
 		msg.Author = &author
+		if len(embedsJSON) > 0 {
+			json.Unmarshal(embedsJSON, &msg.Embeds)
+		}
+		if len(authorOverrideJSON) > 0 {
+			json.Unmarshal(authorOverrideJSON, &msg.AuthorOverride)
+		}
 		pins = append(pins, msg)
 	}
 

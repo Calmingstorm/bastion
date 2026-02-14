@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
@@ -31,12 +32,37 @@ func NewMessageHandler(db *pgxpool.Pool, hub *realtime.Hub) *MessageHandler {
 }
 
 type sendMessageRequest struct {
-	Content   string     `json:"content"`
-	ReplyToID *uuid.UUID `json:"replyToId,omitempty"`
+	Content   string         `json:"content"`
+	ReplyToID *uuid.UUID     `json:"replyToId,omitempty"`
+	Embeds    []models.Embed `json:"embeds,omitempty"`
+	CreatedAt *time.Time     `json:"createdAt,omitempty"`
 }
 
 type editMessageRequest struct {
-	Content string `json:"content"`
+	Content string         `json:"content"`
+	Embeds  []models.Embed `json:"embeds,omitempty"`
+}
+
+func validateEmbeds(embeds []models.Embed) error {
+	if len(embeds) > 10 {
+		return fmt.Errorf("maximum 10 embeds per message")
+	}
+	for i, e := range embeds {
+		total := len(e.Title) + len(e.Description)
+		if e.Footer != nil {
+			total += len(e.Footer.Text)
+		}
+		for _, f := range e.Fields {
+			total += len(f.Name) + len(f.Value)
+		}
+		if total > 6000 {
+			return fmt.Errorf("embed %d exceeds 6000 character limit", i)
+		}
+		if len(e.Fields) > 25 {
+			return fmt.Errorf("embed %d exceeds 25 field limit", i)
+		}
+	}
+	return nil
 }
 
 func (h *MessageHandler) checkChannelAccess(r *http.Request, channelID, userID uuid.UUID) bool {
@@ -75,7 +101,8 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	baseQuery := `SELECT m.id, m.channel_id, m.content, m.edited_at, m.created_at,
 		 u.id, u.username, u.display_name, u.avatar_url, u.is_bot,
-		 m.reply_to_id, rm.id, rm.content, ru.id, ru.username, ru.display_name, ru.avatar_url
+		 m.reply_to_id, rm.id, rm.content, ru.id, ru.username, ru.display_name, ru.avatar_url,
+		 m.embeds, m.author_override
 		 FROM messages m
 		 INNER JOIN users u ON u.id = m.author_id
 		 LEFT JOIN messages rm ON rm.id = m.reply_to_id
@@ -130,14 +157,22 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 		var replyID, replyAuthorID *uuid.UUID
 		var replyContent, replyUsername *string
 		var replyDisplayName, replyAvatarURL *string
+		var embedsJSON, authorOverrideJSON []byte
 		if err := rows.Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.CreatedAt,
 			&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL, &author.IsBot,
-			&replyToID, &replyID, &replyContent, &replyAuthorID, &replyUsername, &replyDisplayName, &replyAvatarURL); err != nil {
+			&replyToID, &replyID, &replyContent, &replyAuthorID, &replyUsername, &replyDisplayName, &replyAvatarURL,
+			&embedsJSON, &authorOverrideJSON); err != nil {
 			log.Error().Err(err).Msg("failed to scan message")
 			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
 		msg.Author = &author
+		if len(embedsJSON) > 0 {
+			json.Unmarshal(embedsJSON, &msg.Embeds)
+		}
+		if len(authorOverrideJSON) > 0 {
+			json.Unmarshal(authorOverrideJSON, &msg.AuthorOverride)
+		}
 		msg.ReplyToID = replyToID
 		if replyID != nil && replyContent != nil && replyAuthorID != nil && replyUsername != nil {
 			// Truncate reply content to 100 chars
@@ -236,13 +271,31 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req.Content = strings.TrimSpace(req.Content)
-	if req.Content == "" {
-		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "message content cannot be empty"))
+	if req.Content == "" && len(req.Embeds) == 0 {
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "message must have content or embeds"))
 		return
 	}
 	if len(req.Content) > 4000 {
 		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "message content cannot exceed 4000 characters"))
 		return
+	}
+	if len(req.Embeds) > 0 {
+		if err := validateEmbeds(req.Embeds); err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", err.Error()))
+			return
+		}
+	}
+
+	// Timestamp override (bot-only)
+	if req.CreatedAt != nil {
+		if !auth.IsBotFromContext(r.Context()) {
+			writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "only bots can set createdAt"))
+			return
+		}
+		if req.CreatedAt.After(time.Now().Add(time.Minute)) {
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "createdAt cannot be in the future"))
+			return
+		}
 	}
 
 	// Validate reply reference if provided
@@ -258,27 +311,35 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var embedsJSON []byte
+	if len(req.Embeds) > 0 {
+		embedsJSON, _ = json.Marshal(req.Embeds)
+	}
+
 	var msg models.Message
 	var author models.Author
 	err = h.db.QueryRow(r.Context(),
 		`WITH new_msg AS (
-			INSERT INTO messages (channel_id, author_id, content, reply_to_id)
-			VALUES ($1, $2, $3, $4)
-			RETURNING id, channel_id, author_id, content, edited_at, reply_to_id, created_at
+			INSERT INTO messages (channel_id, author_id, content, reply_to_id, embeds, created_at)
+			VALUES ($1, $2, $3, $4, $5, COALESCE($6, NOW()))
+			RETURNING id, channel_id, author_id, content, edited_at, reply_to_id, embeds, created_at
 		)
 		SELECT m.id, m.channel_id, m.content, m.edited_at, m.reply_to_id, m.created_at,
-			   u.id, u.username, u.display_name, u.avatar_url, u.is_bot
+			   u.id, u.username, u.display_name, u.avatar_url, u.is_bot, m.embeds
 		FROM new_msg m
 		INNER JOIN users u ON u.id = m.author_id`,
-		channelID, userID, req.Content, req.ReplyToID,
+		channelID, userID, req.Content, req.ReplyToID, embedsJSON, req.CreatedAt,
 	).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.ReplyToID, &msg.CreatedAt,
-		&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL, &author.IsBot)
+		&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL, &author.IsBot, &embedsJSON)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to insert message")
 		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 	msg.Author = &author
+	if len(embedsJSON) > 0 {
+		json.Unmarshal(embedsJSON, &msg.Embeds)
+	}
 
 	// Populate reply info if this is a reply
 	if msg.ReplyToID != nil {
@@ -353,28 +414,40 @@ func (h *MessageHandler) Edit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req.Content = strings.TrimSpace(req.Content)
-	if req.Content == "" {
-		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "message content cannot be empty"))
+	if req.Content == "" && len(req.Embeds) == 0 {
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "message must have content or embeds"))
 		return
 	}
 	if len(req.Content) > 4000 {
 		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "message content cannot exceed 4000 characters"))
 		return
 	}
+	if len(req.Embeds) > 0 {
+		if err := validateEmbeds(req.Embeds); err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", err.Error()))
+			return
+		}
+	}
+
+	var editEmbedsJSON []byte
+	if len(req.Embeds) > 0 {
+		editEmbedsJSON, _ = json.Marshal(req.Embeds)
+	}
 
 	var msg models.Message
 	var author models.Author
+	var returnedEmbedsJSON []byte
 	err = h.db.QueryRow(r.Context(),
-		`UPDATE messages SET content = $1, edited_at = NOW()
+		`UPDATE messages SET content = $1, embeds = $3, edited_at = NOW()
 		 WHERE id = $2
-		 RETURNING id, channel_id, content, edited_at, created_at,
+		 RETURNING id, channel_id, content, edited_at, created_at, embeds,
 			(SELECT u.id FROM users u WHERE u.id = author_id),
 			(SELECT u.username FROM users u WHERE u.id = author_id),
 			(SELECT u.display_name FROM users u WHERE u.id = author_id),
 			(SELECT u.avatar_url FROM users u WHERE u.id = author_id),
 			(SELECT u.is_bot FROM users u WHERE u.id = author_id)`,
-		req.Content, messageID,
-	).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.CreatedAt,
+		req.Content, messageID, editEmbedsJSON,
+	).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.CreatedAt, &returnedEmbedsJSON,
 		&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL, &author.IsBot)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to update message")
@@ -382,6 +455,9 @@ func (h *MessageHandler) Edit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	msg.Author = &author
+	if len(returnedEmbedsJSON) > 0 {
+		json.Unmarshal(returnedEmbedsJSON, &msg.Embeds)
+	}
 
 	h.hub.BroadcastToChannel(channelID, realtime.Event{
 		Type: realtime.EventMessageUpdate,
@@ -550,4 +626,137 @@ func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, a
 			},
 		})
 	}
+}
+
+// BulkImport handles POST /channels/{channelID}/import (bot-only)
+func (h *MessageHandler) BulkImport(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromContext(r.Context())
+	channelID, err := parseUUID(chi.URLParam(r, "channelID"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid channel ID"))
+		return
+	}
+
+	if !auth.IsBotFromContext(r.Context()) {
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "bulk import is only available to bots"))
+		return
+	}
+
+	if !h.checkChannelAccess(r, channelID, userID) {
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have access to this channel"))
+		return
+	}
+
+	type importMessage struct {
+		Content        string                `json:"content"`
+		Embeds         []models.Embed        `json:"embeds,omitempty"`
+		CreatedAt      *time.Time            `json:"createdAt,omitempty"`
+		AuthorOverride *models.AuthorOverride `json:"authorOverride,omitempty"`
+	}
+
+	var msgs []importMessage
+	if err := json.NewDecoder(r.Body).Decode(&msgs); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
+		return
+	}
+
+	if len(msgs) == 0 {
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "at least one message is required"))
+		return
+	}
+	if len(msgs) > 50 {
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "maximum 50 messages per import"))
+		return
+	}
+
+	// Validate all messages
+	for i, m := range msgs {
+		if m.Content == "" && len(m.Embeds) == 0 {
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", fmt.Sprintf("message %d must have content or embeds", i)))
+			return
+		}
+		if len(m.Content) > 4000 {
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", fmt.Sprintf("message %d content exceeds 4000 characters", i)))
+			return
+		}
+		if len(m.Embeds) > 0 {
+			if err := validateEmbeds(m.Embeds); err != nil {
+				writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", fmt.Sprintf("message %d: %s", i, err.Error())))
+				return
+			}
+		}
+		if m.CreatedAt != nil && m.CreatedAt.After(time.Now().Add(time.Minute)) {
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", fmt.Sprintf("message %d createdAt cannot be in the future", i)))
+			return
+		}
+	}
+
+	tx, err := h.db.Begin(r.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("failed to begin bulk import transaction")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	// Fetch author info once
+	var author models.Author
+	err = tx.QueryRow(r.Context(),
+		`SELECT id, username, display_name, avatar_url, is_bot FROM users WHERE id = $1`, userID,
+	).Scan(&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL, &author.IsBot)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to fetch bot user")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+
+	result := make([]models.Message, 0, len(msgs))
+	for _, m := range msgs {
+		var embedsJSON, authorOverrideJSON []byte
+		if len(m.Embeds) > 0 {
+			embedsJSON, _ = json.Marshal(m.Embeds)
+		}
+		if m.AuthorOverride != nil {
+			authorOverrideJSON, _ = json.Marshal(m.AuthorOverride)
+		}
+
+		var msg models.Message
+		var returnedEmbeds, returnedOverride []byte
+		err = tx.QueryRow(r.Context(),
+			`INSERT INTO messages (channel_id, author_id, content, embeds, author_override, created_at)
+			 VALUES ($1, $2, $3, $4, $5, COALESCE($6, NOW()))
+			 RETURNING id, channel_id, content, edited_at, embeds, author_override, created_at`,
+			channelID, userID, m.Content, embedsJSON, authorOverrideJSON, m.CreatedAt,
+		).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &returnedEmbeds, &returnedOverride, &msg.CreatedAt)
+		if err != nil {
+			log.Error().Err(err).Msg("failed to insert imported message")
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+			return
+		}
+
+		msg.Author = &author
+		if len(returnedEmbeds) > 0 {
+			json.Unmarshal(returnedEmbeds, &msg.Embeds)
+		}
+		if len(returnedOverride) > 0 {
+			json.Unmarshal(returnedOverride, &msg.AuthorOverride)
+		}
+		result = append(result, msg)
+	}
+
+	if err := tx.Commit(r.Context()); err != nil {
+		log.Error().Err(err).Msg("failed to commit bulk import")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+
+	// Broadcast all imported messages
+	for _, msg := range result {
+		h.hub.BroadcastToChannel(channelID, realtime.Event{
+			Type: realtime.EventMessageCreate,
+			Data: msg,
+		})
+	}
+
+	writeJSON(w, http.StatusCreated, result)
 }
