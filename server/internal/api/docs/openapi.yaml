@@ -66,6 +66,8 @@ tags:
     description: List server members and manage nicknames (bot-accessible)
   - name: Roles
     description: Create, update, delete, assign, and remove roles (bot-accessible)
+  - name: Categories
+    description: Create, update, delete, and list channel categories
   - name: WebSocket
     description: Real-time event stream
 
@@ -732,6 +734,115 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  # ── Categories ───────────────────────────────────────────────────────
+  /servers/{serverID}/categories:
+    get:
+      tags: [Categories]
+      summary: List categories
+      description: List all channel categories in a server, ordered by position.
+      operationId: listCategories
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+      responses:
+        '200':
+          description: Category list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ChannelCategory'
+
+    post:
+      tags: [Categories]
+      summary: Create category
+      description: Create a new channel category. Requires `ManageCategories` permission.
+      operationId: createCategory
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCategoryRequest'
+            example:
+              name: "Voice Channels"
+      responses:
+        '201':
+          description: Category created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelCategory'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /servers/{serverID}/categories/{categoryID}:
+    patch:
+      tags: [Categories]
+      summary: Update category
+      description: Update a category's name or position. Requires `ManageCategories` permission.
+      operationId: updateCategory
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+        - $ref: '#/components/parameters/categoryID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCategoryRequest'
+      responses:
+        '200':
+          description: Category updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelCategory'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Categories]
+      summary: Delete category
+      description: |
+        Delete a category. Channels in the deleted category become uncategorized
+        (their `categoryId` is set to null). Requires `ManageCategories` permission.
+      operationId: deleteCategory
+      security:
+        - BotToken: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+        - $ref: '#/components/parameters/categoryID'
+      responses:
+        '200':
+          description: Category deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   # ── Members ──────────────────────────────────────────────────────────
   /servers/{serverID}/members:
     get:
@@ -1251,6 +1362,14 @@ components:
         type: string
         format: uuid
       description: Role ID
+    categoryID:
+      name: categoryID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Category ID
     emoji:
       name: emoji
       in: path
@@ -1406,6 +1525,26 @@ components:
           type: string
           format: uuid
 
+    CreateCategoryRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+
+    UpdateCategoryRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        position:
+          type: integer
+          description: New position for ordering
+
     UpdateChannelRequest:
       type: object
       properties:
@@ -1416,6 +1555,12 @@ components:
         topic:
           type: string
           maxLength: 1024
+        categoryId:
+          type: string
+          description: |
+            Category to assign the channel to. Use a UUID to move into a category,
+            or an empty string `""` to remove from any category. Omit to leave unchanged.
+          example: "550e8400-e29b-41d4-a716-446655440000"
 
     UpdateNicknameRequest:
       type: object
@@ -1719,6 +1864,23 @@ components:
           type: string
           format: uuid
           nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    ChannelCategory:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        serverId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        position:
+          type: integer
         createdAt:
           type: string
           format: date-time
