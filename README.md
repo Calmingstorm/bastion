@@ -49,6 +49,19 @@ A self-hostable, open-source chat platform built for communities. Real-time text
 - WebSocket reconnection with automatic data resync
 - [WebSocket protocol documentation](docs/websocket-protocol.md)
 
+## Clients
+
+Bastion has native clients for all major platforms, built with [Tauri](https://tauri.app/). All clients share the same `web/src/` codebase.
+
+| Platform | Download | Notes |
+|----------|----------|-------|
+| Web | [intolerable.cc](https://intolerable.cc) | No install needed |
+| Linux | [.deb / .rpm / .AppImage](https://github.com/Calmingstorm/bastion/releases/tag/desktop-linux-v0.1.1) | |
+| Windows | [.exe installer](https://github.com/Calmingstorm/bastion/releases/tag/desktop-windows-v0.1.1) | |
+| macOS | [.dmg](https://github.com/Calmingstorm/bastion/releases/tag/desktop-macos-v0.1.1) | Apple Silicon, unsigned — right-click → Open on first launch |
+| Android | [.apk](https://github.com/Calmingstorm/bastion/releases/tag/android-v0.1.3) | Unsigned — enable "Install from unknown sources" |
+| iOS | — | Blocked on Apple Developer account |
+
 ## Quick Start
 
 ### Prerequisites
@@ -144,15 +157,22 @@ bastion/
 │   │   ├── realtime/    # WebSocket hub + client
 │   │   └── storage/     # File upload handling
 │   └── migrations/      # SQL migrations (auto-applied)
-├── web/                 # React web client
+├── web/                 # React web client (shared by all platforms)
 │   └── src/
 │       ├── api/         # Axios client, WebSocket client
 │       ├── components/  # UI components
 │       ├── hooks/       # React hooks
 │       ├── pages/       # Route pages
+│       ├── platform/    # Platform adapters (web, desktop, mobile)
 │       ├── stores/      # Zustand state management
-│       ├── utils/       # Storage, event bus, notifications, errors
+│       ├── utils/       # Permissions, storage, event bus, errors
 │       └── styles/      # CSS
+├── desktop/             # Tauri desktop wrapper (Linux, Windows, macOS)
+│   └── src-tauri/       # Rust/Tauri config
+├── android/             # Tauri mobile wrapper (Android)
+│   └── src-tauri/       # Rust/Tauri config
+├── ios/                 # Tauri mobile wrapper (iOS, not yet buildable)
+│   └── src-tauri/       # Rust/Tauri config
 ├── docs/                # Protocol and API documentation
 └── deploy/              # Docker Compose, Dockerfiles, Caddy
 ```
