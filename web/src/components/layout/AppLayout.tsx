@@ -65,7 +65,7 @@ export function AppLayout() {
         {/* Unified Sidebar */}
         <div className={
           isMobile
-            ? `fixed left-0 top-0 z-40 h-full transition-transform duration-200 ${showSidebar ? 'translate-x-0' : '-translate-x-full'}`
+            ? `fixed left-0 top-0 z-40 h-full safe-area-pad bg-[var(--bg-secondary)] transition-transform duration-200 ${showSidebar ? 'translate-x-0' : '-translate-x-full'}`
             : ''
         }>
           <UnifiedSidebar />
@@ -90,7 +90,7 @@ export function AppLayout() {
               className="fixed inset-0 z-30 bg-black/50"
               onClick={() => setShowMembers(false)}
             />
-            <div className="fixed right-0 top-0 z-40 h-full">
+            <div className="fixed right-0 top-0 z-40 h-full safe-area-pad bg-[var(--bg-secondary)]">
               <MemberList />
             </div>
           </>
@@ -116,7 +116,7 @@ export function AppLayout() {
       {/* Server list - narrow left sidebar */}
       <div className={
         isMobile
-          ? `fixed left-0 top-0 z-40 h-full transition-transform duration-200 ${showSidebar ? 'translate-x-0' : '-translate-x-full'}`
+          ? `fixed left-0 top-0 z-40 h-full safe-area-pad bg-[var(--bg-tertiary)] transition-transform duration-200 ${showSidebar ? 'translate-x-0' : '-translate-x-full'}`
           : ''
       }>
         <ServerList />
@@ -125,7 +125,7 @@ export function AppLayout() {
       {/* Channel / DM list - secondary sidebar */}
       <div className={
         isMobile
-          ? `fixed left-[72px] top-0 z-40 h-full transition-transform duration-200 ${showSidebar ? 'translate-x-0' : '-translate-x-[calc(100%+72px)]'}`
+          ? `fixed left-[72px] top-0 z-40 h-full safe-area-pad bg-[var(--bg-secondary)] transition-transform duration-200 ${showSidebar ? 'translate-x-0' : '-translate-x-[calc(100%+72px)]'}`
           : ''
       }>
         {isDMView ? <DMList /> : <ChannelList />}
@@ -187,7 +187,7 @@ export function AppLayout() {
             className="fixed inset-0 z-30 bg-black/50"
             onClick={() => setShowMembers(false)}
           />
-          <div className="fixed right-0 top-0 z-40 h-full">
+          <div className="fixed right-0 top-0 z-40 h-full safe-area-pad bg-[var(--bg-secondary)]">
             <MemberList />
           </div>
         </>
