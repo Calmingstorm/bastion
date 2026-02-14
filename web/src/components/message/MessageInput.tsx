@@ -144,9 +144,10 @@ export function MessageInput() {
 
   // Detect /slash command context
   const checkSlashContext = (text: string) => {
-    if (text.startsWith('/') && !text.includes(' ')) {
+    if (text.startsWith('/') && !text.includes(' ') && commands.length > 0) {
       const query = text.slice(1);
-      setShowSlashPicker(true);
+      const hasMatches = commands.some((cmd) => cmd.type === 1 && cmd.name.startsWith(query.toLowerCase()));
+      setShowSlashPicker(hasMatches);
       setSlashQuery(query);
       setSlashIndex(0);
     } else {
@@ -231,28 +232,29 @@ export function MessageInput() {
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (showSlashPicker) {
       const filtered = commands.filter((cmd) => cmd.type === 1 && cmd.name.startsWith(slashQuery.toLowerCase())).slice(0, 10);
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        setSlashIndex((prev) => Math.max(0, prev - 1));
-        return;
-      }
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        setSlashIndex((prev) => Math.min(filtered.length - 1, prev + 1));
-        return;
-      }
-      if (e.key === 'Tab' || e.key === 'Enter') {
-        e.preventDefault();
-        if (filtered[slashIndex]) {
-          handleSlashSelect(filtered[slashIndex]);
+      if (filtered.length > 0) {
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          setSlashIndex((prev) => Math.max(0, prev - 1));
+          return;
         }
-        return;
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          setSlashIndex((prev) => Math.min(filtered.length - 1, prev + 1));
+          return;
+        }
+        if (e.key === 'Tab' || e.key === 'Enter') {
+          e.preventDefault();
+          handleSlashSelect(filtered[slashIndex]);
+          return;
+        }
       }
       if (e.key === 'Escape') {
         e.preventDefault();
         setShowSlashPicker(false);
         return;
       }
+      // No matching commands — fall through to normal send
     }
 
     if (showMentions) {
