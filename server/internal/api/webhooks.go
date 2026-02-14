@@ -84,12 +84,13 @@ func (h *WebhookHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create a pseudo-user for this webhook to author messages
+	webhookUUID := uuid.New().String()
 	var webhookUserID uuid.UUID
 	err = h.db.QueryRow(r.Context(),
 		`INSERT INTO users (username, email, password_hash, is_bot)
 		 VALUES ($1, $2, '', TRUE)
 		 RETURNING id`,
-		"webhook-"+req.Name, "webhook-"+uuid.New().String()+"@internal",
+		"webhook-"+webhookUUID, "webhook-"+webhookUUID+"@internal",
 	).Scan(&webhookUserID)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create webhook user")

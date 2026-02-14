@@ -40,6 +40,17 @@ export const useWSStore = create<WSState>((set) => ({
           useUnreadStore.getState().markUnread(message.channelId);
         }
 
+        // If this message is for a channel not in our lists, refetch DMs
+        // (handles reopened DMs where the user had closed the conversation)
+        const { channels } = useServerStore.getState();
+        const { dmChannels } = useDMStore.getState();
+        const isKnownChannel =
+          channels.some((c) => c.id === message.channelId) ||
+          dmChannels.some((d) => d.id === message.channelId);
+        if (!isKnownChannel) {
+          useDMStore.getState().fetchDMs();
+        }
+
         // Clear typing indicator for this user
         if (message.author) {
           useTypingStore.getState().removeTyping(message.channelId, message.author.id);

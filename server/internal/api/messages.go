@@ -357,19 +357,20 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Broadcast to WebSocket subscribers
-	h.hub.BroadcastToChannel(channelID, realtime.Event{
-		Type: realtime.EventMessageCreate,
-		Data: msg,
-	})
-
 	// For DM channels, reopen for any members who closed the conversation
+	// (must happen BEFORE broadcast so frontend refetch sees the reopened DM)
 	if serverID == nil {
 		h.db.Exec(r.Context(),
 			`UPDATE dm_members SET closed_at = NULL WHERE channel_id = $1 AND closed_at IS NOT NULL`,
 			channelID,
 		)
 	}
+
+	// Broadcast to WebSocket subscribers
+	h.hub.BroadcastToChannel(channelID, realtime.Event{
+		Type: realtime.EventMessageCreate,
+		Data: msg,
+	})
 
 	// Process @mentions (only for server channels, not DMs)
 	if serverID != nil {

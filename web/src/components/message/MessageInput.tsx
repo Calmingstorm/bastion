@@ -410,13 +410,24 @@ export function MessageInput() {
           }}
           placeholder={placeholder}
           rows={1}
+          enterKeyHint="send"
           className="max-h-[300px] min-h-[44px] flex-1 resize-none bg-transparent px-3 py-2.5 text-[var(--text-primary)] placeholder-[var(--text-muted)] outline-none"
         />
 
-        {/* GIF + Emoji buttons */}
+        {/* GIF + Emoji + Send buttons */}
         <div className="flex h-[44px] shrink-0 items-center self-end mr-1">
           {gifEnabled && <GifPicker onSelect={handleGifSelect} />}
           <EmojiInputPicker onSelect={insertEmoji} />
+          <button
+            onClick={handleSend}
+            disabled={isSending || (!content.trim() && files.length === 0)}
+            className="ml-0.5 rounded p-1.5 text-[var(--text-muted)] transition-colors hover:text-[var(--accent)] disabled:opacity-30 disabled:hover:text-[var(--text-muted)]"
+            title="Send message"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+            </svg>
+          </button>
         </div>
       </div>
     </div>
