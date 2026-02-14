@@ -58,6 +58,23 @@ jobs:
         run: npx tauri android init
         working-directory: android
 
+      - name: Patch MainActivity (disable edge-to-edge, set system bar colors)
+        run: |
+          cat > android/src-tauri/gen/android/app/src/main/java/org/bastions/app/MainActivity.kt <<'KOTLIN'
+          package org.bastions.app
+
+          import android.os.Bundle
+          import android.graphics.Color
+
+          class MainActivity : TauriActivity() {
+            override fun onCreate(savedInstanceState: Bundle?) {
+              super.onCreate(savedInstanceState)
+              window.statusBarColor = Color.parseColor("#16121e")
+              window.navigationBarColor = Color.parseColor("#16121e")
+            }
+          }
+          KOTLIN
+
       - name: Build APK
         run: npx tauri android build --apk
         working-directory: android

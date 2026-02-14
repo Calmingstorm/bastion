@@ -53,7 +53,7 @@ export function AppLayout() {
     const isDM = !!selectedDMId && !selectedChannelId;
 
     return (
-      <div className="flex h-screen w-screen overflow-hidden">
+      <div className="flex h-full w-full overflow-hidden">
         {/* Mobile sidebar overlay */}
         {isMobile && showSidebar && (
           <div
@@ -104,7 +104,7 @@ export function AppLayout() {
   const showChat = isDMView ? !!selectedDMId : true;
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden">
+    <div className="flex h-full w-full overflow-hidden">
       {/* Mobile sidebar overlay */}
       {isMobile && showSidebar && (
         <div
