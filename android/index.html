@@ -6,27 +6,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Bastion</title>
   </head>
-  <body style="margin:0;background:#16121e;color:#e4e0ed;font-family:-apple-system,sans-serif">
-    <div id="root">
-      <div style="display:flex;align-items:center;justify-content:center;height:100vh">
-        <div style="text-align:center">
-          <p id="load-msg">Loading Bastion...</p>
-          <p id="app-error" style="display:none;color:#f43f5e;margin-top:12px;font-size:13px;max-width:320px;word-break:break-word"></p>
-        </div>
-      </div>
-    </div>
-    <script>
-      window.onerror = function(msg, src, line) {
-        var e = document.getElementById('app-error');
-        if (e) { e.style.display = 'block'; e.textContent = msg + ' at ' + src + ':' + line; }
-        document.getElementById('load-msg').textContent = 'Error';
-      };
-      window.onunhandledrejection = function(ev) {
-        var e = document.getElementById('app-error');
-        if (e) { e.style.display = 'block'; e.textContent = String(ev.reason); }
-        document.getElementById('load-msg').textContent = 'Error';
-      };
-    </script>
+  <body>
+    <div id="root"></div>
     <script type="module" src="../web/src/main.tsx"></script>
   </body>
 </html>
