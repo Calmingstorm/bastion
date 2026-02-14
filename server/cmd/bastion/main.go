@@ -59,6 +59,19 @@ func main() {
 	go hub.Run()
 	defer hub.Stop()
 
+	// Periodic cleanup of expired interaction tokens
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			_, err := pool.Exec(context.Background(),
+				"DELETE FROM interaction_tokens WHERE expires_at < NOW()")
+			if err != nil {
+				log.Warn().Err(err).Msg("failed to clean up expired interaction tokens")
+			}
+		}
+	}()
+
 	// Create router
 	handler := api.NewRouter(pool, cfg, hub, rdb)
 

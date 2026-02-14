@@ -1,8 +1,9 @@
 import * as ContextMenu from '@radix-ui/react-context-menu';
-import { apiCreateDM, apiKickMember, apiBanMember, apiTimeoutMember } from '../../api/client';
+import { apiCreateDM, apiKickMember, apiBanMember, apiTimeoutMember, apiExecuteInteraction } from '../../api/client';
 import { useAuthStore } from '../../stores/authStore';
 import { useDMStore } from '../../stores/dmStore';
 import { useServerStore } from '../../stores/serverStore';
+import { useCommandStore } from '../../stores/commandStore';
 
 interface UserContextMenuProps {
   userId: string;
@@ -44,6 +45,21 @@ export function UserContextMenu({ userId, username, serverId, isOwner, canModera
     try { await apiTimeoutMember(serverId, userId, duration); } catch { /* handled */ }
   };
 
+  const allCommands = useCommandStore((s) => s.commands);
+  const userCommands = serverId ? allCommands.filter((cmd) => cmd.type === 2) : [];
+  const selectedChannelId = useServerStore((s) => s.selectedChannelId);
+
+  const handleRunUserCommand = async (commandId: string) => {
+    if (!serverId || !selectedChannelId) return;
+    try {
+      await apiExecuteInteraction(serverId, {
+        commandId,
+        channelId: selectedChannelId,
+        targetId: userId,
+      });
+    } catch { /* handled */ }
+  };
+
   const showModActions = canModerate && !isOwner && !isSelf && serverId;
 
   const itemClass = "flex w-full cursor-default items-center rounded px-2.5 py-1.5 text-sm outline-none text-[var(--text-secondary)] hover:bg-[var(--accent)] hover:text-white";
@@ -68,6 +84,19 @@ export function UserContextMenu({ userId, username, serverId, isOwner, canModera
           <ContextMenu.Item onSelect={handleCopyUsername} className={itemClass}>
             Copy Username
           </ContextMenu.Item>
+          {userCommands.length > 0 && (
+            <>
+              <ContextMenu.Separator className="my-1 h-px bg-[var(--border)]" />
+              <ContextMenu.Label className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-[var(--text-muted)]">
+                Apps
+              </ContextMenu.Label>
+              {userCommands.map((cmd) => (
+                <ContextMenu.Item key={cmd.id} onSelect={() => handleRunUserCommand(cmd.id)} className={itemClass}>
+                  {cmd.name}
+                </ContextMenu.Item>
+              ))}
+            </>
+          )}
           {showModActions && (
             <>
               <ContextMenu.Separator className="my-1 h-px bg-[var(--border)]" />

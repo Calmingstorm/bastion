@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, type KeyboardEvent } from 'react';
+import * as ContextMenu from '@radix-ui/react-context-menu';
 import type { Message } from '../../types';
 import { MessageActions } from './MessageActions';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
@@ -13,9 +14,10 @@ import { useMessageStore } from '../../stores/messageStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { usePermissionStore } from '../../stores/permissionStore';
+import { useCommandStore } from '../../stores/commandStore';
 import { PERMISSIONS } from '../../utils/permissions';
 import { resolveMediaUrl } from '../../platform';
-import { apiPinMessage } from '../../api/client';
+import { apiPinMessage, apiExecuteInteraction } from '../../api/client';
 
 interface MessageItemProps {
   message: Message;
@@ -85,7 +87,7 @@ function formatFullTimestamp(dateStr: string): string {
 }
 
 export function MessageItem({ message, isCompact }: MessageItemProps) {
-  const { author, content, createdAt, editedAt, attachments } = message;
+  const { author, content, createdAt, editedAt, attachments, ephemeral } = message;
   const displayName = message.authorOverride?.username || author?.displayName || author?.username || 'Unknown';
   const initial = displayName.charAt(0).toUpperCase();
   const avatarColor = getAvatarColor(author?.id || '0');
@@ -98,6 +100,20 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
     || (serverPerms & PERMISSIONS.KickMembers) === PERMISSIONS.KickMembers
     || (serverPerms & PERMISSIONS.BanMembers) === PERMISSIONS.BanMembers
     || (serverPerms & PERMISSIONS.TimeoutMembers) === PERMISSIONS.TimeoutMembers;
+
+  const allCommands = useCommandStore((s) => s.commands);
+  const messageCommands = selectedServerId ? allCommands.filter((cmd) => cmd.type === 3) : [];
+
+  const handleRunMessageCommand = async (commandId: string) => {
+    if (!selectedServerId) return;
+    try {
+      await apiExecuteInteraction(selectedServerId, {
+        commandId,
+        channelId: message.channelId,
+        targetId: message.id,
+      });
+    } catch { /* handled */ }
+  };
 
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState(content);
@@ -241,15 +257,35 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
     );
   };
 
+  const messageContextMenu = messageCommands.length > 0 ? (
+    <ContextMenu.Content className="z-50 min-w-[180px] rounded-lg border border-[var(--border)] bg-[var(--bg-tertiary)] p-1.5 shadow-xl">
+      <ContextMenu.Label className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-[var(--text-muted)]">
+        Apps
+      </ContextMenu.Label>
+      {messageCommands.map((cmd) => (
+        <ContextMenu.Item
+          key={cmd.id}
+          onSelect={() => handleRunMessageCommand(cmd.id)}
+          className="flex w-full cursor-default items-center rounded px-2.5 py-1.5 text-sm outline-none text-[var(--text-secondary)] hover:bg-[var(--accent)] hover:text-white"
+        >
+          {cmd.name}
+        </ContextMenu.Item>
+      ))}
+    </ContextMenu.Content>
+  ) : null;
+
   if (isCompact) {
-    return (
+    const compactContent = (
       <>
-        <div className="group relative py-px pr-12 pl-[72px] hover:bg-[var(--bg-secondary)]/30">
+        <div className={`group relative py-px pr-12 pl-[72px] hover:bg-[var(--bg-secondary)]/30 ${ephemeral ? 'border-l-2 border-[var(--accent)]/30 bg-[var(--accent)]/5' : ''}`}>
           <MessageActions message={message} onEdit={handleEdit} onDelete={() => setShowDeleteDialog(true)} onReply={handleReply} onPin={handlePin} />
           <span className="invisible absolute left-0 top-0.5 w-[68px] pr-3 text-right text-[11px] text-[var(--text-muted)] group-hover:visible">
             {formatTime(createdAt)}
           </span>
           <div className="min-w-0">
+            {ephemeral && (
+              <span className="text-[10px] italic text-[var(--text-muted)]">Only visible to you</span>
+            )}
             {renderContent()}
           </div>
         </div>
@@ -261,11 +297,25 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
         />
       </>
     );
+
+    if (messageContextMenu) {
+      return (
+        <ContextMenu.Root>
+          <ContextMenu.Trigger asChild>
+            <div>{compactContent}</div>
+          </ContextMenu.Trigger>
+          <ContextMenu.Portal>
+            {messageContextMenu}
+          </ContextMenu.Portal>
+        </ContextMenu.Root>
+      );
+    }
+    return compactContent;
   }
 
-  return (
+  const fullContent = (
     <>
-      <div className="group relative flex gap-4 py-1 pr-12 pl-4 mt-4 hover:bg-[var(--bg-secondary)]/30">
+      <div className={`group relative flex gap-4 py-1 pr-12 pl-4 mt-4 hover:bg-[var(--bg-secondary)]/30 ${ephemeral ? 'border-l-2 border-[var(--accent)]/30 bg-[var(--accent)]/5' : ''}`}>
         <MessageActions message={message} onEdit={handleEdit} onDelete={() => setShowDeleteDialog(true)} onReply={handleReply} />
         {/* Avatar */}
         <UserContextMenu userId={author?.id || ''} username={author?.username || 'Unknown'} serverId={selectedServerId || undefined} isOwner={server?.ownerId === author?.id} canModerate={canModerate}>
@@ -305,6 +355,9 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
             <span className="text-xs text-[var(--text-muted)]">
               {formatFullTimestamp(createdAt)}
             </span>
+            {ephemeral && (
+              <span className="text-[10px] italic text-[var(--text-muted)]">Only visible to you</span>
+            )}
           </div>
           {renderContent()}
         </div>
@@ -317,6 +370,20 @@ export function MessageItem({ message, isCompact }: MessageItemProps) {
       />
     </>
   );
+
+  if (messageContextMenu) {
+    return (
+      <ContextMenu.Root>
+        <ContextMenu.Trigger asChild>
+          <div>{fullContent}</div>
+        </ContextMenu.Trigger>
+        <ContextMenu.Portal>
+          {messageContextMenu}
+        </ContextMenu.Portal>
+      </ContextMenu.Root>
+    );
+  }
+  return fullContent;
 }
 
 export function DateSeparator({ date }: { date: string }) {

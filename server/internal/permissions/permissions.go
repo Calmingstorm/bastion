@@ -19,13 +19,14 @@ const (
 	Administrator    int64 = 1 << 12 // 0x1000 — bypasses all checks
 	ManageCategories int64 = 1 << 13 // 0x2000
 	TimeoutMembers   int64 = 1 << 14 // 0x4000
+	ManageCommands   int64 = 1 << 15 // 0x8000
 )
 
 // AllPermissions is the union of every defined permission.
 var AllPermissions = ViewChannel | SendMessages | ManageMessages | ManageChannels |
 	ManageRoles | ManageServer | CreateInvites | KickMembers | BanMembers |
 	AttachFiles | ManageNicknames | MentionEveryone | Administrator |
-	ManageCategories | TimeoutMembers
+	ManageCategories | TimeoutMembers | ManageCommands
 
 // Has checks whether perms includes every bit in check.
 func Has(perms, check int64) bool {

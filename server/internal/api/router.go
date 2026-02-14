@@ -74,6 +74,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 	pinHandler := NewPinHandler(db, hub)
 	webhookHandler := NewWebhookHandler(db, hub)
 	botHandler := NewBotHandler(db)
+	interactionHandler := NewInteractionHandler(db, hub)
 
 	// Backward-compat redirect: /api/* -> /api/v1/*
 	r.HandleFunc("/api/*", func(w http.ResponseWriter, r *http.Request) {
@@ -113,6 +114,12 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 		r.Group(func(r chi.Router) {
 			r.Use(httprate.LimitByIP(30, time.Minute))
 			r.Post("/webhooks/{webhookID}/{token}", webhookHandler.Execute)
+		})
+
+		// Interaction callback (authenticated by token in URL, not JWT)
+		r.Group(func(r chi.Router) {
+			r.Use(httprate.LimitByIP(30, time.Minute))
+			r.Post("/interactions/{token}/callback", interactionHandler.Callback)
 		})
 
 		// API documentation (public, no auth)
@@ -209,6 +216,16 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 				r.Patch("/{serverID}/bots/{botID}", botHandler.Update)
 				r.Delete("/{serverID}/bots/{botID}", botHandler.Delete)
 				r.Post("/{serverID}/bots/{botID}/regenerate-token", botHandler.RegenerateToken)
+
+				// Application commands (nested under bots)
+				r.Post("/{serverID}/bots/{botID}/commands", interactionHandler.RegisterCommand)
+				r.Get("/{serverID}/bots/{botID}/commands", interactionHandler.ListBotCommands)
+				r.Patch("/{serverID}/bots/{botID}/commands/{commandID}", interactionHandler.UpdateCommand)
+				r.Delete("/{serverID}/bots/{botID}/commands/{commandID}", interactionHandler.DeleteCommand)
+
+				// Server-wide commands listing and interaction execution
+				r.Get("/{serverID}/commands", interactionHandler.ListServerCommands)
+				r.Post("/{serverID}/interactions", interactionHandler.Execute)
 			})
 
 			// Invites (top-level for join/delete)

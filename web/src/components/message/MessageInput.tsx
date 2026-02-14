@@ -3,12 +3,14 @@ import { useMessageStore } from '../../stores/messageStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useDMStore } from '../../stores/dmStore';
 import { wsClient } from '../../api/websocket';
-import { apiSendMessageWithFiles, apiGetMembers } from '../../api/client';
+import { apiSendMessageWithFiles, apiGetMembers, apiExecuteInteraction } from '../../api/client';
 import { MentionAutocomplete } from './MentionAutocomplete';
+import { SlashCommandPicker } from './SlashCommandPicker';
 import { EmojiInputPicker } from './EmojiInputPicker';
 import { GifPicker } from './GifPicker';
 import { useFeatureStore } from '../../stores/featureStore';
-import type { MemberWithUser } from '../../types';
+import { useCommandStore } from '../../stores/commandStore';
+import type { MemberWithUser, ApplicationCommand } from '../../types';
 import { eventBus } from '../../utils/eventBus';
 
 export function MessageInput() {
@@ -36,6 +38,13 @@ export function MessageInput() {
   const [mentionQuery, setMentionQuery] = useState('');
   const [mentionIndex, setMentionIndex] = useState(0);
 
+  // Slash command picker state
+  const commands = useCommandStore((s) => s.commands);
+  const fetchCommands = useCommandStore((s) => s.fetchCommands);
+  const [showSlashPicker, setShowSlashPicker] = useState(false);
+  const [slashQuery, setSlashQuery] = useState('');
+  const [slashIndex, setSlashIndex] = useState(0);
+
   const activeChannelId = selectedChannelId || selectedDMId;
   const selectedChannel = channels.find((c) => c.id === selectedChannelId);
 
@@ -59,6 +68,15 @@ export function MessageInput() {
     }
     apiGetMembers(selectedServerId).then(setMembers).catch(() => {});
   }, [selectedServerId]);
+
+  // Fetch slash commands when server changes
+  useEffect(() => {
+    if (!selectedServerId) {
+      useCommandStore.getState().clear();
+      return;
+    }
+    fetchCommands(selectedServerId);
+  }, [selectedServerId, fetchCommands]);
 
   // Refresh members when a new member joins
   useEffect(() => {
@@ -124,6 +142,43 @@ export function MessageInput() {
     }
   };
 
+  // Detect /slash command context
+  const checkSlashContext = (text: string) => {
+    if (text.startsWith('/') && !text.includes(' ')) {
+      const query = text.slice(1);
+      setShowSlashPicker(true);
+      setSlashQuery(query);
+      setSlashIndex(0);
+    } else {
+      setShowSlashPicker(false);
+    }
+  };
+
+  const handleSlashSelect = async (cmd: ApplicationCommand) => {
+    if (!activeChannelId || !selectedServerId) return;
+
+    setShowSlashPicker(false);
+    setContent('');
+
+    if (cmd.options && cmd.options.length > 0) {
+      // For commands with options, we'd need a more complex flow.
+      // For now, execute with no options and let the bot handle defaults.
+      try {
+        await apiExecuteInteraction(selectedServerId, {
+          commandId: cmd.id,
+          channelId: activeChannelId,
+        });
+      } catch { /* handled */ }
+    } else {
+      try {
+        await apiExecuteInteraction(selectedServerId, {
+          commandId: cmd.id,
+          channelId: activeChannelId,
+        });
+      } catch { /* handled */ }
+    }
+  };
+
   const insertMention = (username: string) => {
     const textarea = textareaRef.current;
     if (!textarea) return;
@@ -174,6 +229,32 @@ export function MessageInput() {
   }, [activeChannelId, isSending, sendMessage]);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (showSlashPicker) {
+      const filtered = commands.filter((cmd) => cmd.type === 1 && cmd.name.startsWith(slashQuery.toLowerCase())).slice(0, 10);
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSlashIndex((prev) => Math.max(0, prev - 1));
+        return;
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSlashIndex((prev) => Math.min(filtered.length - 1, prev + 1));
+        return;
+      }
+      if (e.key === 'Tab' || e.key === 'Enter') {
+        e.preventDefault();
+        if (filtered[slashIndex]) {
+          handleSlashSelect(filtered[slashIndex]);
+        }
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setShowSlashPicker(false);
+        return;
+      }
+    }
+
     if (showMentions) {
       if (e.key === 'ArrowUp') {
         e.preventDefault();
@@ -354,6 +435,17 @@ export function MessageInput() {
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
       >
+        {/* Slash command picker popup */}
+        {showSlashPicker && selectedServerId && commands.length > 0 && (
+          <SlashCommandPicker
+            commands={commands}
+            query={slashQuery}
+            selectedIndex={slashIndex}
+            onSelect={handleSlashSelect}
+            onDismiss={() => setShowSlashPicker(false)}
+          />
+        )}
+
         {/* Mention autocomplete popup */}
         {showMentions && selectedServerId && (
           <MentionAutocomplete
@@ -401,6 +493,7 @@ export function MessageInput() {
             setContent(e.target.value);
             handleInput();
             checkMentionContext(e.target.value, e.target.selectionStart);
+            checkSlashContext(e.target.value);
           }}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}

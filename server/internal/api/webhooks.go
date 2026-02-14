@@ -379,10 +379,18 @@ func (h *WebhookHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// If username override is provided, update the webhook user's display name temporarily
-	displayName := wh.Name
-	if req.Username != nil && *req.Username != "" {
-		displayName = *req.Username
+	// Build authorOverride if username or avatar overrides are provided
+	var authorOverride *models.AuthorOverride
+	if (req.Username != nil && *req.Username != "") || (req.AvatarURL != nil && *req.AvatarURL != "") {
+		authorOverride = &models.AuthorOverride{}
+		if req.Username != nil && *req.Username != "" {
+			authorOverride.Username = *req.Username
+		} else {
+			authorOverride.Username = wh.Name
+		}
+		if req.AvatarURL != nil && *req.AvatarURL != "" {
+			authorOverride.AvatarURL = *req.AvatarURL
+		}
 	}
 
 	// Insert message as the webhook's pseudo-user
@@ -390,23 +398,28 @@ func (h *WebhookHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	if len(req.Embeds) > 0 {
 		whEmbedsJSON, _ = json.Marshal(req.Embeds)
 	}
+	var authorOverrideJSON []byte
+	if authorOverride != nil {
+		authorOverrideJSON, _ = json.Marshal(authorOverride)
+	}
 
 	var msg models.Message
 	var msgAuthor models.Author
-	var returnedEmbedsJSON []byte
+	var returnedEmbedsJSON, returnedOverrideJSON []byte
 	err = h.db.QueryRow(r.Context(),
 		`WITH new_msg AS (
-			INSERT INTO messages (channel_id, author_id, content, embeds)
-			VALUES ($1, $2, $3, $4)
-			RETURNING id, channel_id, author_id, content, edited_at, embeds, created_at
+			INSERT INTO messages (channel_id, author_id, content, embeds, author_override)
+			VALUES ($1, $2, $3, $4, $5)
+			RETURNING id, channel_id, author_id, content, edited_at, embeds, author_override, created_at
 		)
 		SELECT m.id, m.channel_id, m.content, m.edited_at, m.created_at,
-			   u.id, u.username, u.display_name, u.avatar_url, u.is_bot, m.embeds
+			   u.id, u.username, u.display_name, u.avatar_url, u.is_bot, m.embeds, m.author_override
 		FROM new_msg m
 		INNER JOIN users u ON u.id = m.author_id`,
-		wh.ChannelID, wh.UserID, req.Content, whEmbedsJSON,
+		wh.ChannelID, wh.UserID, req.Content, whEmbedsJSON, authorOverrideJSON,
 	).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.CreatedAt,
-		&msgAuthor.ID, &msgAuthor.Username, &msgAuthor.DisplayName, &msgAuthor.AvatarURL, &msgAuthor.IsBot, &returnedEmbedsJSON)
+		&msgAuthor.ID, &msgAuthor.Username, &msgAuthor.DisplayName, &msgAuthor.AvatarURL, &msgAuthor.IsBot,
+		&returnedEmbedsJSON, &returnedOverrideJSON)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to insert webhook message")
 		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
@@ -416,13 +429,8 @@ func (h *WebhookHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	if len(returnedEmbedsJSON) > 0 {
 		json.Unmarshal(returnedEmbedsJSON, &msg.Embeds)
 	}
-
-	// Apply overrides for display
-	if req.Username != nil && *req.Username != "" {
-		msgAuthor.DisplayName = &displayName
-	}
-	if req.AvatarURL != nil && *req.AvatarURL != "" {
-		msgAuthor.AvatarURL = req.AvatarURL
+	if len(returnedOverrideJSON) > 0 {
+		json.Unmarshal(returnedOverrideJSON, &msg.AuthorOverride)
 	}
 	msg.Author = &msgAuthor
 

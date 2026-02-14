@@ -31,6 +31,7 @@ const (
 	EventCategoryCreate        = "CATEGORY_CREATE"
 	EventCategoryUpdate        = "CATEGORY_UPDATE"
 	EventCategoryDelete        = "CATEGORY_DELETE"
+	EventInteractionCreate     = "INTERACTION_CREATE"
 )
 
 type Event struct {

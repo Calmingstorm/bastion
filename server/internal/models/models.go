@@ -295,3 +295,52 @@ type Bot struct {
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
+
+// Interactions API types
+
+type CommandOption struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Type        int            `json:"type"` // 3=STRING, 4=INTEGER, 5=BOOLEAN, 6=USER, 7=CHANNEL
+	Required    bool           `json:"required"`
+	Choices     []OptionChoice `json:"choices,omitempty"`
+}
+
+type OptionChoice struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+type ApplicationCommand struct {
+	ID          uuid.UUID       `json:"id"`
+	ServerID    uuid.UUID       `json:"serverId"`
+	BotID       uuid.UUID       `json:"botId"`
+	Type        int             `json:"type"` // 1=CHAT_INPUT, 2=USER, 3=MESSAGE
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Options     []CommandOption `json:"options,omitempty"`
+	CreatedAt   time.Time       `json:"createdAt"`
+	UpdatedAt   time.Time       `json:"updatedAt"`
+}
+
+type Interaction struct {
+	ID        uuid.UUID       `json:"id"`
+	Type      int             `json:"type"`
+	ServerID  uuid.UUID       `json:"serverId"`
+	ChannelID uuid.UUID       `json:"channelId"`
+	Member    *MemberWithUser `json:"member"`
+	Command   InteractionCmd  `json:"command"`
+	Token     string          `json:"token"`
+	TargetID  *uuid.UUID      `json:"targetId,omitempty"`
+}
+
+type InteractionCmd struct {
+	ID      uuid.UUID     `json:"id"`
+	Name    string        `json:"name"`
+	Options []ResolvedOpt `json:"options,omitempty"`
+}
+
+type ResolvedOpt struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}

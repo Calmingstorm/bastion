@@ -15,6 +15,7 @@ export const PERMISSIONS = {
   Administrator:    1 << 12,  // 0x1000
   ManageCategories: 1 << 13,  // 0x2000
   TimeoutMembers:   1 << 14,  // 0x4000
+  ManageCommands:   1 << 15,  // 0x8000
 } as const;
 
 /** Check whether `perms` includes every bit in `flag`. */

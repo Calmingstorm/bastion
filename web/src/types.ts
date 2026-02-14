@@ -91,6 +91,7 @@ export interface Message {
   replyTo?: { id: string; content: string; author: MessageAuthor };
   attachments?: Attachment[];
   reactions?: Reaction[];
+  ephemeral?: boolean;
 }
 
 export interface Reaction {
@@ -242,6 +243,26 @@ export interface Bot {
   updatedAt: string;
 }
 
+export interface CommandOption {
+  name: string;
+  description: string;
+  type: number;
+  required?: boolean;
+  choices?: { name: string; value: string }[];
+}
+
+export interface ApplicationCommand {
+  id: string;
+  serverId: string;
+  botId: string;
+  type: number; // 1=CHAT_INPUT, 2=USER, 3=MESSAGE
+  name: string;
+  description: string;
+  options?: CommandOption[];
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface SearchResult {
   id: string;
   channelId: string;
@@ -289,6 +310,7 @@ export type WSEventType =
   | 'CATEGORY_CREATE'
   | 'CATEGORY_UPDATE'
   | 'CATEGORY_DELETE'
+  | 'INTERACTION_CREATE'
   | 'CONNECTED';
 
 export interface PinnedMessage {

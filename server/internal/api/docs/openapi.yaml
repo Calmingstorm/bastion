@@ -68,6 +68,8 @@ tags:
     description: Create, update, delete, assign, and remove roles (bot-accessible)
   - name: Categories
     description: Create, update, delete, and list channel categories
+  - name: Interactions
+    description: Slash commands, context menus, and interaction callbacks
   - name: WebSocket
     description: Real-time event stream
 
@@ -391,6 +393,218 @@ paths:
                     example: "bot_abc123def456..."
         '404':
           $ref: '#/components/responses/NotFound'
+
+  # ── Application Commands (Interactions) ──────────────────────────────
+  /servers/{serverID}/bots/{botID}/commands:
+    post:
+      tags: [Interactions]
+      summary: Register command
+      description: |
+        Register a slash command (or context menu command) for a bot.
+        Requires bot token auth (bot must belong to the server).
+      operationId: registerCommand
+      security:
+        - BotAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+        - $ref: '#/components/parameters/botID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCommandRequest'
+            example:
+              name: "ping"
+              description: "Responds with pong"
+              type: 1
+      responses:
+        '201':
+          description: Command created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplicationCommand'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          description: Command with that name already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    get:
+      tags: [Interactions]
+      summary: List bot commands
+      description: List all commands registered by a specific bot.
+      operationId: listBotCommands
+      security:
+        - BotAuth: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+        - $ref: '#/components/parameters/botID'
+      responses:
+        '200':
+          description: Command list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ApplicationCommand'
+
+  /servers/{serverID}/bots/{botID}/commands/{commandID}:
+    patch:
+      tags: [Interactions]
+      summary: Update command
+      description: Update a command's description or options.
+      operationId: updateCommand
+      security:
+        - BotAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+        - $ref: '#/components/parameters/botID'
+        - name: commandID
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Application command ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCommandRequest'
+      responses:
+        '200':
+          description: Command updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplicationCommand'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Interactions]
+      summary: Delete command
+      description: Delete a registered command.
+      operationId: deleteCommand
+      security:
+        - BotAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+        - $ref: '#/components/parameters/botID'
+        - name: commandID
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Application command ID
+      responses:
+        '200':
+          description: Command deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /servers/{serverID}/commands:
+    get:
+      tags: [Interactions]
+      summary: List server commands
+      description: |
+        List all slash commands and context menu commands available in a server
+        (from all bots). Requires server membership.
+      operationId: listServerCommands
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+      responses:
+        '200':
+          description: All commands in the server
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ApplicationCommand'
+
+  /servers/{serverID}/interactions:
+    post:
+      tags: [Interactions]
+      summary: Execute interaction
+      description: |
+        Invoke a slash command or context menu command. The server creates a
+        short-lived interaction token and dispatches an `INTERACTION_CREATE`
+        event to the bot via WebSocket. The bot then responds via the callback
+        endpoint.
+      operationId: executeInteraction
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExecuteInteractionRequest'
+            example:
+              commandId: "550e8400-e29b-41d4-a716-446655440000"
+              channelId: "550e8400-e29b-41d4-a716-446655440001"
+      responses:
+        '204':
+          description: Interaction dispatched to bot
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /interactions/{token}/callback:
+    post:
+      tags: [Interactions]
+      summary: Interaction callback
+      description: |
+        Bot responds to an interaction. The token is from the
+        `INTERACTION_CREATE` event payload. Tokens expire after 15 minutes.
+
+        If `ephemeral: true`, the response is sent only to the invoking user
+        via WebSocket and is **not** stored in the database.
+
+        This endpoint is public — authenticated by the token in the URL.
+      operationId: interactionCallback
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Interaction token from the INTERACTION_CREATE event
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InteractionCallbackRequest'
+            example:
+              content: "Pong!"
+              ephemeral: false
+      responses:
+        '204':
+          description: Response delivered
+        '404':
+          description: Token not found or expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   # ── Messages ─────────────────────────────────────────────────────────
   /channels/{channelID}/messages:
@@ -1248,6 +1462,18 @@ paths:
         |-------|------|-------------|
         | `DM_CREATE` | Full DM channel object | New DM conversation started |
 
+        ### Interaction Events
+
+        | Event | Data | Description |
+        |-------|------|-------------|
+        | `INTERACTION_CREATE` | Full `Interaction` object | User invoked a slash command or context menu command (sent to the bot's user) |
+
+        The `Interaction` payload includes `id`, `type`, `serverId`, `channelId`,
+        `member` (invoking user), `command` (`{id, name, options}`), `token`
+        (for the callback), and optionally `targetId` (for USER/MESSAGE commands).
+
+        Respond via `POST /api/v1/interactions/{token}/callback` within 15 minutes.
+
         ## Connection Limits
 
         | Parameter | Value |
@@ -1389,11 +1615,11 @@ components:
           description: Message content (required if no embeds)
         username:
           type: string
-          description: Override the webhook's display name for this message
+          description: Override the webhook's display name for this message (persisted as authorOverride)
         avatarUrl:
           type: string
           format: uri
-          description: Override the webhook's avatar for this message
+          description: Override the webhook's avatar for this message (persisted as authorOverride)
         embeds:
           type: array
           items:
@@ -1954,6 +2180,130 @@ components:
                 nullable: true
               position:
                 type: integer
+
+    CommandOption:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Option name
+        description:
+          type: string
+        type:
+          type: integer
+          description: "3=STRING, 4=INTEGER, 5=BOOLEAN, 6=USER, 7=CHANNEL"
+        required:
+          type: boolean
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              value:
+                type: string
+
+    ApplicationCommand:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        serverId:
+          type: string
+          format: uuid
+        botId:
+          type: string
+          format: uuid
+        type:
+          type: integer
+          description: "1=CHAT_INPUT, 2=USER, 3=MESSAGE"
+        name:
+          type: string
+        description:
+          type: string
+        options:
+          type: array
+          items:
+            $ref: '#/components/schemas/CommandOption'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateCommandRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: "Lowercase alphanumeric + hyphens/underscores, 1-32 chars"
+          example: "ping"
+        description:
+          type: string
+          maxLength: 100
+          example: "Responds with pong"
+        type:
+          type: integer
+          description: "1=CHAT_INPUT (default), 2=USER, 3=MESSAGE"
+          default: 1
+        options:
+          type: array
+          items:
+            $ref: '#/components/schemas/CommandOption'
+
+    UpdateCommandRequest:
+      type: object
+      properties:
+        description:
+          type: string
+          maxLength: 100
+        options:
+          type: array
+          items:
+            $ref: '#/components/schemas/CommandOption'
+
+    ExecuteInteractionRequest:
+      type: object
+      required: [commandId, channelId]
+      properties:
+        commandId:
+          type: string
+          format: uuid
+        channelId:
+          type: string
+          format: uuid
+        options:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              value:
+                type: string
+        targetId:
+          type: string
+          format: uuid
+          description: "User or message ID for context menu commands"
+
+    InteractionCallbackRequest:
+      type: object
+      properties:
+        content:
+          type: string
+          description: Message content
+        embeds:
+          type: array
+          items:
+            $ref: '#/components/schemas/Embed'
+        ephemeral:
+          type: boolean
+          description: "If true, only the invoking user sees this response (not stored in DB)"
+          default: false
 
     DeleteResponse:
       type: object

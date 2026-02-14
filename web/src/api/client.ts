@@ -790,7 +790,7 @@ export async function apiReorderChannels(
 
 // ---- Webhook API ----
 
-import type { Webhook, Bot } from '../types';
+import type { Webhook, Bot, ApplicationCommand } from '../types';
 
 export async function apiGetWebhooks(serverId: string): Promise<Webhook[]> {
   const response = await apiClient.get<Webhook[]>(`/servers/${serverId}/webhooks`);
@@ -866,6 +866,20 @@ export async function apiRegenerateBotToken(
     `/servers/${serverId}/bots/${botId}/regenerate-token`
   );
   return response.data;
+}
+
+// ---- Interactions API ----
+
+export async function apiGetServerCommands(serverId: string): Promise<ApplicationCommand[]> {
+  const response = await apiClient.get<ApplicationCommand[]>(`/servers/${serverId}/commands`);
+  return Array.isArray(response.data) ? response.data : [];
+}
+
+export async function apiExecuteInteraction(
+  serverId: string,
+  data: { commandId: string; channelId: string; options?: { name: string; value: string }[]; targetId?: string }
+): Promise<void> {
+  await apiClient.post(`/servers/${serverId}/interactions`, data);
 }
 
 export { getAccessToken, getRefreshToken, setTokens, clearTokens };
