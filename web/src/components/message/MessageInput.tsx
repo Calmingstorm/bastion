@@ -44,6 +44,7 @@ export function MessageInput() {
   const [showSlashPicker, setShowSlashPicker] = useState(false);
   const [slashQuery, setSlashQuery] = useState('');
   const [slashIndex, setSlashIndex] = useState(0);
+  const [pendingCommand, setPendingCommand] = useState<ApplicationCommand | null>(null);
 
   const activeChannelId = selectedChannelId || selectedDMId;
   const selectedChannel = channels.find((c) => c.id === selectedChannelId);
@@ -106,6 +107,22 @@ export function MessageInput() {
     const trimmed = content.trim();
     if ((!trimmed && files.length === 0) || !activeChannelId || isSending) return;
 
+    // If there's a pending slash command, execute it instead of sending a message
+    if (pendingCommand && trimmed.startsWith('/')) {
+      await executeSlashCommand(pendingCommand);
+      return;
+    }
+
+    // Check if input matches a registered command (user typed /commandname manually)
+    if (trimmed.startsWith('/') && selectedServerId && commands.length > 0) {
+      const cmdName = trimmed.slice(1).split(/\s+/)[0].toLowerCase();
+      const matched = commands.find((c) => c.type === 1 && c.name === cmdName);
+      if (matched) {
+        await executeSlashCommand(matched);
+        return;
+      }
+    }
+
     setIsSending(true);
     try {
       if (files.length > 0) {
@@ -119,6 +136,7 @@ export function MessageInput() {
       setFiles([]);
       setShowMentions(false);
       setReplyingTo(null);
+      setPendingCommand(null);
       if (textareaRef.current) {
         textareaRef.current.style.height = 'auto';
       }
@@ -127,7 +145,7 @@ export function MessageInput() {
     } finally {
       setIsSending(false);
     }
-  }, [content, files, activeChannelId, isSending, sendMessage, addMessage, replyingTo, setReplyingTo]);
+  }, [content, files, activeChannelId, isSending, sendMessage, addMessage, replyingTo, setReplyingTo, pendingCommand, selectedServerId, commands]);
 
   // Detect @mention context from text before cursor
   const checkMentionContext = (text: string, cursorPos: number) => {
@@ -150,33 +168,42 @@ export function MessageInput() {
       setShowSlashPicker(hasMatches);
       setSlashQuery(query);
       setSlashIndex(0);
+      setPendingCommand(null); // User is still typing, no command selected yet
     } else {
       setShowSlashPicker(false);
+      // Clear pending command if user erased the slash
+      if (!text.startsWith('/')) {
+        setPendingCommand(null);
+      }
     }
   };
 
-  const handleSlashSelect = async (cmd: ApplicationCommand) => {
-    if (!activeChannelId || !selectedServerId) return;
-
+  const handleSlashSelect = (cmd: ApplicationCommand) => {
     setShowSlashPicker(false);
-    setContent('');
+    setContent(`/${cmd.name} `);
+    setPendingCommand(cmd);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+    });
+  };
 
-    if (cmd.options && cmd.options.length > 0) {
-      // For commands with options, we'd need a more complex flow.
-      // For now, execute with no options and let the bot handle defaults.
-      try {
-        await apiExecuteInteraction(selectedServerId, {
-          commandId: cmd.id,
-          channelId: activeChannelId,
-        });
-      } catch { /* handled */ }
-    } else {
-      try {
-        await apiExecuteInteraction(selectedServerId, {
-          commandId: cmd.id,
-          channelId: activeChannelId,
-        });
-      } catch { /* handled */ }
+  const executeSlashCommand = async (cmd: ApplicationCommand) => {
+    if (!activeChannelId || !selectedServerId) return;
+    setIsSending(true);
+    try {
+      await apiExecuteInteraction(selectedServerId, {
+        commandId: cmd.id,
+        channelId: activeChannelId,
+      });
+      setContent('');
+      setPendingCommand(null);
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+      }
+    } catch {
+      // On failure, leave the command in the input so user can retry
+    } finally {
+      setIsSending(false);
     }
   };
 
