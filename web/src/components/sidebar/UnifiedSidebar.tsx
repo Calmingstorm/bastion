@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef, type FormEvent, type KeyboardEvent } from 'react';
+import * as ContextMenu from '@radix-ui/react-context-menu';
 import { useServerStore } from '../../stores/serverStore';
 import { useDMStore } from '../../stores/dmStore';
 import { useAuthStore } from '../../stores/authStore';
@@ -11,9 +12,10 @@ import { CreateServerDialog } from '../server/CreateServerDialog';
 import { InviteDialog } from '../server/InviteDialog';
 import { ServerSettingsDialog } from '../server/ServerSettingsDialog';
 import { NewDMDialog } from '../dm/NewDMDialog';
-import { apiGetCategories } from '../../api/client';
+import { apiGetCategories, apiCreateCategory, apiUpdateCategory, apiDeleteCategory, apiCreateChannel, apiGetChannels } from '../../api/client';
 import { usePermissionStore } from '../../stores/permissionStore';
 import { PERMISSIONS } from '../../utils/permissions';
+import { eventBus } from '../../utils/eventBus';
 import bastionLogo from '../../assets/bastion-logo.svg';
 import type { ChannelCategory } from '../../types';
 
@@ -63,6 +65,15 @@ export function UnifiedSidebar() {
   const [newDMOpen, setNewDMOpen] = useState(false);
   const [categories, setCategories] = useState<ChannelCategory[]>([]);
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set());
+  const [showCreateCategory, setShowCreateCategory] = useState<string | null>(null); // serverId or null
+  const [newCategoryName, setNewCategoryName] = useState('');
+  const [showCreateChannel, setShowCreateChannel] = useState(false);
+  const [createChannelInCategory, setCreateChannelInCategory] = useState<string | null>(null);
+  const [newChannelName, setNewChannelName] = useState('');
+  const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
+  const [editCategoryName, setEditCategoryName] = useState('');
+  const [deletingCategoryId, setDeletingCategoryId] = useState<string | null>(null);
+  const editCategoryRef = useRef<HTMLInputElement>(null);
 
   // Fetch DMs on mount
   useEffect(() => { fetchDMs(); }, [fetchDMs]);
@@ -74,14 +85,103 @@ export function UnifiedSidebar() {
     }
   }, [selectedServerId]);
 
-  // Fetch categories when expanded server changes
-  useEffect(() => {
+  const fetchCategories = useCallback(() => {
     if (!expandedServerId) return;
     apiGetCategories(expandedServerId).then((cats) => {
       const safeCats = Array.isArray(cats) ? cats : [];
       setCategories(safeCats.sort((a, b) => a.position - b.position));
     }).catch(() => {});
   }, [expandedServerId]);
+
+  // Fetch categories when expanded server changes
+  useEffect(() => { fetchCategories(); }, [fetchCategories]);
+
+  // Listen for category WS events to refetch
+  useEffect(() => {
+    const handler = () => fetchCategories();
+    eventBus.on('bastion:category-update', handler);
+    return () => eventBus.off('bastion:category-update', handler);
+  }, [fetchCategories]);
+
+  // Focus category edit input
+  useEffect(() => {
+    if (editingCategoryId && editCategoryRef.current) {
+      editCategoryRef.current.focus();
+      editCategoryRef.current.select();
+    }
+  }, [editingCategoryId]);
+
+  const handleCreateCategory = async (e: FormEvent, serverId: string) => {
+    e.preventDefault();
+    const trimmed = newCategoryName.trim();
+    if (!trimmed) return;
+    try {
+      await apiCreateCategory(serverId, trimmed);
+      setNewCategoryName('');
+      setShowCreateCategory(null);
+      fetchCategories();
+    } catch { /* silently fail */ }
+  };
+
+  const handleRenameCategory = async (catId: string) => {
+    const trimmed = editCategoryName.trim();
+    if (!trimmed || !expandedServerId) {
+      setEditingCategoryId(null);
+      return;
+    }
+    const cat = categories.find((c) => c.id === catId);
+    if (cat && trimmed === cat.name) {
+      setEditingCategoryId(null);
+      return;
+    }
+    try {
+      await apiUpdateCategory(expandedServerId, catId, { name: trimmed });
+      fetchCategories();
+    } catch { /* silently fail */ }
+    setEditingCategoryId(null);
+  };
+
+  const handleDeleteCategory = async () => {
+    if (!deletingCategoryId || !expandedServerId) return;
+    try {
+      await apiDeleteCategory(expandedServerId, deletingCategoryId);
+      fetchCategories();
+      useServerStore.getState().selectServer(expandedServerId);
+    } catch { /* silently fail */ }
+    setDeletingCategoryId(null);
+  };
+
+  const handleEditCategoryKeyDown = (e: KeyboardEvent<HTMLInputElement>, catId: string) => {
+    if (e.key === 'Enter') { e.preventDefault(); handleRenameCategory(catId); }
+    if (e.key === 'Escape') { setEditingCategoryId(null); }
+  };
+
+  const handleCreateChannelInSidebar = async (e: FormEvent, serverId: string) => {
+    e.preventDefault();
+    const trimmed = newChannelName.trim().toLowerCase().replace(/\s+/g, '-');
+    if (!trimmed) return;
+    try {
+      await apiCreateChannel(serverId, trimmed, undefined, createChannelInCategory || undefined);
+      const updated = await apiGetChannels(serverId);
+      useServerStore.setState({ channels: (Array.isArray(updated) ? updated : []).sort((a, b) => a.position - b.position) });
+      setNewChannelName('');
+      setShowCreateChannel(false);
+      setCreateChannelInCategory(null);
+    } catch { /* silently fail */ }
+  };
+
+  const startCreateInCategory = (_serverId: string, categoryId: string | null) => {
+    setCreateChannelInCategory(categoryId);
+    setNewChannelName('');
+    setShowCreateChannel(true);
+    if (categoryId) {
+      setCollapsedCategories((prev) => {
+        const next = new Set(prev);
+        next.delete(categoryId);
+        return next;
+      });
+    }
+  };
 
   const handleExpandServer = useCallback((serverId: string) => {
     if (expandedServerId === serverId) {
@@ -374,46 +474,113 @@ export function UnifiedSidebar() {
                     <div className="flex items-center justify-center py-4">
                       <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--text-muted)] border-t-[var(--accent)]" />
                     </div>
-                  ) : channels.length === 0 ? (
-                    <p className="px-2 py-2 text-center text-xs text-[var(--text-muted)]">
-                      No channels yet.
-                    </p>
+                  ) : channels.length === 0 && categories.length === 0 ? (
+                    <div>
+                      <p className="px-2 py-2 text-center text-xs text-[var(--text-muted)]">
+                        No channels yet.
+                      </p>
+                      {canManageChannels && (
+                        <div className="flex flex-col gap-1 px-1">
+                          <button
+                            onClick={() => startCreateInCategory(server.id, null)}
+                            className="flex items-center gap-1 rounded px-2 py-1 text-xs text-[var(--text-muted)] hover:bg-[var(--bg-input)]/50 hover:text-[var(--text-secondary)]"
+                          >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M13 5h-2v6H5v2h6v6h2v-6h6v-2h-6V5z" /></svg>
+                            Create Channel
+                          </button>
+                          <button
+                            onClick={() => { setShowCreateCategory(server.id); setNewCategoryName(''); }}
+                            className="flex items-center gap-1 rounded px-2 py-1 text-xs text-[var(--text-muted)] hover:bg-[var(--bg-input)]/50 hover:text-[var(--text-secondary)]"
+                          >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+                              <line x1="12" y1="11" x2="12" y2="17" /><line x1="9" y1="14" x2="15" y2="14" />
+                            </svg>
+                            Create Category
+                          </button>
+                        </div>
+                      )}
+                      {showCreateCategory === server.id && (
+                        <form onSubmit={(e) => handleCreateCategory(e, server.id)} className="px-1 mt-1">
+                          <input type="text" value={newCategoryName} onChange={(e) => setNewCategoryName(e.target.value)} placeholder="Category name" autoFocus
+                            className="w-full rounded-[3px] bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] outline-none focus:ring-1 focus:ring-[var(--accent)]"
+                            onBlur={() => { if (!newCategoryName.trim()) setShowCreateCategory(null); }}
+                            onKeyDown={(e) => { if (e.key === 'Escape') { setNewCategoryName(''); setShowCreateCategory(null); } }}
+                          />
+                        </form>
+                      )}
+                      {showCreateChannel && (
+                        <form onSubmit={(e) => handleCreateChannelInSidebar(e, server.id)} className="px-1 mt-1">
+                          <input type="text" value={newChannelName} onChange={(e) => setNewChannelName(e.target.value)} placeholder="new-channel" autoFocus
+                            className="w-full rounded-[3px] bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] outline-none focus:ring-1 focus:ring-[var(--accent)]"
+                            onBlur={() => { if (!newChannelName.trim()) { setShowCreateChannel(false); setCreateChannelInCategory(null); } }}
+                            onKeyDown={(e) => { if (e.key === 'Escape') { setNewChannelName(''); setShowCreateChannel(false); setCreateChannelInCategory(null); } }}
+                          />
+                        </form>
+                      )}
+                    </div>
                   ) : (
                     <>
                       {/* Uncategorized channels */}
                       {(() => {
-                        const uncategorized = channels.filter(
-                          (c) => !c.categoryId
-                        );
-                        if (
-                          uncategorized.length === 0 &&
-                          categories.length > 0
-                        )
-                          return null;
+                        const uncategorized = channels.filter((c) => !c.categoryId);
+                        if (uncategorized.length === 0 && categories.length > 0 && !showCreateChannel) return null;
                         return (
                           <div className="mb-1">
-                            {(categories.length > 0 ||
-                              uncategorized.length > 0) && (
-                              <div className="mb-0.5 px-1">
-                                <span className="text-[10px] font-bold uppercase tracking-wide text-[var(--text-muted)]">
-                                  Text Channels
-                                </span>
-                              </div>
+                            <div className="mb-0.5 flex items-center justify-between px-1">
+                              <span className="text-[10px] font-bold uppercase tracking-wide text-[var(--text-muted)]">
+                                Text Channels
+                              </span>
+                              {canManageChannels && (
+                                <div className="flex gap-0.5">
+                                  <button
+                                    onClick={() => { setShowCreateCategory(server.id); setNewCategoryName(''); }}
+                                    className="text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
+                                    title="Create Category"
+                                  >
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                      <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+                                      <line x1="12" y1="11" x2="12" y2="17" /><line x1="9" y1="14" x2="15" y2="14" />
+                                    </svg>
+                                  </button>
+                                  <button
+                                    onClick={() => startCreateInCategory(server.id, null)}
+                                    className="text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
+                                    title="Create Channel"
+                                  >
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M13 5h-2v6H5v2h6v6h2v-6h6v-2h-6V5z" /></svg>
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                            {showCreateCategory === server.id && (
+                              <form onSubmit={(e) => handleCreateCategory(e, server.id)} className="mb-1 px-1">
+                                <input type="text" value={newCategoryName} onChange={(e) => setNewCategoryName(e.target.value)} placeholder="Category name" autoFocus
+                                  className="w-full rounded-[3px] bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] outline-none focus:ring-1 focus:ring-[var(--accent)]"
+                                  onBlur={() => { if (!newCategoryName.trim()) setShowCreateCategory(null); }}
+                                  onKeyDown={(e) => { if (e.key === 'Escape') { setNewCategoryName(''); setShowCreateCategory(null); } }}
+                                />
+                              </form>
+                            )}
+                            {showCreateChannel && createChannelInCategory === null && (
+                              <form onSubmit={(e) => handleCreateChannelInSidebar(e, server.id)} className="mb-1 px-1">
+                                <input type="text" value={newChannelName} onChange={(e) => setNewChannelName(e.target.value)} placeholder="new-channel" autoFocus
+                                  className="w-full rounded-[3px] bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] outline-none focus:ring-1 focus:ring-[var(--accent)]"
+                                  onBlur={() => { if (!newChannelName.trim()) { setShowCreateChannel(false); setCreateChannelInCategory(null); } }}
+                                  onKeyDown={(e) => { if (e.key === 'Escape') { setNewChannelName(''); setShowCreateChannel(false); setCreateChannelInCategory(null); } }}
+                                />
+                              </form>
                             )}
                             <div className="space-y-0.5">
                               {uncategorized.map((channel) => (
                                 <ChannelItem
                                   key={channel.id}
                                   channel={channel}
-                                  isSelected={
-                                    channel.id === selectedChannelId &&
-                                    !selectedDMId
-                                  }
-                                  onClick={() =>
-                                    handleSelectChannel(channel.id)
-                                  }
+                                  isSelected={channel.id === selectedChannelId && !selectedDMId}
+                                  onClick={() => handleSelectChannel(channel.id)}
                                   canManage={canManageChannels}
                                   serverId={server.id}
+                                  categories={categories}
                                 />
                               ))}
                             </div>
@@ -423,46 +590,100 @@ export function UnifiedSidebar() {
 
                       {/* Categorized channels */}
                       {categories.map((cat) => {
-                        const catChannels = channels.filter(
-                          (c) => c.categoryId === cat.id
-                        );
-                        if (catChannels.length === 0) return null;
+                        const catChannels = channels.filter((c) => c.categoryId === cat.id);
                         const isCollapsed = collapsedCategories.has(cat.id);
+                        const isEditingThis = editingCategoryId === cat.id;
                         return (
                           <div key={cat.id} className="mb-1">
-                            <button
-                              onClick={() => toggleCategory(cat.id)}
-                              className="mb-0.5 flex w-full items-center gap-1 px-1 text-[10px] font-bold uppercase tracking-wide text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
-                            >
-                              <svg
-                                width="10"
-                                height="10"
-                                viewBox="0 0 24 24"
-                                fill="currentColor"
-                                className={`shrink-0 transition-transform ${isCollapsed ? '-rotate-90' : ''}`}
-                              >
-                                <path d="M7 10l5 5 5-5z" />
-                              </svg>
-                              {cat.name}
-                            </button>
+                            <div className="mb-0.5 flex items-center justify-between px-1">
+                              {isEditingThis ? (
+                                <input
+                                  ref={editCategoryRef}
+                                  type="text"
+                                  value={editCategoryName}
+                                  onChange={(e) => setEditCategoryName(e.target.value)}
+                                  onKeyDown={(e) => handleEditCategoryKeyDown(e, cat.id)}
+                                  onBlur={() => handleRenameCategory(cat.id)}
+                                  className="min-w-0 flex-1 rounded-[3px] bg-[var(--bg-tertiary)] px-1 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[var(--text-primary)] outline-none focus:ring-1 focus:ring-[var(--accent)]"
+                                />
+                              ) : (
+                                <ContextMenu.Root>
+                                  <ContextMenu.Trigger asChild>
+                                    <button
+                                      onClick={() => toggleCategory(cat.id)}
+                                      className="flex min-w-0 flex-1 items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
+                                    >
+                                      <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" className={`shrink-0 transition-transform ${isCollapsed ? '-rotate-90' : ''}`}>
+                                        <path d="M7 10l5 5 5-5z" />
+                                      </svg>
+                                      <span className="truncate">{cat.name}</span>
+                                    </button>
+                                  </ContextMenu.Trigger>
+                                  {canManageChannels && (
+                                    <ContextMenu.Portal>
+                                      <ContextMenu.Content className="z-50 min-w-[180px] rounded-lg border border-[var(--border)] bg-[var(--bg-tertiary)] p-1.5 shadow-xl">
+                                        <ContextMenu.Item
+                                          onSelect={() => { setEditCategoryName(cat.name); setEditingCategoryId(cat.id); }}
+                                          className="flex w-full cursor-default items-center rounded px-2.5 py-1.5 text-sm outline-none text-[var(--text-secondary)] hover:bg-[var(--accent)] hover:text-white"
+                                        >
+                                          Edit Category
+                                        </ContextMenu.Item>
+                                        <ContextMenu.Item
+                                          onSelect={() => startCreateInCategory(server.id, cat.id)}
+                                          className="flex w-full cursor-default items-center rounded px-2.5 py-1.5 text-sm outline-none text-[var(--text-secondary)] hover:bg-[var(--accent)] hover:text-white"
+                                        >
+                                          Create Channel
+                                        </ContextMenu.Item>
+                                        <ContextMenu.Separator className="my-1 h-px bg-[var(--border)]" />
+                                        <ContextMenu.Item
+                                          onSelect={() => setDeletingCategoryId(cat.id)}
+                                          className="flex w-full cursor-default items-center rounded px-2.5 py-1.5 text-sm outline-none text-[var(--danger)] hover:bg-[var(--danger)] hover:text-white"
+                                        >
+                                          Delete Category
+                                        </ContextMenu.Item>
+                                      </ContextMenu.Content>
+                                    </ContextMenu.Portal>
+                                  )}
+                                </ContextMenu.Root>
+                              )}
+                              {canManageChannels && !isEditingThis && (
+                                <button
+                                  onClick={() => startCreateInCategory(server.id, cat.id)}
+                                  className="shrink-0 text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
+                                  title="Create Channel"
+                                >
+                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M13 5h-2v6H5v2h6v6h2v-6h6v-2h-6V5z" /></svg>
+                                </button>
+                              )}
+                            </div>
                             {!isCollapsed && (
-                              <div className="space-y-0.5">
-                                {catChannels.map((channel) => (
-                                  <ChannelItem
-                                    key={channel.id}
-                                    channel={channel}
-                                    isSelected={
-                                      channel.id === selectedChannelId &&
-                                      !selectedDMId
-                                    }
-                                    onClick={() =>
-                                      handleSelectChannel(channel.id)
-                                    }
-                                    canManage={canManageChannels}
-                                    serverId={server.id}
-                                  />
-                                ))}
-                              </div>
+                              <>
+                                {showCreateChannel && createChannelInCategory === cat.id && (
+                                  <form onSubmit={(e) => handleCreateChannelInSidebar(e, server.id)} className="mb-1 px-1">
+                                    <input type="text" value={newChannelName} onChange={(e) => setNewChannelName(e.target.value)} placeholder="new-channel" autoFocus
+                                      className="w-full rounded-[3px] bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] outline-none focus:ring-1 focus:ring-[var(--accent)]"
+                                      onBlur={() => { if (!newChannelName.trim()) { setShowCreateChannel(false); setCreateChannelInCategory(null); } }}
+                                      onKeyDown={(e) => { if (e.key === 'Escape') { setNewChannelName(''); setShowCreateChannel(false); setCreateChannelInCategory(null); } }}
+                                    />
+                                  </form>
+                                )}
+                                <div className="space-y-0.5">
+                                  {catChannels.map((channel) => (
+                                    <ChannelItem
+                                      key={channel.id}
+                                      channel={channel}
+                                      isSelected={channel.id === selectedChannelId && !selectedDMId}
+                                      onClick={() => handleSelectChannel(channel.id)}
+                                      canManage={canManageChannels}
+                                      serverId={server.id}
+                                      categories={categories}
+                                    />
+                                  ))}
+                                </div>
+                                {catChannels.length === 0 && !showCreateChannel && (
+                                  <p className="px-3 py-1 text-xs text-[var(--text-muted)]">No channels</p>
+                                )}
+                              </>
                             )}
                           </div>
                         );
@@ -515,6 +736,32 @@ export function UnifiedSidebar() {
           }}
           serverId={settingsServerId}
         />
+      )}
+
+      {/* Delete category confirmation */}
+      {deletingCategoryId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
+          <div className="w-full max-w-sm rounded-md bg-[var(--bg-primary)] p-6 shadow-xl">
+            <h3 className="mb-2 text-lg font-bold text-[var(--text-primary)]">Delete Category</h3>
+            <p className="mb-4 text-sm text-[var(--text-secondary)]">
+              Are you sure you want to delete this category? Channels in this category will become uncategorized.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setDeletingCategoryId(null)}
+                className="rounded-[3px] px-4 py-2 text-sm font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteCategory}
+                className="rounded-[3px] bg-[var(--danger)] px-4 py-2 text-sm font-medium text-white hover:opacity-90"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
