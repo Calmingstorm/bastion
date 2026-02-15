@@ -566,6 +566,15 @@ paths:
           description: Interaction dispatched to bot
         '404':
           $ref: '#/components/responses/NotFound'
+        '503':
+          description: Bot is not currently connected via WebSocket
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: BOT_OFFLINE
+                message: the bot is not currently connected
 
   /interactions/{token}/callback:
     post:
