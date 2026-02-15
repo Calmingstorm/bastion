@@ -88,7 +88,7 @@ export function ServerSettingsDialog({ open, onOpenChange, serverId }: ServerSet
           {isMobile ? (
             <>
               {/* Mobile: horizontal tab bar at top */}
-              <div className="flex shrink-0 items-center justify-between border-b border-[var(--border)] bg-[var(--bg-secondary)] px-3 pt-3 pb-0">
+              <div className="flex shrink-0 items-center justify-between border-b border-[var(--border)] bg-[var(--bg-secondary)] px-3 pt-3 pb-0 safe-area-top">
                 <Dialog.Title className="shrink-0 text-xs font-bold uppercase tracking-wide text-[var(--text-muted)]">
                   Server Settings
                 </Dialog.Title>
@@ -116,7 +116,7 @@ export function ServerSettingsDialog({ open, onOpenChange, serverId }: ServerSet
                 ))}
               </div>
               {/* Mobile content */}
-              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4">
+              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4 safe-area-bottom">
                 {tab === 'overview' && <OverviewTab serverId={serverId} />}
                 {tab === 'channels' && <ChannelsTab serverId={serverId} />}
                 {tab === 'roles' && <RolesTab serverId={serverId} />}

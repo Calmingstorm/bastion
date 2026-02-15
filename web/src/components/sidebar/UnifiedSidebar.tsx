@@ -217,7 +217,7 @@ export function UnifiedSidebar() {
   return (
     <div className="flex h-full w-[280px] flex-col bg-[var(--bg-secondary)]">
       {/* Brand header */}
-      <div className="flex h-12 shrink-0 items-center border-b border-[var(--border)] px-4">
+      <div className="flex h-12 shrink-0 items-center border-b border-[var(--border)] px-4 safe-area-top">
         <img src={bastionLogo} alt="Bastion" className="mr-2.5 h-6 w-6" />
         <h1 className="text-sm font-bold text-[var(--text-primary)]">Bastion</h1>
       </div>
