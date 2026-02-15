@@ -116,7 +116,7 @@ export function ServerSettingsDialog({ open, onOpenChange, serverId }: ServerSet
                 ))}
               </div>
               {/* Mobile content */}
-              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4 safe-area-bottom">
+              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
                 {tab === 'overview' && <OverviewTab serverId={serverId} />}
                 {tab === 'channels' && <ChannelsTab serverId={serverId} />}
                 {tab === 'roles' && <RolesTab serverId={serverId} />}
