@@ -1,0 +1,31 @@
+# golangci-lint configuration for the Bastion server.
+#
+# Gate policy: this is a RATCHET. The pre-existing findings in the tree at the
+# time this config was introduced are the accepted baseline; CI fails only on
+# NEW issues relative to the PR's merge base (issues.new-from-merge-base). As
+# fix PRs touch each file, they clean up that file's baseline findings, so the
+# baseline shrinks toward zero over time without a single large cleanup commit.
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  # The default set (errcheck, govet, ineffassign, staticcheck, unused) plus a
+  # few low-noise additions. Explicit so the gate is reproducible.
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - bodyclose
+    - rowserrcheck
+
+issues:
+  # Only fail on issues introduced by the change under review. Existing findings
+  # are the documented baseline and are cleaned incrementally by fix PRs.
+  new-from-merge-base: main
+  max-issues-per-linter: 0
+  max-same-issues: 0

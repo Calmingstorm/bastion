@@ -649,9 +649,9 @@ func (h *MessageHandler) BulkImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type importMessage struct {
-		Content        string                `json:"content"`
-		Embeds         []models.Embed        `json:"embeds,omitempty"`
-		CreatedAt      *time.Time            `json:"createdAt,omitempty"`
+		Content        string                 `json:"content"`
+		Embeds         []models.Embed         `json:"embeds,omitempty"`
+		CreatedAt      *time.Time             `json:"createdAt,omitempty"`
 		AuthorOverride *models.AuthorOverride `json:"authorOverride,omitempty"`
 	}
 
