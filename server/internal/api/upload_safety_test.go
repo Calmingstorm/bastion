@@ -170,7 +170,7 @@ func TestServeUploadRejectsPathTraversal(t *testing.T) {
 		}
 		body, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
-		if resp.StatusCode == http.StatusOK && strings.Contains(string(body), "TOP-SECRET") {
+		if strings.Contains(string(body), "TOP-SECRET") {
 			t.Fatalf("path traversal leaked the secret via %s (status %d)", p, resp.StatusCode)
 		}
 	}
