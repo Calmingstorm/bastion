@@ -379,6 +379,17 @@ func (h *WebhookHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Validate the display overrides: cap the username, and require the avatar to
+	// be an http(s) URL so a javascript:/data: value cannot execute client-side.
+	if req.Username != nil && len(strings.TrimSpace(*req.Username)) > 80 {
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "username cannot exceed 80 characters"))
+		return
+	}
+	if req.AvatarURL != nil && strings.TrimSpace(*req.AvatarURL) != "" && !isHTTPURL(*req.AvatarURL) {
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "avatarUrl must be an http(s) URL"))
+		return
+	}
+
 	// Build authorOverride if username or avatar overrides are provided
 	var authorOverride *models.AuthorOverride
 	if (req.Username != nil && *req.Username != "") || (req.AvatarURL != nil && *req.AvatarURL != "") {

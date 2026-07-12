@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -62,8 +63,41 @@ func validateEmbeds(embeds []models.Embed) error {
 		if len(e.Fields) > 25 {
 			return fmt.Errorf("embed %d exceeds 25 field limit", i)
 		}
+		// URL fields must be http(s) so a stored javascript:/data: URL cannot
+		// execute when a client renders the embed.
+		if !embedURLOK(e.URL) {
+			return fmt.Errorf("embed %d has an invalid url", i)
+		}
+		if e.Image != nil && !embedURLOK(e.Image.URL) {
+			return fmt.Errorf("embed %d image has an invalid url", i)
+		}
+		if e.Thumbnail != nil && !embedURLOK(e.Thumbnail.URL) {
+			return fmt.Errorf("embed %d thumbnail has an invalid url", i)
+		}
 	}
 	return nil
+}
+
+// isHTTPURL reports whether s parses as an http or https URL.
+func isHTTPURL(s string) bool {
+	u, err := url.Parse(strings.TrimSpace(s))
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+		return true
+	default:
+		return false
+	}
+}
+
+// embedURLOK reports whether an optional embed URL field is empty or http(s).
+func embedURLOK(s string) bool {
+	if strings.TrimSpace(s) == "" {
+		return true
+	}
+	return isHTTPURL(s)
 }
 
 func (h *MessageHandler) checkChannelAccess(r *http.Request, channelID, userID uuid.UUID) bool {

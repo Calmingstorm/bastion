@@ -612,6 +612,17 @@ func (h *InteractionHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "response must have content or embeds"))
 		return
 	}
+	// Apply the same content and embed limits as the other message write paths.
+	if len(req.Content) > 4000 {
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "content cannot exceed 4000 characters"))
+		return
+	}
+	if len(req.Embeds) > 0 {
+		if err := validateEmbeds(req.Embeds); err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", err.Error()))
+			return
+		}
+	}
 
 	// Get bot's user_id for authoring the message
 	var botUserID uuid.UUID
