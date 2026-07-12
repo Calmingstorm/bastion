@@ -12,12 +12,13 @@ export TEST_REDIS_ADDR ?= localhost:$(TEST_REDIS_PORT)
 .PHONY: test test-race unit test-up test-down fmt fmt-check vet lint
 
 ## Run the full suite (integration + unit) against local test services.
+## -count=1 disables Go's test result cache so integration tests always re-run.
 test: test-up
-	go test ./...
+	go test -count=1 ./...
 
 ## Run the full suite with the race detector.
 test-race: test-up
-	go test -race ./...
+	go test -race -count=1 ./...
 
 ## Run only the always-on unit tests (no services required).
 unit:

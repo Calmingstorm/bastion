@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -54,6 +55,7 @@ type Harness struct {
 
 	admin  *pgxpool.Pool
 	dbName string
+	users  []string // IDs of accounts registered via Register, for Redis cleanup
 }
 
 // New builds a fresh harness or skips the test if the required services are
@@ -114,27 +116,35 @@ func New(t *testing.T) *Harness {
 
 	pool, err := database.New(cfg)
 	if err != nil {
-		dropDatabase(admin, dbName)
+		dropDatabase(context.Background(), admin, dbName, nil)
 		admin.Close()
 		t.Fatalf("open test pool: %v", err)
 	}
 	if err := database.RunMigrations(server.MigrationsFS, cfg.DB.DSN()); err != nil {
 		pool.Close()
-		dropDatabase(admin, dbName)
+		dropDatabase(context.Background(), admin, dbName, nil)
 		admin.Close()
 		t.Fatalf("run migrations: %v", err)
 	}
 
-	// Isolated Redis logical DB (0-15) per harness; flushed on setup and teardown.
-	redisDB := int(dbSeq.Load() % 16)
+	// A single shared Redis DB is safe because every application key is scoped by
+	// a unique entity ID (presence:<uuid>, typing:<channelID>:<userID>,
+	// reset:<token>), so concurrent harnesses never collide. We deliberately do
+	// NOT FlushDB — that would erase other running harnesses' keys. Close deletes
+	// only the keys this harness created. TEST_REDIS_DB overrides the DB index.
+	redisDB := 0
+	if v := os.Getenv("TEST_REDIS_DB"); v != "" {
+		if n, convErr := strconv.Atoi(v); convErr == nil {
+			redisDB = n
+		}
+	}
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr, DB: redisDB})
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		pool.Close()
-		dropDatabase(admin, dbName)
+		dropDatabase(context.Background(), admin, dbName, nil)
 		admin.Close()
 		t.Fatalf("connect to test redis: %v", err)
 	}
-	rdb.FlushDB(ctx)
 
 	hub := realtime.NewHub()
 	go hub.Run()
@@ -156,24 +166,50 @@ func (h *Harness) Close() {
 		h.Hub.Stop()
 	}
 	if h.RDB != nil {
-		h.RDB.FlushDB(context.Background())
-		_ = h.RDB.Close()
+		// Delete only the keys this harness created. Keys are UUID-scoped, so
+		// this never touches another harness's state, and any failure is
+		// surfaced rather than silently leaking contaminated state.
+		if len(h.users) > 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			keys := make([]string, 0, len(h.users))
+			for _, id := range h.users {
+				keys = append(keys, "presence:"+id)
+			}
+			if err := h.RDB.Del(ctx, keys...).Err(); err != nil {
+				h.T.Errorf("harness cleanup: delete redis presence keys: %v", err)
+			}
+			cancel()
+		}
+		if err := h.RDB.Close(); err != nil {
+			h.T.Errorf("harness cleanup: close redis: %v", err)
+		}
 	}
 	if h.Pool != nil {
 		h.Pool.Close()
 	}
 	if h.admin != nil {
-		dropDatabase(h.admin, h.dbName)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		dropDatabase(ctx, h.admin, h.dbName, h.T)
+		cancel()
 		h.admin.Close()
 	}
 }
 
-func dropDatabase(admin *pgxpool.Pool, name string) {
-	ctx := context.Background()
-	// Kick any lingering connections before DROP.
-	_, _ = admin.Exec(ctx,
-		"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1", name)
-	_, _ = admin.Exec(ctx, "DROP DATABASE IF EXISTS "+pgx.Identifier{name}.Sanitize())
+// dropDatabase terminates lingering connections and drops the throwaway
+// database. When t is non-nil, cleanup failures are reported through it so a
+// leaked database fails the test loudly instead of poisoning later runs.
+func dropDatabase(ctx context.Context, admin *pgxpool.Pool, name string, t *testing.T) {
+	if _, err := admin.Exec(ctx,
+		"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1", name); err != nil {
+		if t != nil {
+			t.Errorf("harness cleanup: terminate connections to %s: %v", name, err)
+		}
+	}
+	if _, err := admin.Exec(ctx, "DROP DATABASE IF EXISTS "+pgx.Identifier{name}.Sanitize()); err != nil {
+		if t != nil {
+			t.Errorf("harness cleanup: drop database %s: %v", name, err)
+		}
+	}
 }
 
 // ---- HTTP helpers ----------------------------------------------------------
@@ -266,6 +302,7 @@ func (h *Harness) Register(username string) *TestUser {
 	if code != http.StatusCreated {
 		h.T.Fatalf("register %q: expected 201, got %d", username, code)
 	}
+	h.users = append(h.users, out.User.ID)
 	return &TestUser{
 		ID: out.User.ID, Username: username, Email: email, Password: password,
 		AccessToken: out.AccessToken, RefreshToken: out.RefreshToken,
