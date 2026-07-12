@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -98,6 +99,104 @@ func requireMembership(db *pgxpool.Pool, w http.ResponseWriter, r *http.Request,
 	return true
 }
 
+// highestRolePosition returns the highest position among the roles assigned to
+// userID on the server. The default @bastion role is position 0, so any member
+// is at least 0; -1 means the user holds no roles at all.
+func highestRolePosition(ctx context.Context, db *pgxpool.Pool, serverID, userID uuid.UUID) (int, error) {
+	var pos *int
+	err := db.QueryRow(ctx,
+		`SELECT MAX(r.position)
+		 FROM roles r
+		 INNER JOIN member_roles mr ON mr.role_id = r.id
+		 WHERE mr.server_id = $1 AND mr.user_id = $2`,
+		serverID, userID,
+	).Scan(&pos)
+	if err != nil {
+		return -1, err
+	}
+	if pos == nil {
+		return -1, nil
+	}
+	return *pos, nil
+}
+
+// getRolePosition returns the position of a single role on a server.
+func getRolePosition(ctx context.Context, db *pgxpool.Pool, serverID, roleID uuid.UUID) (int, error) {
+	var pos int
+	err := db.QueryRow(ctx,
+		`SELECT position FROM roles WHERE id = $1 AND server_id = $2`, roleID, serverID,
+	).Scan(&pos)
+	return pos, err
+}
+
+// isPrivileged reports whether a permission set carries Administrator (which
+// server owners also resolve to). Privileged actors bypass role-hierarchy and
+// permission-subset checks — they already have full control of the server.
+func isPrivileged(perms int64) bool {
+	return permissions.Has(perms, permissions.Administrator)
+}
+
+// enforceRoleHierarchy verifies a non-privileged actor may act on the target
+// role, i.e. the target sits strictly below the actor's highest role. It writes
+// a 403/500 and returns false on denial. Privileged actors are allowed through.
+func enforceRoleHierarchy(ctx context.Context, db *pgxpool.Pool, w http.ResponseWriter, serverID, actorID, targetRoleID uuid.UUID, actorPerms int64) bool {
+	if isPrivileged(actorPerms) {
+		return true
+	}
+	targetPos, err := getRolePosition(ctx, db, serverID, targetRoleID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "role not found"))
+		return false
+	}
+	actorTop, err := highestRolePosition(ctx, db, serverID, actorID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return false
+	}
+	if targetPos >= actorTop {
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you cannot manage a role equal to or higher than your highest role"))
+		return false
+	}
+	return true
+}
+
+// enforcePermissionSubset verifies a non-privileged actor only grants permission
+// bits they themselves hold. Writes a 403 and returns false on denial.
+func enforcePermissionSubset(w http.ResponseWriter, granted, actorPerms int64) bool {
+	if isPrivileged(actorPerms) {
+		return true
+	}
+	if granted&^actorPerms != 0 {
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you cannot grant permissions you do not have"))
+		return false
+	}
+	return true
+}
+
+// enforceMemberHierarchy verifies a non-privileged actor may act on the target
+// member, i.e. the actor's highest role sits strictly above the target's. Used
+// by moderation (kick/ban/timeout). Writes a 403/500 and returns false on denial.
+func enforceMemberHierarchy(ctx context.Context, db *pgxpool.Pool, w http.ResponseWriter, serverID, actorID, targetID uuid.UUID, actorPerms int64) bool {
+	if isPrivileged(actorPerms) {
+		return true
+	}
+	actorTop, err := highestRolePosition(ctx, db, serverID, actorID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return false
+	}
+	targetTop, err := highestRolePosition(ctx, db, serverID, targetID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return false
+	}
+	if targetTop >= actorTop {
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you cannot act on a member with an equal or higher role"))
+		return false
+	}
+	return true
+}
+
 type createRoleRequest struct {
 	Name        string  `json:"name"`
 	Color       *string `json:"color,omitempty"`
@@ -112,7 +211,8 @@ func (h *RoleHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, ok := requirePermission(h.db, w, r, serverID, userID, permissions.ManageRoles); !ok {
+	actorPerms, ok := requirePermission(h.db, w, r, serverID, userID, permissions.ManageRoles)
+	if !ok {
 		return
 	}
 
@@ -128,6 +228,16 @@ func (h *RoleHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	perms := int64(0)
+	if req.Permissions != nil {
+		perms = *req.Permissions
+	}
+
+	// A non-privileged actor may only grant permission bits they hold.
+	if !enforcePermissionSubset(w, perms, actorPerms) {
+		return
+	}
+
 	// Get next position (above all existing non-default roles)
 	var maxPos int
 	err = h.db.QueryRow(r.Context(),
@@ -138,11 +248,6 @@ func (h *RoleHandler) Create(w http.ResponseWriter, r *http.Request) {
 		log.Error().Err(err).Msg("failed to get max role position")
 		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
-	}
-
-	perms := int64(0)
-	if req.Permissions != nil {
-		perms = *req.Permissions
 	}
 
 	var role models.Role
@@ -232,13 +337,24 @@ func (h *RoleHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, ok := requirePermission(h.db, w, r, serverID, userID, permissions.ManageRoles); !ok {
+	actorPerms, ok := requirePermission(h.db, w, r, serverID, userID, permissions.ManageRoles)
+	if !ok {
 		return
 	}
 
 	var req updateRoleRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
+		return
+	}
+
+	// A non-privileged actor may only edit roles below their highest role, and
+	// may only set permission bits they themselves hold (which prevents editing
+	// the @bastion default role, or any role, up to Administrator).
+	if !enforceRoleHierarchy(r.Context(), h.db, w, serverID, userID, roleID, actorPerms) {
+		return
+	}
+	if req.Permissions != nil && !enforcePermissionSubset(w, *req.Permissions, actorPerms) {
 		return
 	}
 
@@ -316,7 +432,8 @@ func (h *RoleHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, ok := requirePermission(h.db, w, r, serverID, userID, permissions.ManageRoles); !ok {
+	actorPerms, ok := requirePermission(h.db, w, r, serverID, userID, permissions.ManageRoles)
+	if !ok {
 		return
 	}
 
@@ -331,6 +448,11 @@ func (h *RoleHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 	if isDefault {
 		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "cannot delete the default role"))
+		return
+	}
+
+	// A non-privileged actor may only delete roles below their highest role.
+	if !enforceRoleHierarchy(r.Context(), h.db, w, serverID, userID, roleID, actorPerms) {
 		return
 	}
 
@@ -377,7 +499,14 @@ func (h *RoleHandler) AssignRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, ok := requirePermission(h.db, w, r, serverID, userID, permissions.ManageRoles); !ok {
+	actorPerms, ok := requirePermission(h.db, w, r, serverID, userID, permissions.ManageRoles)
+	if !ok {
+		return
+	}
+
+	// A non-privileged actor may only assign roles below their highest role,
+	// which blocks self-granting an equal or higher (e.g. Administrator) role.
+	if !enforceRoleHierarchy(r.Context(), h.db, w, serverID, userID, roleID, actorPerms) {
 		return
 	}
 
@@ -439,7 +568,8 @@ func (h *RoleHandler) RemoveRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, ok := requirePermission(h.db, w, r, serverID, userID, permissions.ManageRoles); !ok {
+	actorPerms, ok := requirePermission(h.db, w, r, serverID, userID, permissions.ManageRoles)
+	if !ok {
 		return
 	}
 
@@ -454,6 +584,11 @@ func (h *RoleHandler) RemoveRole(w http.ResponseWriter, r *http.Request) {
 	}
 	if isDefault {
 		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "cannot remove members from the default role"))
+		return
+	}
+
+	// A non-privileged actor may only remove roles below their highest role.
+	if !enforceRoleHierarchy(r.Context(), h.db, w, serverID, userID, roleID, actorPerms) {
 		return
 	}
 

@@ -44,7 +44,8 @@ func (h *ModerationHandler) Kick(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, ok := requirePermission(h.db, w, r, serverID, userID, permissions.KickMembers); !ok {
+	actorPerms, ok := requirePermission(h.db, w, r, serverID, userID, permissions.KickMembers)
+	if !ok {
 		return
 	}
 
@@ -59,6 +60,11 @@ func (h *ModerationHandler) Kick(w http.ResponseWriter, r *http.Request) {
 	_ = h.db.QueryRow(r.Context(), `SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID)
 	if targetID == ownerID {
 		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "cannot kick the server owner"))
+		return
+	}
+
+	// A non-privileged moderator may only act on members ranked below them.
+	if !enforceMemberHierarchy(r.Context(), h.db, w, serverID, userID, targetID, actorPerms) {
 		return
 	}
 
@@ -119,7 +125,8 @@ func (h *ModerationHandler) Ban(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, ok := requirePermission(h.db, w, r, serverID, userID, permissions.BanMembers); !ok {
+	actorPerms, ok := requirePermission(h.db, w, r, serverID, userID, permissions.BanMembers)
+	if !ok {
 		return
 	}
 
@@ -132,6 +139,11 @@ func (h *ModerationHandler) Ban(w http.ResponseWriter, r *http.Request) {
 	_ = h.db.QueryRow(r.Context(), `SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID)
 	if targetID == ownerID {
 		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "cannot ban the server owner"))
+		return
+	}
+
+	// A non-privileged moderator may only act on members ranked below them.
+	if !enforceMemberHierarchy(r.Context(), h.db, w, serverID, userID, targetID, actorPerms) {
 		return
 	}
 
@@ -282,7 +294,8 @@ func (h *ModerationHandler) Timeout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, ok := requirePermission(h.db, w, r, serverID, userID, permissions.TimeoutMembers); !ok {
+	actorPerms, ok := requirePermission(h.db, w, r, serverID, userID, permissions.TimeoutMembers)
+	if !ok {
 		return
 	}
 
@@ -295,6 +308,11 @@ func (h *ModerationHandler) Timeout(w http.ResponseWriter, r *http.Request) {
 	_ = h.db.QueryRow(r.Context(), `SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID)
 	if targetID == ownerID {
 		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "cannot timeout the server owner"))
+		return
+	}
+
+	// A non-privileged moderator may only act on members ranked below them.
+	if !enforceMemberHierarchy(r.Context(), h.db, w, serverID, userID, targetID, actorPerms) {
 		return
 	}
 
