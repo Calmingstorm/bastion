@@ -43,6 +43,19 @@ func removeRole(h *testutil.Harness, u *testutil.TestUser, serverID, roleID, tar
 		map[string]string{"userId": targetID}, nil)
 }
 
+func kickMember(h *testutil.Harness, u *testutil.TestUser, serverID, targetID string) int {
+	return h.Request(http.MethodPost, "/api/v1/servers/"+serverID+"/kick/"+targetID, u.AccessToken, nil, nil)
+}
+
+func banMember(h *testutil.Harness, u *testutil.TestUser, serverID, targetID string) int {
+	return h.Request(http.MethodPost, "/api/v1/servers/"+serverID+"/bans/"+targetID, u.AccessToken, nil, nil)
+}
+
+func timeoutMember(h *testutil.Harness, u *testutil.TestUser, serverID, targetID string, seconds int) int {
+	return h.Request(http.MethodPost, "/api/v1/servers/"+serverID+"/timeout/"+targetID, u.AccessToken,
+		map[string]int{"duration": seconds}, nil)
+}
+
 func memberPerms(h *testutil.Harness, u *testutil.TestUser, serverID string) int64 {
 	var out struct {
 		Permissions int64 `json:"permissions"`
@@ -294,5 +307,123 @@ func TestModeratorCanKickLowerRankedMember(t *testing.T) {
 	code := h.Request(http.MethodPost, "/api/v1/servers/"+serverID+"/kick/"+plain.ID, mod.AccessToken, nil, nil)
 	if code != http.StatusOK {
 		t.Fatalf("mod kick lower-ranked member: expected 200, got %d", code)
+	}
+}
+
+// A member whose only role is the default @bastion (position 0) cannot create a
+// role — there is no slot below the default — and the default role stays lowest.
+func TestDefaultRoleHolderCannotCreateRole(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	member := h.Register("member")
+	serverID := h.CreateServer(owner, "S")
+	joinServer(h, owner, member, serverID)
+
+	// Owner grants ManageRoles to the default role (keeping its other perms).
+	def := defaultRoleID(h, owner, serverID)
+	defaultPerms := permissions.ViewChannel | permissions.SendMessages | permissions.CreateInvites | permissions.AttachFiles
+	if code := patchRolePerms(h, owner, serverID, def, defaultPerms|permissions.ManageRoles); code != http.StatusOK {
+		t.Fatalf("owner grant ManageRoles to default: got %d", code)
+	}
+
+	if _, code := createRole(h, member, serverID, "Nope", permissions.SendMessages); code != http.StatusForbidden {
+		t.Fatalf("default-only member created a role: expected 403, got %d", code)
+	}
+
+	// The default role must still be at position 0.
+	var roles []struct {
+		Position  int  `json:"position"`
+		IsDefault bool `json:"isDefault"`
+	}
+	h.Request(http.MethodGet, "/api/v1/servers/"+serverID+"/roles", owner.AccessToken, nil, &roles)
+	for _, rr := range roles {
+		if rr.IsDefault && rr.Position != 0 {
+			t.Fatalf("default role moved off position 0 (now %d)", rr.Position)
+		}
+	}
+}
+
+// --- moderation hierarchy across Ban and Timeout ----------------------------
+
+func TestJuniorModCannotBanHigherRankedMember(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	junior := h.Register("junior")
+	senior := h.Register("senior")
+	serverID := h.CreateServer(owner, "S")
+	joinServer(h, owner, junior, serverID)
+	joinServer(h, owner, senior, serverID)
+	makeModerator(h, owner, junior, serverID, permissions.BanMembers, "Junior")
+	makeModerator(h, owner, senior, serverID, permissions.Administrator, "Senior")
+
+	if code := banMember(h, junior, serverID, senior.ID); code != http.StatusForbidden {
+		t.Fatalf("junior banned a higher-ranked member: expected 403, got %d", code)
+	}
+}
+
+func TestModeratorCanBanLowerRankedMember(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	mod := h.Register("mod")
+	plain := h.Register("plain")
+	serverID := h.CreateServer(owner, "S")
+	joinServer(h, owner, mod, serverID)
+	joinServer(h, owner, plain, serverID)
+	makeModerator(h, owner, mod, serverID, permissions.BanMembers, "Mod")
+
+	if code := banMember(h, mod, serverID, plain.ID); code != http.StatusOK {
+		t.Fatalf("mod ban lower-ranked member: expected 200, got %d", code)
+	}
+}
+
+func TestJuniorModCannotTimeoutHigherRankedMember(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	junior := h.Register("junior")
+	senior := h.Register("senior")
+	serverID := h.CreateServer(owner, "S")
+	joinServer(h, owner, junior, serverID)
+	joinServer(h, owner, senior, serverID)
+	makeModerator(h, owner, junior, serverID, permissions.TimeoutMembers, "Junior")
+	makeModerator(h, owner, senior, serverID, permissions.Administrator, "Senior")
+
+	if code := timeoutMember(h, junior, serverID, senior.ID, 300); code != http.StatusForbidden {
+		t.Fatalf("junior timed out a higher-ranked member: expected 403, got %d", code)
+	}
+}
+
+func TestModeratorCanTimeoutLowerRankedMember(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	mod := h.Register("mod")
+	plain := h.Register("plain")
+	serverID := h.CreateServer(owner, "S")
+	joinServer(h, owner, mod, serverID)
+	joinServer(h, owner, plain, serverID)
+	makeModerator(h, owner, mod, serverID, permissions.TimeoutMembers, "Mod")
+
+	if code := timeoutMember(h, mod, serverID, plain.ID, 300); code != http.StatusOK {
+		t.Fatalf("mod timeout lower-ranked member: expected 200, got %d", code)
+	}
+}
+
+// A non-owner Administrator can moderate any non-owner member (bypass boundary).
+func TestNonOwnerAdministratorCanModerate(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	admin := h.Register("admin")
+	staff := h.Register("staff")
+	serverID := h.CreateServer(owner, "S")
+	joinServer(h, owner, admin, serverID)
+	joinServer(h, owner, staff, serverID)
+	makeModerator(h, owner, admin, serverID, permissions.Administrator, "Admins")
+	// staff outranks a plain member but the admin (privileged) still may act.
+	makeModerator(h, owner, staff, serverID, permissions.KickMembers|permissions.BanMembers, "Staff")
+
+	if code := timeoutMember(h, admin, serverID, staff.ID, 300); code != http.StatusOK {
+		t.Fatalf("non-owner admin timeout staff: expected 200, got %d", code)
+	}
+	if code := kickMember(h, admin, serverID, staff.ID); code != http.StatusOK {
+		t.Fatalf("non-owner admin kick staff: expected 200, got %d", code)
 	}
 }

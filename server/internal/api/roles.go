@@ -270,6 +270,13 @@ func (h *RoleHandler) Create(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
+		// The default @bastion role sits at position 0 and must stay the lowest.
+		// If the actor's highest role is that default role, there is no slot
+		// beneath it to create a manageable role — reject rather than reorder it.
+		if actorTop <= 0 {
+			writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have a role above the default role, so you cannot create new roles"))
+			return
+		}
 		tx, err := h.db.Begin(r.Context())
 		if err != nil {
 			log.Error().Err(err).Msg("failed to begin transaction")
