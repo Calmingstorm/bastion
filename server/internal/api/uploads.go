@@ -2,7 +2,6 @@ package api
 
 import (
 	"net/http"
-	"path/filepath"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -116,19 +115,23 @@ func (h *UploadHandler) SendWithAttachments(w http.ResponseWriter, r *http.Reque
 			return
 		}
 
-		ext := filepath.Ext(fh.Filename)
-		storedName, url, err := h.storage.Save(file, ext)
-		file.Close()
+		detected, err := sniffContentType(file)
+		if err != nil {
+			_ = file.Close()
+			log.Error().Err(err).Msg("failed to inspect uploaded file")
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+			return
+		}
+		storedName, url, err := h.storage.Save(file, safeExtensionForType(detected))
+		_ = file.Close()
 		if err != nil {
 			log.Error().Err(err).Msg("failed to save file")
 			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
 
-		contentType := fh.Header.Get("Content-Type")
-		if contentType == "" {
-			contentType = "application/octet-stream"
-		}
+		// Store the detected content type, never the spoofable client header.
+		contentType := detected
 
 		var att models.Attachment
 		err = tx.QueryRow(r.Context(),
