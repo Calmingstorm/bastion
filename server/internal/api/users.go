@@ -3,7 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-	"path/filepath"
+	"os"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -116,24 +116,26 @@ func (h *UserHandler) UploadAvatar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	file, header, err := r.FormFile("avatar")
+	file, _, err := r.FormFile("avatar")
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "missing avatar file"))
 		return
 	}
 	defer file.Close()
 
-	// Validate content type
-	contentType := header.Header.Get("Content-Type")
-	if !strings.HasPrefix(contentType, "image/") {
-		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "file must be an image"))
+	// Validate that the file really is an image by inspecting its bytes, not the
+	// client-supplied Content-Type header (which is trivially spoofable), and
+	// store it under a canonical extension derived from the detected type.
+	ct, err := sniffContentType(file)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
-
-	ext := filepath.Ext(header.Filename)
-	if ext == "" {
-		ext = ".png"
+	if !isInlineRenderable(ct) {
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "file must be a PNG, JPEG, GIF, WebP, or BMP image"))
+		return
 	}
+	ext := safeExtensionForType(ct)
 
 	storedName, url, err := h.storage.Save(file, ext)
 	if err != nil {
@@ -266,16 +268,44 @@ func (h *UserHandler) GetMembers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *UserHandler) ServeUpload(w http.ResponseWriter, r *http.Request) {
-	// Serve file from the uploads directory
-	// Path is everything after /api/uploads/
+	// Path is everything after /api/uploads/. http.ServeContent (like ServeFile)
+	// rejects any "..", so path traversal is not possible here.
 	filePath := chi.URLParam(r, "*")
 	if filePath == "" {
 		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "file not found"))
 		return
 	}
 
-	fullPath := h.storage.FullPath(filePath)
-	http.ServeFile(w, r, fullPath)
+	f, err := os.Open(h.storage.FullPath(filePath))
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "file not found"))
+		return
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil || info.IsDir() {
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "file not found"))
+		return
+	}
+
+	// Determine the content type from the file's own bytes — never a stored or
+	// client-supplied value — and forbid content-type sniffing. Only a small
+	// allowlist of image types is served inline; everything else is forced to
+	// download, so an uploaded HTML/SVG/script cannot execute on this origin.
+	ct, err := sniffContentType(f)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if isInlineRenderable(ct) {
+		w.Header().Set("Content-Type", ct)
+		w.Header().Set("Content-Disposition", "inline")
+	} else {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", "attachment")
+	}
+	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
 }
 
 // itoa converts int to string without importing strconv
