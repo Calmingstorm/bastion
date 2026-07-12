@@ -167,8 +167,9 @@ func New(t *testing.T) *Harness {
 	return h
 }
 
-// Close tears down the harness: stops the server and hub, flushes and closes
-// Redis, and drops the throwaway database.
+// Close tears down the harness: stops the server, waits for the hub goroutine to
+// exit, deletes the harness-owned Redis keys and closes the client, and drops the
+// throwaway database.
 func (h *Harness) Close() {
 	if h.Server != nil {
 		h.Server.Close()
