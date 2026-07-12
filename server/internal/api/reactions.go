@@ -38,6 +38,14 @@ func (h *ReactionHandler) AddReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The caller must be a member of the channel (server or DM) before they can
+	// react or have their reaction broadcast to other members.
+	msgHandler := &MessageHandler{db: h.db, hub: h.hub}
+	if !msgHandler.checkChannelAccess(r, channelID, userID) {
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have access to this channel"))
+		return
+	}
+
 	// Verify message is in this channel
 	var exists bool
 	err = h.db.QueryRow(r.Context(),
@@ -49,7 +57,7 @@ func (h *ReactionHandler) AddReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = h.db.Exec(r.Context(),
+	tag, err := h.db.Exec(r.Context(),
 		`INSERT INTO message_reactions (message_id, user_id, emoji)
 		 VALUES ($1, $2, $3)
 		 ON CONFLICT DO NOTHING`,
@@ -61,15 +69,19 @@ func (h *ReactionHandler) AddReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.hub.BroadcastToChannel(channelID, realtime.Event{
-		Type: realtime.EventReactionAdd,
-		Data: map[string]string{
-			"channelId": channelID.String(),
-			"messageId": messageID.String(),
-			"userId":    userID.String(),
-			"emoji":     emoji,
-		},
-	})
+	// Only broadcast when the reaction was actually added, so a duplicate add
+	// (retry, second tab) does not inflate the count on other clients.
+	if tag.RowsAffected() > 0 {
+		h.hub.BroadcastToChannel(channelID, realtime.Event{
+			Type: realtime.EventReactionAdd,
+			Data: map[string]string{
+				"channelId": channelID.String(),
+				"messageId": messageID.String(),
+				"userId":    userID.String(),
+				"emoji":     emoji,
+			},
+		})
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -92,7 +104,27 @@ func (h *ReactionHandler) RemoveReaction(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	_, err = h.db.Exec(r.Context(),
+	// The caller must be a member of the channel (server or DM).
+	msgHandler := &MessageHandler{db: h.db, hub: h.hub}
+	if !msgHandler.checkChannelAccess(r, channelID, userID) {
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have access to this channel"))
+		return
+	}
+
+	// The message must belong to this channel, so a reaction on a message in a
+	// different (possibly inaccessible) channel cannot be removed by routing the
+	// request through a channel the caller does have access to.
+	var exists bool
+	err = h.db.QueryRow(r.Context(),
+		`SELECT EXISTS(SELECT 1 FROM messages WHERE id = $1 AND channel_id = $2)`,
+		messageID, channelID,
+	).Scan(&exists)
+	if err != nil || !exists {
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "message not found"))
+		return
+	}
+
+	tag, err := h.db.Exec(r.Context(),
 		`DELETE FROM message_reactions WHERE message_id = $1 AND user_id = $2 AND emoji = $3`,
 		messageID, userID, emoji,
 	)
@@ -102,15 +134,19 @@ func (h *ReactionHandler) RemoveReaction(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	h.hub.BroadcastToChannel(channelID, realtime.Event{
-		Type: realtime.EventReactionRemove,
-		Data: map[string]string{
-			"channelId": channelID.String(),
-			"messageId": messageID.String(),
-			"userId":    userID.String(),
-			"emoji":     emoji,
-		},
-	})
+	// Only broadcast when a reaction was actually removed, so a no-op remove does
+	// not spuriously decrement the count on other clients.
+	if tag.RowsAffected() > 0 {
+		h.hub.BroadcastToChannel(channelID, realtime.Event{
+			Type: realtime.EventReactionRemove,
+			Data: map[string]string{
+				"channelId": channelID.String(),
+				"messageId": messageID.String(),
+				"userId":    userID.String(),
+				"emoji":     emoji,
+			},
+		})
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
