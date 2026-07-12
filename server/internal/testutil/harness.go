@@ -1,10 +1,13 @@
 // Package testutil provides an integration-test harness that exercises the real
 // Bastion HTTP API against an ephemeral PostgreSQL database and Redis instance.
 //
-// Each harness creates its own throwaway database (migrated from scratch) and an
-// isolated Redis logical DB, then serves the production chi router via
-// httptest.NewServer. Tests talk to it over HTTP exactly like a real client, so
-// middleware, auth, routing, and rate limiting are all in the loop.
+// Each harness creates its own throwaway database (migrated from scratch), then
+// serves the production chi router via httptest.NewServer. A single Redis
+// instance is shared across harnesses — every application key is entity-scoped
+// (presence:<uuid>, typing:<channelID>:<userID>, reset:<token>), so harnesses
+// never collide, and each harness cleans up only the keys it created. Tests talk
+// to the server over HTTP exactly like a real client, so middleware, auth,
+// routing, and rate limiting are all in the loop.
 //
 // The harness is gated on the TEST_DATABASE_URL and TEST_REDIS_ADDR environment
 // variables. When either is unset, New calls t.Skip — so `go test ./...` stays
@@ -53,9 +56,10 @@ type Harness struct {
 	Hub    *realtime.Hub
 	Cfg    *config.Config
 
-	admin  *pgxpool.Pool
-	dbName string
-	users  []string // IDs of accounts registered via Register, for Redis cleanup
+	admin   *pgxpool.Pool
+	dbName  string
+	users   []string      // IDs of accounts registered via Register, for Redis cleanup
+	hubDone chan struct{} // closed when the hub's Run goroutine exits
 }
 
 // New builds a fresh harness or skips the test if the required services are
@@ -116,13 +120,13 @@ func New(t *testing.T) *Harness {
 
 	pool, err := database.New(cfg)
 	if err != nil {
-		dropDatabase(context.Background(), admin, dbName, nil)
+		cleanupDatabase(admin, dbName, t)
 		admin.Close()
 		t.Fatalf("open test pool: %v", err)
 	}
 	if err := database.RunMigrations(server.MigrationsFS, cfg.DB.DSN()); err != nil {
 		pool.Close()
-		dropDatabase(context.Background(), admin, dbName, nil)
+		cleanupDatabase(admin, dbName, t)
 		admin.Close()
 		t.Fatalf("run migrations: %v", err)
 	}
@@ -141,17 +145,24 @@ func New(t *testing.T) *Harness {
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr, DB: redisDB})
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		pool.Close()
-		dropDatabase(context.Background(), admin, dbName, nil)
+		cleanupDatabase(admin, dbName, t)
 		admin.Close()
 		t.Fatalf("connect to test redis: %v", err)
 	}
 
 	hub := realtime.NewHub()
-	go hub.Run()
+	hubDone := make(chan struct{})
+	go func() {
+		hub.Run()
+		close(hubDone)
+	}()
 
 	srv := httptest.NewServer(api.NewRouter(pool, cfg, hub, rdb))
 
-	h := &Harness{T: t, Server: srv, Pool: pool, RDB: rdb, Hub: hub, Cfg: cfg, admin: admin, dbName: dbName}
+	h := &Harness{
+		T: t, Server: srv, Pool: pool, RDB: rdb, Hub: hub, Cfg: cfg,
+		admin: admin, dbName: dbName, hubDone: hubDone,
+	}
 	t.Cleanup(h.Close)
 	return h
 }
@@ -164,6 +175,15 @@ func (h *Harness) Close() {
 	}
 	if h.Hub != nil {
 		h.Hub.Stop()
+		// Wait for the hub goroutine to actually exit before tearing down the
+		// dependencies it uses, so a late broadcast cannot touch a closed pool.
+		if h.hubDone != nil {
+			select {
+			case <-h.hubDone:
+			case <-time.After(5 * time.Second):
+				h.T.Errorf("harness cleanup: hub did not stop within 5s")
+			}
+		}
 	}
 	if h.RDB != nil {
 		// Delete only the keys this harness created. Keys are UUID-scoped, so
@@ -188,11 +208,17 @@ func (h *Harness) Close() {
 		h.Pool.Close()
 	}
 	if h.admin != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		dropDatabase(ctx, h.admin, h.dbName, h.T)
-		cancel()
+		cleanupDatabase(h.admin, h.dbName, h.T)
 		h.admin.Close()
 	}
+}
+
+// cleanupDatabase drops the throwaway database under a bounded context so
+// teardown can never hang, reporting failures through t when non-nil.
+func cleanupDatabase(admin *pgxpool.Pool, name string, t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	dropDatabase(ctx, admin, name, t)
 }
 
 // dropDatabase terminates lingering connections and drops the throwaway
