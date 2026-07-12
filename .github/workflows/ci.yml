@@ -72,6 +72,9 @@ jobs:
 
   lint:
     name: Lint (Go)
+    # Runs on PRs, where only-new-issues can diff against the base. The existing
+    # findings are the accepted baseline; only newly introduced ones fail.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -84,10 +87,11 @@ jobs:
           cache-dependency-path: server/go.sum
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
           version: v2.12.2
           working-directory: server
+          only-new-issues: true
 
   web:
     name: Web

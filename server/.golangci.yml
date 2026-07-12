@@ -24,8 +24,9 @@ linters:
     - rowserrcheck
 
 issues:
-  # Only fail on issues introduced by the change under review. Existing findings
-  # are the documented baseline and are cleaned incrementally by fix PRs.
-  new-from-merge-base: main
+  # The CI job (golangci-lint-action with only-new-issues) reports only findings
+  # introduced by the change under review, so the existing baseline does not
+  # block and is cleaned incrementally by fix PRs. Locally, `golangci-lint run`
+  # shows all findings.
   max-issues-per-linter: 0
   max-same-issues: 0
