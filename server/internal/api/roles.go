@@ -238,30 +238,69 @@ func (h *RoleHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get next position (above all existing non-default roles)
-	var maxPos int
-	err = h.db.QueryRow(r.Context(),
-		`SELECT COALESCE(MAX(position), 0) FROM roles WHERE server_id = $1`,
-		serverID,
-	).Scan(&maxPos)
-	if err != nil {
-		log.Error().Err(err).Msg("failed to get max role position")
-		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
-		return
-	}
-
+	// Position: a privileged actor (owner / Administrator) creates the role at the
+	// top. A delegated ManageRoles holder must instead create it strictly below
+	// their own highest role — otherwise they would create a role they could not
+	// then assign, edit, or delete — so we shift existing roles up to open a slot.
 	var role models.Role
-	err = h.db.QueryRow(r.Context(),
-		`INSERT INTO roles (server_id, name, color, position, permissions)
-		 VALUES ($1, $2, $3, $4, $5)
-		 RETURNING id, server_id, name, color, position, permissions, is_default, created_at`,
-		serverID, req.Name, req.Color, maxPos+1, perms,
-	).Scan(&role.ID, &role.ServerID, &role.Name, &role.Color, &role.Position,
-		&role.Permissions, &role.IsDefault, &role.CreatedAt)
-	if err != nil {
-		log.Error().Err(err).Msg("failed to create role")
-		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
-		return
+	if isPrivileged(actorPerms) {
+		var maxPos int
+		if err := h.db.QueryRow(r.Context(),
+			`SELECT COALESCE(MAX(position), 0) FROM roles WHERE server_id = $1`, serverID,
+		).Scan(&maxPos); err != nil {
+			log.Error().Err(err).Msg("failed to get max role position")
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+			return
+		}
+		if err := h.db.QueryRow(r.Context(),
+			`INSERT INTO roles (server_id, name, color, position, permissions)
+			 VALUES ($1, $2, $3, $4, $5)
+			 RETURNING id, server_id, name, color, position, permissions, is_default, created_at`,
+			serverID, req.Name, req.Color, maxPos+1, perms,
+		).Scan(&role.ID, &role.ServerID, &role.Name, &role.Color, &role.Position,
+			&role.Permissions, &role.IsDefault, &role.CreatedAt); err != nil {
+			log.Error().Err(err).Msg("failed to create role")
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+			return
+		}
+	} else {
+		actorTop, err := highestRolePosition(r.Context(), h.db, serverID, userID)
+		if err != nil {
+			log.Error().Err(err).Msg("failed to resolve actor role position")
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+			return
+		}
+		tx, err := h.db.Begin(r.Context())
+		if err != nil {
+			log.Error().Err(err).Msg("failed to begin transaction")
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+			return
+		}
+		defer func() { _ = tx.Rollback(r.Context()) }()
+		if _, err := tx.Exec(r.Context(),
+			`UPDATE roles SET position = position + 1 WHERE server_id = $1 AND position >= $2`,
+			serverID, actorTop,
+		); err != nil {
+			log.Error().Err(err).Msg("failed to shift role positions")
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+			return
+		}
+		if err := tx.QueryRow(r.Context(),
+			`INSERT INTO roles (server_id, name, color, position, permissions)
+			 VALUES ($1, $2, $3, $4, $5)
+			 RETURNING id, server_id, name, color, position, permissions, is_default, created_at`,
+			serverID, req.Name, req.Color, actorTop, perms,
+		).Scan(&role.ID, &role.ServerID, &role.Name, &role.Color, &role.Position,
+			&role.Permissions, &role.IsDefault, &role.CreatedAt); err != nil {
+			log.Error().Err(err).Msg("failed to create role")
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+			return
+		}
+		if err := tx.Commit(r.Context()); err != nil {
+			log.Error().Err(err).Msg("failed to commit role creation")
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+			return
+		}
 	}
 
 	// Audit log

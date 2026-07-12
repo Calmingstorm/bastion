@@ -29,6 +29,20 @@ func patchRolePerms(h *testutil.Harness, u *testutil.TestUser, serverID, roleID 
 		map[string]any{"permissions": perms}, nil)
 }
 
+func patchRoleName(h *testutil.Harness, u *testutil.TestUser, serverID, roleID, name string) int {
+	return h.Request(http.MethodPatch, "/api/v1/servers/"+serverID+"/roles/"+roleID, u.AccessToken,
+		map[string]any{"name": name}, nil)
+}
+
+func deleteRole(h *testutil.Harness, u *testutil.TestUser, serverID, roleID string) int {
+	return h.Request(http.MethodDelete, "/api/v1/servers/"+serverID+"/roles/"+roleID, u.AccessToken, nil, nil)
+}
+
+func removeRole(h *testutil.Harness, u *testutil.TestUser, serverID, roleID, targetID string) int {
+	return h.Request(http.MethodPost, "/api/v1/servers/"+serverID+"/roles/"+roleID+"/remove", u.AccessToken,
+		map[string]string{"userId": targetID}, nil)
+}
+
 func memberPerms(h *testutil.Harness, u *testutil.TestUser, serverID string) int64 {
 	var out struct {
 		Permissions int64 `json:"permissions"`
@@ -194,6 +208,75 @@ func TestManageRolesHolderCanCreateRoleWithinTheirPerms(t *testing.T) {
 
 	if _, code := createRole(h, member, serverID, "Greeters", permissions.CreateInvites); code != http.StatusCreated {
 		t.Fatalf("mod create role within perms: expected 201, got %d", code)
+	}
+}
+
+// A ManageRoles holder must be able to fully manage a role they just created —
+// creation must place it below them, not above (regression for the position bug).
+func TestManageRolesHolderCanManageRoleTheyCreated(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	mod := h.Register("mod")
+	target := h.Register("target")
+	serverID := h.CreateServer(owner, "S")
+	joinServer(h, owner, mod, serverID)
+	joinServer(h, owner, target, serverID)
+	makeModerator(h, owner, mod, serverID, permissions.ManageRoles|permissions.CreateInvites, "Mod")
+
+	roleID, code := createRole(h, mod, serverID, "Helpers", permissions.CreateInvites)
+	if code != http.StatusCreated {
+		t.Fatalf("mod create role: expected 201, got %d", code)
+	}
+	// The mod must now be able to assign, rename, and delete that role.
+	if code := assignRole(h, mod, serverID, roleID, target.ID); code != http.StatusOK {
+		t.Fatalf("mod assign own new role: expected 200, got %d", code)
+	}
+	if code := patchRoleName(h, mod, serverID, roleID, "Greeters"); code != http.StatusOK {
+		t.Fatalf("mod rename own new role: expected 200, got %d", code)
+	}
+	if code := removeRole(h, mod, serverID, roleID, target.ID); code != http.StatusOK {
+		t.Fatalf("mod remove own new role: expected 200, got %d", code)
+	}
+	if code := deleteRole(h, mod, serverID, roleID); code != http.StatusOK {
+		t.Fatalf("mod delete own new role: expected 200, got %d", code)
+	}
+}
+
+// A non-owner Administrator bypasses hierarchy and subset entirely.
+func TestNonOwnerAdministratorHasFullControl(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	admin := h.Register("admin")
+	serverID := h.CreateServer(owner, "S")
+	joinServer(h, owner, admin, serverID)
+	makeModerator(h, owner, admin, serverID, permissions.Administrator, "Admins")
+
+	// Admin (not the owner) can create an Administrator role and edit @bastion.
+	if _, code := createRole(h, admin, serverID, "MoreAdmins", permissions.Administrator); code != http.StatusCreated {
+		t.Fatalf("non-owner admin create admin role: expected 201, got %d", code)
+	}
+	def := defaultRoleID(h, admin, serverID)
+	if code := patchRolePerms(h, admin, serverID, def, permissions.ViewChannel|permissions.SendMessages|permissions.ManageMessages); code != http.StatusOK {
+		t.Fatalf("non-owner admin edit default role: expected 200, got %d", code)
+	}
+}
+
+// A ManageRoles holder cannot delete a role ranked above them.
+func TestManageRolesHolderCannotDeleteHigherRole(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	mod := h.Register("mod")
+	serverID := h.CreateServer(owner, "S")
+	joinServer(h, owner, mod, serverID)
+	makeModerator(h, owner, mod, serverID, permissions.ManageRoles, "Mod")
+
+	// Owner-made role created after the mod role => higher position.
+	higher, code := createRole(h, owner, serverID, "Higher", permissions.KickMembers)
+	if code != http.StatusCreated {
+		t.Fatalf("owner create higher role: got %d", code)
+	}
+	if code := deleteRole(h, mod, serverID, higher); code != http.StatusForbidden {
+		t.Fatalf("mod deleted a higher role: expected 403, got %d", code)
 	}
 }
 
