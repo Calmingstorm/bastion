@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -268,15 +270,26 @@ func (h *UserHandler) GetMembers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *UserHandler) ServeUpload(w http.ResponseWriter, r *http.Request) {
-	// Path is everything after /api/uploads/. http.ServeContent (like ServeFile)
-	// rejects any "..", so path traversal is not possible here.
+	// Path is everything after /api/uploads/. Unlike http.ServeFile, ServeContent
+	// does NOT reject "..", so we must contain the path ourselves: path.Clean with
+	// a leading slash collapses any "..", and we then verify the resolved target
+	// stays beneath the upload root before opening it.
 	filePath := chi.URLParam(r, "*")
-	if filePath == "" {
+	clean := strings.TrimPrefix(path.Clean("/"+filePath), "/")
+	if clean == "" || clean == "." {
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "file not found"))
+		return
+	}
+	full := h.storage.FullPath(clean)
+	rootAbs, err1 := filepath.Abs(h.storage.Root())
+	fullAbs, err2 := filepath.Abs(full)
+	if err1 != nil || err2 != nil ||
+		(fullAbs != rootAbs && !strings.HasPrefix(fullAbs, rootAbs+string(filepath.Separator))) {
 		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "file not found"))
 		return
 	}
 
-	f, err := os.Open(h.storage.FullPath(filePath))
+	f, err := os.Open(full)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "file not found"))
 		return

@@ -8,6 +8,9 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Calmingstorm/bastion/server/internal/testutil"
@@ -139,6 +142,37 @@ func TestServedAttachmentIsNotExecutableHTML(t *testing.T) {
 	}
 	if ct := resp.Header.Get("Content-Type"); ct == "text/html" || ct == "text/html; charset=utf-8" {
 		t.Errorf("Content-Type = %q; must not be text/html", ct)
+	}
+}
+
+// TestServeUploadRejectsPathTraversal: a request that escapes the upload root
+// (literal or encoded "..") must not read files outside it.
+func TestServeUploadRejectsPathTraversal(t *testing.T) {
+	h := testutil.New(t)
+
+	// Plant a secret just outside the upload root.
+	secretName := "traversal-secret.txt"
+	secretPath := filepath.Join(filepath.Dir(h.Cfg.Upload.Dir), secretName)
+	if err := os.WriteFile(secretPath, []byte("TOP-SECRET-DO-NOT-LEAK"), 0o600); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	defer func() { _ = os.Remove(secretPath) }()
+
+	for _, p := range []string{
+		"/api/v1/uploads/../" + secretName,
+		"/api/v1/uploads/%2e%2e/" + secretName,
+		"/api/v1/uploads/..%2f" + secretName,
+		"/api/v1/uploads/....//" + secretName,
+	} {
+		resp, err := http.Get(h.URL(p))
+		if err != nil {
+			t.Fatalf("GET %s: %v", p, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusOK && strings.Contains(string(body), "TOP-SECRET") {
+			t.Fatalf("path traversal leaked the secret via %s (status %d)", p, resp.StatusCode)
+		}
 	}
 }
 

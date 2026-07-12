@@ -68,3 +68,8 @@ func (fs *FileStorage) Delete(relativePath string) error {
 func (fs *FileStorage) FullPath(relativePath string) string {
 	return filepath.Join(fs.baseDir, relativePath)
 }
+
+// Root returns the absolute base upload directory, for containment checks.
+func (fs *FileStorage) Root() string {
+	return fs.baseDir
+}
