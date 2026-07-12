@@ -3,6 +3,7 @@ package api_test
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/Calmingstorm/bastion/server/internal/testutil"
 )
@@ -106,5 +107,62 @@ func TestMemberCanReactOnceIdempotent(t *testing.T) {
 	}
 	if n := reactionCount(h, owner, channelID, messageID, "👍"); n != 0 {
 		t.Fatalf("expected reaction count 0 after remove, got %d", n)
+	}
+}
+
+// TestRemoveReactionCrossChannelBlocked: a reaction must only be removable
+// through the channel its message actually belongs to, not by routing the
+// request through a different channel the caller can access.
+func TestRemoveReactionCrossChannelBlocked(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	attacker := h.Register("attacker")
+	serverID := h.CreateServer(owner, "S")
+	chanA := h.CreateChannel(owner, serverID, "a")
+	chanB := h.CreateChannel(owner, serverID, "b")
+	joinServer(h, owner, attacker, serverID)
+
+	msgB := sendMessage(h, owner, chanB, "in B")
+	if code := addReaction(h, attacker, chanB, msgB, thumbsUp); code != http.StatusOK {
+		t.Fatalf("attacker react in B: expected 200, got %d", code)
+	}
+
+	// Removing via chanA (accessible) but referencing a message in chanB must 404.
+	if code := removeReaction(h, attacker, chanA, msgB, thumbsUp); code != http.StatusNotFound {
+		t.Fatalf("cross-channel reaction remove: expected 404, got %d", code)
+	}
+	// The reaction in B must survive.
+	if n := reactionCount(h, owner, chanB, msgB, "👍"); n != 1 {
+		t.Fatalf("reaction removed cross-channel: count=%d, want 1", n)
+	}
+}
+
+// TestReactionBroadcastIdempotent: a duplicate add emits exactly one
+// REACTION_ADD, and a duplicate remove exactly one REACTION_REMOVE, observed
+// over a real authenticated WebSocket.
+func TestReactionBroadcastIdempotent(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	member := h.Register("member")
+	serverID := h.CreateServer(owner, "S")
+	channelID := h.CreateChannel(owner, serverID, "general")
+	joinServer(h, owner, member, serverID)
+	messageID := sendMessage(h, owner, channelID, "hi")
+
+	ws := h.DialWS(owner)
+	ws.Drain(400 * time.Millisecond) // discard connect/presence/join noise
+
+	// Two identical adds must produce exactly one broadcast.
+	_ = addReaction(h, member, channelID, messageID, thumbsUp)
+	_ = addReaction(h, member, channelID, messageID, thumbsUp)
+	if n := ws.CountEvents("REACTION_ADD", 800*time.Millisecond); n != 1 {
+		t.Fatalf("expected exactly 1 REACTION_ADD broadcast, got %d", n)
+	}
+
+	// Two removes must produce exactly one broadcast.
+	_ = removeReaction(h, member, channelID, messageID, thumbsUp)
+	_ = removeReaction(h, member, channelID, messageID, thumbsUp)
+	if n := ws.CountEvents("REACTION_REMOVE", 800*time.Millisecond); n != 1 {
+		t.Fatalf("expected exactly 1 REACTION_REMOVE broadcast, got %d", n)
 	}
 }

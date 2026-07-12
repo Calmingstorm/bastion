@@ -111,6 +111,19 @@ func (h *ReactionHandler) RemoveReaction(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// The message must belong to this channel, so a reaction on a message in a
+	// different (possibly inaccessible) channel cannot be removed by routing the
+	// request through a channel the caller does have access to.
+	var exists bool
+	err = h.db.QueryRow(r.Context(),
+		`SELECT EXISTS(SELECT 1 FROM messages WHERE id = $1 AND channel_id = $2)`,
+		messageID, channelID,
+	).Scan(&exists)
+	if err != nil || !exists {
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "message not found"))
+		return
+	}
+
 	tag, err := h.db.Exec(r.Context(),
 		`DELETE FROM message_reactions WHERE message_id = $1 AND user_id = $2 AND emoji = $3`,
 		messageID, userID, emoji,

@@ -31,6 +31,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
@@ -361,4 +362,96 @@ func (h *Harness) CreateChannel(u *TestUser, serverID, name string) string {
 		h.T.Fatalf("create channel %q: expected 201, got %d", name, code)
 	}
 	return out.ID
+}
+
+// ---- WebSocket helpers -----------------------------------------------------
+
+// WSClient is a connected realtime WebSocket for a user, for asserting on the
+// events the server broadcasts. A background read pump decodes frames into a
+// channel so that read timeouts do not cancel (and thereby close) the socket.
+type WSClient struct {
+	t      *testing.T
+	conn   *websocket.Conn
+	events chan string
+}
+
+// DialWS opens an authenticated realtime WebSocket for u. On connect the server
+// subscribes the client to all channels the user can access. The connection is
+// closed automatically at the end of the test.
+func (h *Harness) DialWS(u *TestUser) *WSClient {
+	h.T.Helper()
+	wsURL := "ws" + strings.TrimPrefix(h.Server.URL, "http") + "/api/v1/ws?token=" + url.QueryEscape(u.AccessToken)
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dialCancel()
+	conn, resp, err := websocket.Dial(dialCtx, wsURL, nil)
+	if err != nil {
+		h.T.Fatalf("dial websocket: %v", err)
+	}
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+
+	ws := &WSClient{t: h.T, conn: conn, events: make(chan string, 256)}
+	pumpCtx, pumpCancel := context.WithCancel(context.Background())
+	go func() {
+		defer close(ws.events)
+		for {
+			_, data, err := conn.Read(pumpCtx)
+			if err != nil {
+				return
+			}
+			var ev struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(data, &ev) == nil {
+				select {
+				case ws.events <- ev.Type:
+				default:
+				}
+			}
+		}
+	}()
+	h.T.Cleanup(func() {
+		pumpCancel()
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+	})
+	return ws
+}
+
+// CountEvents drains decoded events for the given window and returns how many
+// carried the given event type. Used to assert that a broadcast fired exactly
+// once. The window is measured against the event channel, not the socket.
+func (ws *WSClient) CountEvents(eventType string, window time.Duration) int {
+	ws.t.Helper()
+	deadline := time.After(window)
+	n := 0
+	for {
+		select {
+		case et, ok := <-ws.events:
+			if !ok {
+				return n
+			}
+			if et == eventType {
+				n++
+			}
+		case <-deadline:
+			return n
+		}
+	}
+}
+
+// Drain discards any events that arrive within the window (e.g. the presence /
+// subscription events emitted right after connecting).
+func (ws *WSClient) Drain(window time.Duration) {
+	deadline := time.After(window)
+	for {
+		select {
+		case _, ok := <-ws.events:
+			if !ok {
+				return
+			}
+		case <-deadline:
+			return
+		}
+	}
 }
