@@ -43,7 +43,7 @@ type registerCommandRequest struct {
 }
 
 type updateCommandRequest struct {
-	Description *string                `json:"description,omitempty"`
+	Description *string                 `json:"description,omitempty"`
 	Options     *[]models.CommandOption `json:"options,omitempty"`
 }
 
@@ -397,10 +397,10 @@ func (h *InteractionHandler) ListServerCommands(w http.ResponseWriter, r *http.R
 // ── Interaction Execute ────────────────────────────────────────────────
 
 type executeInteractionRequest struct {
-	CommandID string             `json:"commandId"`
-	ChannelID string             `json:"channelId"`
+	CommandID string               `json:"commandId"`
+	ChannelID string               `json:"channelId"`
 	Options   []models.ResolvedOpt `json:"options,omitempty"`
-	TargetID  *string            `json:"targetId,omitempty"`
+	TargetID  *string              `json:"targetId,omitempty"`
 }
 
 // Execute handles POST /api/v1/servers/{serverID}/interactions

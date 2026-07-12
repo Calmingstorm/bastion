@@ -53,8 +53,8 @@ type tenorResponse struct {
 }
 
 type tenorResult struct {
-	ID           string                     `json:"id"`
-	Title        string                     `json:"title"`
+	ID           string                      `json:"id"`
+	Title        string                      `json:"title"`
 	MediaFormats map[string]tenorMediaFormat `json:"media_formats"`
 }
 

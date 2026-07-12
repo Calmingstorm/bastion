@@ -140,6 +140,26 @@ npm install
 npm run dev
 ```
 
+### Testing
+
+The server has unit tests (pure logic, always run) and integration tests that
+exercise the real HTTP API against a throwaway PostgreSQL and Redis. The
+integration tests are gated on `TEST_DATABASE_URL` and `TEST_REDIS_ADDR`; when
+unset they skip, so `go test ./...` stays green without the services.
+
+```bash
+cd server
+make test        # starts Docker Postgres+Redis, runs the whole suite
+make test-race   # same, with the race detector
+make unit        # only the always-on unit tests (no Docker needed)
+make test-down   # remove the throwaway services
+make lint        # golangci-lint
+```
+
+CI runs the full suite with `-race` against Postgres/Redis service containers,
+plus `gofmt`, `go vet`, and a golangci-lint ratchet (fails only on newly
+introduced findings; see `server/.golangci.yml`).
+
 ## Architecture
 
 ```

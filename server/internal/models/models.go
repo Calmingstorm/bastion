@@ -8,16 +8,16 @@ import (
 )
 
 type User struct {
-	ID           uuid.UUID  `json:"id"`
-	Username     string     `json:"username"`
-	Email        string     `json:"email"`
-	PasswordHash string     `json:"-"`
-	DisplayName  *string    `json:"displayName,omitempty"`
-	AvatarURL    *string    `json:"avatarUrl,omitempty"`
-	Status       string     `json:"status"`
-	AboutMe      *string    `json:"aboutMe,omitempty"`
-	CreatedAt    time.Time  `json:"createdAt"`
-	UpdatedAt    time.Time  `json:"updatedAt"`
+	ID           uuid.UUID `json:"id"`
+	Username     string    `json:"username"`
+	Email        string    `json:"email"`
+	PasswordHash string    `json:"-"`
+	DisplayName  *string   `json:"displayName,omitempty"`
+	AvatarURL    *string   `json:"avatarUrl,omitempty"`
+	Status       string    `json:"status"`
+	AboutMe      *string   `json:"aboutMe,omitempty"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
 type Server struct {
@@ -148,7 +148,7 @@ type Attachment struct {
 
 type DMChannel struct {
 	Channel
-	Recipients []Author `json:"recipients,omitempty"`
+	Recipients  []Author `json:"recipients,omitempty"`
 	LastMessage *Message `json:"lastMessage,omitempty"`
 }
 
@@ -237,36 +237,36 @@ type AuditLogEntry struct {
 
 // Audit log action types
 const (
-	AuditRoleCreate       = "ROLE_CREATE"
-	AuditRoleUpdate       = "ROLE_UPDATE"
-	AuditRoleDelete       = "ROLE_DELETE"
-	AuditChannelCreate    = "CHANNEL_CREATE"
-	AuditChannelUpdate    = "CHANNEL_UPDATE"
-	AuditChannelDelete    = "CHANNEL_DELETE"
-	AuditCategoryCreate   = "CATEGORY_CREATE"
-	AuditCategoryUpdate   = "CATEGORY_UPDATE"
-	AuditCategoryDelete   = "CATEGORY_DELETE"
-	AuditMemberKick       = "MEMBER_KICK"
-	AuditMemberBan        = "MEMBER_BAN"
-	AuditMemberUnban      = "MEMBER_UNBAN"
-	AuditMemberTimeout    = "MEMBER_TIMEOUT"
-	AuditMemberRoleUpdate = "MEMBER_ROLE_UPDATE"
-	AuditServerUpdate     = "SERVER_UPDATE"
-	AuditServerDelete     = "SERVER_DELETE"
-	AuditInviteCreate     = "INVITE_CREATE"
-	AuditInviteDelete     = "INVITE_DELETE"
-	AuditMessageDelete    = "MESSAGE_DELETE"
-	AuditMemberLeave      = "MEMBER_LEAVE"
-	AuditMessagePin       = "MESSAGE_PIN"
-	AuditMessageUnpin     = "MESSAGE_UNPIN"
-	AuditNicknameUpdate       = "NICKNAME_UPDATE"
-	AuditWebhookCreate        = "WEBHOOK_CREATE"
-	AuditWebhookUpdate        = "WEBHOOK_UPDATE"
-	AuditWebhookDelete        = "WEBHOOK_DELETE"
-	AuditBotCreate            = "BOT_CREATE"
-	AuditBotUpdate            = "BOT_UPDATE"
-	AuditBotDelete            = "BOT_DELETE"
-	AuditBotTokenRegenerate   = "BOT_TOKEN_REGENERATE"
+	AuditRoleCreate         = "ROLE_CREATE"
+	AuditRoleUpdate         = "ROLE_UPDATE"
+	AuditRoleDelete         = "ROLE_DELETE"
+	AuditChannelCreate      = "CHANNEL_CREATE"
+	AuditChannelUpdate      = "CHANNEL_UPDATE"
+	AuditChannelDelete      = "CHANNEL_DELETE"
+	AuditCategoryCreate     = "CATEGORY_CREATE"
+	AuditCategoryUpdate     = "CATEGORY_UPDATE"
+	AuditCategoryDelete     = "CATEGORY_DELETE"
+	AuditMemberKick         = "MEMBER_KICK"
+	AuditMemberBan          = "MEMBER_BAN"
+	AuditMemberUnban        = "MEMBER_UNBAN"
+	AuditMemberTimeout      = "MEMBER_TIMEOUT"
+	AuditMemberRoleUpdate   = "MEMBER_ROLE_UPDATE"
+	AuditServerUpdate       = "SERVER_UPDATE"
+	AuditServerDelete       = "SERVER_DELETE"
+	AuditInviteCreate       = "INVITE_CREATE"
+	AuditInviteDelete       = "INVITE_DELETE"
+	AuditMessageDelete      = "MESSAGE_DELETE"
+	AuditMemberLeave        = "MEMBER_LEAVE"
+	AuditMessagePin         = "MESSAGE_PIN"
+	AuditMessageUnpin       = "MESSAGE_UNPIN"
+	AuditNicknameUpdate     = "NICKNAME_UPDATE"
+	AuditWebhookCreate      = "WEBHOOK_CREATE"
+	AuditWebhookUpdate      = "WEBHOOK_UPDATE"
+	AuditWebhookDelete      = "WEBHOOK_DELETE"
+	AuditBotCreate          = "BOT_CREATE"
+	AuditBotUpdate          = "BOT_UPDATE"
+	AuditBotDelete          = "BOT_DELETE"
+	AuditBotTokenRegenerate = "BOT_TOKEN_REGENERATE"
 )
 
 type Webhook struct {
