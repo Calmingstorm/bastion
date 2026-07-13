@@ -399,6 +399,9 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 					})
 				}
 			}
+			if err := reactionRows.Err(); err != nil {
+				log.Error().Err(err).Msg("failed to read reactions for message list")
+			}
 			for i := range messages {
 				if reactions, ok := reactionMap[messages[i].ID]; ok {
 					messages[i].Reactions = reactions

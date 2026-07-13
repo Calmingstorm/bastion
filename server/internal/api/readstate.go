@@ -119,6 +119,11 @@ func (h *ReadStateHandler) ListReadStates(w http.ResponseWriter, r *http.Request
 		}
 		states = append(states, rs)
 	}
+	if err := rows.Err(); err != nil {
+		log.Error().Err(err).Msg("failed to read read-states")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
 
 	writeJSON(w, http.StatusOK, states)
 }

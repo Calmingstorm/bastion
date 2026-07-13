@@ -14,15 +14,19 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/Calmingstorm/bastion/server/internal/permissions"
+	"github.com/Calmingstorm/bastion/server/internal/presence"
 )
 
 const (
 	writeWait      = 10 * time.Second
 	pongWait       = 60 * time.Second
-	pingInterval   = 30 * time.Second
 	maxMessageSize = 4096
 	sendBufferSize = 256
 )
+
+// PingInterval is how often the server sends a transport ping. It is a var so
+// tests can shorten it to exercise the ping-driven presence refresh.
+var PingInterval = 30 * time.Second
 
 type Client struct {
 	hub    *Hub
@@ -174,9 +178,10 @@ func (c *Client) readPump(ctx context.Context, cancel context.CancelFunc) {
 
 		switch msg.Type {
 		case "HEARTBEAT":
-			// Refresh presence TTL
+			// Refresh presence, restoring it if the key has expired while the
+			// socket stayed connected (a bare EXPIRE cannot bring it back).
 			if c.rdb != nil {
-				c.rdb.Expire(ctx, "presence:"+c.userID.String(), 90*time.Second)
+				presence.NewService(c.rdb).Heartbeat(ctx, c.userID)
 			}
 
 		case "PRESENCE_UPDATE":
@@ -237,7 +242,7 @@ func (c *Client) readPump(ctx context.Context, cancel context.CancelFunc) {
 }
 
 func (c *Client) writePump(ctx context.Context, cancel context.CancelFunc) {
-	ticker := time.NewTicker(pingInterval)
+	ticker := time.NewTicker(PingInterval)
 	defer func() {
 		ticker.Stop()
 		cancel()
@@ -274,6 +279,12 @@ func (c *Client) writePump(ctx context.Context, cancel context.CancelFunc) {
 			if err != nil {
 				log.Debug().Err(err).Str("userID", c.userID.String()).Msg("websocket ping failed")
 				return
+			}
+			// A successful ping proves the client is alive, so keep its presence
+			// fresh even if it never sends an application-level HEARTBEAT -- and
+			// restore it if the key expired while still connected.
+			if c.rdb != nil {
+				presence.NewService(c.rdb).Heartbeat(ctx, c.userID)
 			}
 
 		case <-ctx.Done():

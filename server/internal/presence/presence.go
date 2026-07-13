@@ -38,14 +38,27 @@ func (s *Service) SetStatus(ctx context.Context, userID uuid.UUID, status string
 
 func (s *Service) Heartbeat(ctx context.Context, userID uuid.UUID) {
 	key := keyPrefix + userID.String()
-	// Refresh TTL, set to online if not exists
-	exists, _ := s.rdb.Exists(ctx, key).Result()
-	if exists == 0 {
-		s.rdb.Set(ctx, key, "online", presenceTTL)
-	} else {
-		s.rdb.Expire(ctx, key, presenceTTL)
+	// EXPIRE atomically refreshes the TTL and reports whether the key existed.
+	// When it did not, set the default online status with SET NX so a status set
+	// concurrently (between the EXPIRE and here) is not clobbered back to online.
+	refreshed, err := s.rdb.Expire(ctx, key, presenceTTL).Result()
+	if err != nil || refreshed {
+		return
 	}
+	if AfterHeartbeatExpireForTest != nil {
+		AfterHeartbeatExpireForTest()
+	}
+	s.rdb.SetNX(ctx, key, "online", presenceTTL)
 }
+
+// AfterHeartbeatExpireForTest, when non-nil, runs on the Heartbeat miss path
+// between the EXPIRE and the SET NX, so tests can deterministically interleave a
+// concurrent status write. Nil in production.
+var AfterHeartbeatExpireForTest func()
+
+// MGetForTest, when non-nil, replaces the MGET in GetPresenceBatch, so tests can
+// force a non-string value into the decode path. Nil in production.
+var MGetForTest func(ctx context.Context, keys []string) ([]interface{}, error)
 
 func (s *Service) SetOffline(ctx context.Context, userID uuid.UUID) {
 	key := keyPrefix + userID.String()
@@ -71,15 +84,21 @@ func (s *Service) GetPresenceBatch(ctx context.Context, userIDs []uuid.UUID) map
 		keys[i] = keyPrefix + id.String()
 	}
 
-	vals, err := s.rdb.MGet(ctx, keys...).Result()
+	mget := func(ctx context.Context, keys []string) ([]interface{}, error) {
+		return s.rdb.MGet(ctx, keys...).Result()
+	}
+	if MGetForTest != nil {
+		mget = MGetForTest
+	}
+	vals, err := mget(ctx, keys)
 	if err != nil {
 		return nil
 	}
 
 	result := make(map[uuid.UUID]string, len(userIDs))
 	for i, id := range userIDs {
-		if vals[i] != nil {
-			result[id] = vals[i].(string)
+		if s, ok := vals[i].(string); ok {
+			result[id] = s
 		} else {
 			result[id] = "offline"
 		}
