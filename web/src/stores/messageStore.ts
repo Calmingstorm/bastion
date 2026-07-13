@@ -40,6 +40,11 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     // Prevent duplicate loading
     if (state.isLoading[channelId]) return;
 
+    // Snapshot the ids present when the request begins. On a merge resync, any of
+    // these that are gone by the time the response lands were deleted by a live
+    // event during the fetch, so the (stale) response must not resurrect them.
+    const startIds = merge ? new Set((state.messages[channelId] || []).map((m) => m.id)) : null;
+
     set((s) => ({
       isLoading: { ...s.isLoading, [channelId]: true },
       error: null,
@@ -73,12 +78,19 @@ export const useMessageStore = create<MessageState>((set, get) => ({
 
         // Reconnect resync: union the latest page with what we already have,
         // deduping by id and sorting ascending. This preserves paginated history
-        // the user scrolled in and any live events that arrived during the fetch
-        // (a wholesale replace would discard both). Older-history availability is
-        // unchanged, so hasMore is preserved.
+        // the user scrolled in. It must NOT undo realtime changes that landed
+        // during the fetch, so:
+        //   - a message deleted during the fetch (present at start, absent now)
+        //     is dropped from the fetched page rather than resurrected, and
+        //   - for an id in both, the CURRENT store copy wins over the fetched one,
+        //     since it carries any MESSAGE_UPDATE that arrived during the fetch.
+        // Older-history availability is unchanged, so hasMore is preserved.
         if (merge && existing.length > 0) {
-          const byId = new Map(existing.map((m) => [m.id, m]));
-          for (const m of fetched) byId.set(m.id, m);
+          const existingIds = new Set(existing.map((m) => m.id));
+          const byId = new Map(
+            fetched.filter((m) => !(startIds?.has(m.id) && !existingIds.has(m.id))).map((m) => [m.id, m])
+          );
+          for (const m of existing) byId.set(m.id, m);
           const merged = Array.from(byId.values()).sort(
             (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
           );

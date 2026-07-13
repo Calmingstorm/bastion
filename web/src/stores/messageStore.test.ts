@@ -11,8 +11,8 @@ vi.mock('../api/client', () => ({
 import { useMessageStore } from './messageStore';
 import * as client from '../api/client';
 
-function msg(id: string, createdAt: string): Message {
-  return { id, channelId: 'c1', author: { id: 'u1' }, content: id, createdAt } as Message;
+function msg(id: string, createdAt: string, content = id): Message {
+  return { id, channelId: 'c1', author: { id: 'u1' }, content, createdAt } as Message;
 }
 
 describe('messageStore.fetchMessages', () => {
@@ -44,5 +44,31 @@ describe('messageStore.fetchMessages', () => {
     expect(useMessageStore.getState().messages.c1.map((m) => m.id)).toEqual(['m1', 'm2', 'm4', 'm5']);
     // Older-history availability is unchanged by a resync.
     expect(useMessageStore.getState().hasMore.c1).toBe(true);
+  });
+
+  it('does not overwrite live updates or resurrect live deletes during the resync', async () => {
+    useMessageStore.setState({
+      messages: { c1: [msg('m1', '2026-01-01', 'v1'), msg('m2', '2026-01-02')] },
+      hasMore: { c1: false },
+    });
+
+    // While the fetch is in flight, live events land: m1 is edited and m2 is
+    // deleted. The fetched page is the pre-change (stale) snapshot.
+    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
+      useMessageStore.setState((s) => ({
+        messages: {
+          c1: (s.messages.c1 || [])
+            .filter((m) => m.id !== 'm2')
+            .map((m) => (m.id === 'm1' ? msg('m1', '2026-01-01', 'edited') : m)),
+        },
+      }));
+      return [msg('m2', '2026-01-02'), msg('m1', '2026-01-01', 'v1')]; // DESC, stale
+    });
+
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+
+    const list = useMessageStore.getState().messages.c1;
+    expect(list.map((m) => m.id)).toEqual(['m1']); // m2 stays deleted, not resurrected
+    expect(list[0].content).toBe('edited'); // live edit preserved, not clobbered by stale fetch
   });
 });
