@@ -29,15 +29,22 @@ SET dm_kind = CASE
 END
 WHERE c.type = 'dm';
 
--- Equivalence: the key columns are set if and only if the channel is a keyed
--- direct DM. group / legacy_unknown / non-DM (NULL) channels carry no key.
+-- Equivalence, written NULL-safe so a bad row evaluates to FALSE rather than
+-- NULL (PostgreSQL passes a CHECK that evaluates to NULL): DM channels must use
+-- exactly one of the three kinds; 'direct' requires a canonical key pair; 'group'
+-- and 'legacy_unknown' forbid keys; non-DM channels require NULL kind and keys.
 ALTER TABLE channels ADD CONSTRAINT channels_dm_kind_valid CHECK (
-    (dm_kind = 'direct'
-        AND dm_user_lo IS NOT NULL AND dm_user_hi IS NOT NULL
-        AND dm_user_lo < dm_user_hi
-        AND type = 'dm' AND server_id IS NULL)
-    OR (dm_kind IS DISTINCT FROM 'direct'
-        AND dm_user_lo IS NULL AND dm_user_hi IS NULL)
+    CASE
+        WHEN type = 'dm' THEN dm_kind IS NOT NULL AND (
+            (dm_kind = 'direct'
+                AND dm_user_lo IS NOT NULL AND dm_user_hi IS NOT NULL
+                AND dm_user_lo < dm_user_hi
+                AND server_id IS NULL)
+            OR (dm_kind IN ('group', 'legacy_unknown')
+                AND dm_user_lo IS NULL AND dm_user_hi IS NULL)
+        )
+        ELSE dm_kind IS NULL AND dm_user_lo IS NULL AND dm_user_hi IS NULL
+    END
 );
 
 -- One keyed direct DM per canonical pair. Only 'direct' rows are covered, so no

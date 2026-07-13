@@ -274,10 +274,23 @@ func TestDMDirectFansOutExactlyOnce(t *testing.T) {
 		t.Fatalf("expected exactly one creating request, got %d", created)
 	}
 
-	// Exactly one DM_CREATE lands across both sockets, for the winning channel.
-	total := aWS.CountEvents("DM_CREATE", 800*time.Millisecond) + bWS.CountEvents("DM_CREATE", 800*time.Millisecond)
-	if total != 1 {
-		t.Fatalf("expected exactly one DM_CREATE across both sockets, got %d (channel %s)", total, chID)
+	// Exactly one DM_CREATE lands across both sockets, and it carries the winning
+	// channel's id (not nil or some other channel).
+	events := append(aWS.MatchingEvents("DM_CREATE", 800*time.Millisecond),
+		bWS.MatchingEvents("DM_CREATE", 800*time.Millisecond)...)
+	if len(events) != 1 {
+		t.Fatalf("expected exactly one DM_CREATE across both sockets, got %d (channel %s)", len(events), chID)
+	}
+	var payload struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(events[0]), &payload); err != nil {
+		t.Fatalf("decode DM_CREATE: %v", err)
+	}
+	if payload.Data.ID != chID {
+		t.Fatalf("DM_CREATE carried channel %q, want the created channel %q", payload.Data.ID, chID)
 	}
 
 	// Later existing-channel requests (both directions) fan out nothing.

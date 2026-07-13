@@ -107,6 +107,31 @@ func TestMigration013ClassifiesDMsConservatively(t *testing.T) {
 		`INSERT INTO channels (name, type, dm_kind, dm_user_lo, dm_user_hi) VALUES ('DM','dm','legacy_unknown',$1,$2)`, lo, hi); err == nil {
 		t.Fatal("a legacy_unknown channel with a key must violate the CHECK")
 	}
+	// NULL-safe CHECK: these must all be rejected (a NULL-evaluating CHECK would
+	// silently pass and let a NULL-kind keyed DM bypass the partial unique index).
+	if _, err := pool.Exec(ctx, `INSERT INTO channels (name, type) VALUES ('DM','dm')`); err == nil {
+		t.Fatal("a DM with NULL dm_kind must be rejected")
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO channels (name, type, dm_kind) VALUES ('DM','dm','banana')`); err == nil {
+		t.Fatal("an unknown dm_kind must be rejected")
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO channels (name, type, dm_user_lo, dm_user_hi) VALUES ('DM','dm',$1,$2)`, lo, hi); err == nil {
+		t.Fatal("a NULL-kind DM carrying keys must be rejected")
+	}
+	// Provenance may live only on DM channels; a normal server channel is accepted.
+	var srv string
+	if err := pool.QueryRow(ctx, `INSERT INTO servers (name, owner_id) VALUES ('S',$1) RETURNING id`, ua).Scan(&srv); err != nil {
+		t.Fatalf("seed server: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO channels (name, type, server_id, dm_kind) VALUES ('g','server',$1,'group')`, srv); err == nil {
+		t.Fatal("provenance on a non-DM channel must be rejected")
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO channels (name, type, server_id) VALUES ('g','server',$1)`, srv); err != nil {
+		t.Fatalf("a normal server channel must be accepted: %v", err)
+	}
 
 	// Down fully reverses; the duplicate channels are untouched throughout.
 	if err := m.Migrate(12); err != nil {

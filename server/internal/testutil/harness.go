@@ -442,12 +442,9 @@ func (h *Harness) DialWS(u *TestUser) *WSClient {
 			if err != nil {
 				return
 			}
-			var ev struct {
-				Type string `json:"type"`
-			}
-			if json.Unmarshal(data, &ev) == nil {
+			if json.Valid(data) {
 				select {
-				case ws.events <- ev.Type:
+				case ws.events <- string(data):
 				default:
 				}
 			}
@@ -464,20 +461,30 @@ func (h *Harness) DialWS(u *TestUser) *WSClient {
 // carried the given event type. Used to assert that a broadcast fired exactly
 // once. The window is measured against the event channel, not the socket.
 func (ws *WSClient) CountEvents(eventType string, window time.Duration) int {
+	return len(ws.MatchingEvents(eventType, window))
+}
+
+// MatchingEvents drains events for the given window and returns the raw JSON of
+// each event whose "type" equals eventType, so callers can assert the payload
+// (e.g. that a DM_CREATE carries the right channel id), not just its arrival.
+func (ws *WSClient) MatchingEvents(eventType string, window time.Duration) []string {
 	ws.t.Helper()
 	deadline := time.After(window)
-	n := 0
+	var out []string
 	for {
 		select {
-		case et, ok := <-ws.events:
+		case raw, ok := <-ws.events:
 			if !ok {
-				return n
+				return out
 			}
-			if et == eventType {
-				n++
+			var ev struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal([]byte(raw), &ev) == nil && ev.Type == eventType {
+				out = append(out, raw)
 			}
 		case <-deadline:
-			return n
+			return out
 		}
 	}
 }
