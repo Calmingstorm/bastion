@@ -70,3 +70,9 @@ volumes:
 
 networks:
   bastion:
+    # Pin the subnet so BASTION_TRUSTED_PROXIES can name it deterministically.
+    # Caddy reaches the server from an address in this range, so the server
+    # trusts X-Forwarded-For only from here. Change both if this range collides.
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

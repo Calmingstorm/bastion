@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
@@ -23,6 +24,39 @@ type Config struct {
 	Domain      string
 	TenorAPIKey string
 	GiphyAPIKey string
+	Security    SecurityConfig
+}
+
+// SecurityConfig holds security-related settings.
+type SecurityConfig struct {
+	// TrustedProxies is the set of reverse-proxy source networks whose
+	// X-Forwarded-For / X-Real-IP headers may be trusted. Empty means never trust
+	// forwarding headers (safe for a directly-exposed server).
+	TrustedProxies []netip.Prefix
+}
+
+// parseTrustedProxies parses a comma-separated list of CIDR prefixes. Blank
+// entries and surrounding whitespace are tolerated; any malformed entry is an
+// error, so startup fails closed rather than silently narrowing or broadening
+// the trusted-proxy set.
+func parseTrustedProxies(raw string) ([]netip.Prefix, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var prefixes []netip.Prefix
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(part)
+		if err != nil {
+			return nil, fmt.Errorf("trusted proxy %q: %w", part, err)
+		}
+		prefixes = append(prefixes, p.Masked())
+	}
+	return prefixes, nil
 }
 
 type SMTPConfig struct {
@@ -81,7 +115,11 @@ func (c *RedisConfig) Addr() string {
 	return fmt.Sprintf("%s:%s", c.Host, c.Port)
 }
 
-func Load() *Config {
+func Load() (*Config, error) {
+	trustedProxies, err := parseTrustedProxies(getEnvMulti("", "BASTION_TRUSTED_PROXIES"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid BASTION_TRUSTED_PROXIES: %w", err)
+	}
 	return &Config{
 		Host: getEnvMulti("0.0.0.0", "BASTION_HOST"),
 		Port: getEnvMulti("8080", "BASTION_PORT"),
@@ -121,7 +159,8 @@ func Load() *Config {
 		Domain:      getEnvMulti("http://localhost:5173", "BASTION_DOMAIN"),
 		TenorAPIKey: getEnvMulti("", "BASTION_TENOR_API_KEY"),
 		GiphyAPIKey: getEnvMulti("", "BASTION_GIPHY_API_KEY"),
-	}
+		Security:    SecurityConfig{TrustedProxies: trustedProxies},
+	}, nil
 }
 
 // SecurityWarnings returns human-readable warnings about insecure configuration
@@ -132,6 +171,11 @@ func (c *Config) SecurityWarnings() []string {
 		warnings = append(warnings, "JWT secret is the built-in default; set BASTION_JWT_SECRET to a random value — anyone can forge tokens otherwise")
 	} else if len(c.JWT.Secret) < 32 {
 		warnings = append(warnings, "JWT secret is shorter than 32 bytes; use a longer random value")
+	}
+	for _, p := range c.Security.TrustedProxies {
+		if p.Bits() == 0 {
+			warnings = append(warnings, fmt.Sprintf("trusted proxy %s trusts all sources; anyone can then spoof X-Forwarded-For — use a narrow proxy/container-network CIDR", p))
+		}
 	}
 	return warnings
 }

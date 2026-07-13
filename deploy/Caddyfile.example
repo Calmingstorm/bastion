@@ -1,4 +1,9 @@
-# Replace YOUR_DOMAIN with your actual domain
+# Replace YOUR_DOMAIN with your actual domain.
+#
+# Caddy sets X-Forwarded-For automatically. The Go server only trusts it from
+# the networks in BASTION_TRUSTED_PROXIES (the pinned "bastion" subnet in
+# docker-compose), so real client IPs drive rate limiting instead of collapsing
+# onto Caddy's address.
 YOUR_DOMAIN {
 	# API and WebSocket — proxy to Go backend
 	handle /api/* {
