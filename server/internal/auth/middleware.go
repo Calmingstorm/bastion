@@ -226,13 +226,17 @@ func handleBotAuth(w http.ResponseWriter, r *http.Request, next http.Handler, to
 		match, err := CompareBotToken(token, c.hash)
 		if err == nil && match {
 			// Lazy-heal: record the digest so this bot uses the fast path next
-			// time. The token_lookup IS NULL guard makes concurrent first
-			// authentications harmless no-ops instead of unique-index errors.
-			// Healing is best-effort -- the credential is valid regardless.
+			// time. The token_lookup IS NULL guard makes a concurrent first
+			// authentication a harmless zero-row no-op (nil error) rather than a
+			// unique-index violation. A genuine write error, however, is a real
+			// database fault: surface it as 500 rather than authenticating past a
+			// failing write and leaving the bot permanently on the Argon2 path.
 			if _, err := db.Exec(r.Context(),
 				`UPDATE bots SET token_lookup = $1 WHERE id = $2 AND token_lookup IS NULL`,
 				digest, c.id); err != nil {
 				log.Error().Err(err).Msg("bot token lazy-heal failed")
+				http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+				return
 			}
 			authenticateBot(w, r, next, c.userID)
 			return

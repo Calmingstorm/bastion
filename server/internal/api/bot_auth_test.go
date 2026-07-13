@@ -374,3 +374,78 @@ func TestBotAuthDatabaseErrorReturns500(t *testing.T) {
 		t.Fatalf("db error must surface as 500, not 401; got %d", code)
 	}
 }
+
+// TestBotAuthHealFailureReturns500: a genuine lazy-heal write error must surface
+// as 500, not authenticate silently past a failing write (which would also leave
+// the bot permanently on the Argon2 path). A concurrent zero-row heal is a nil
+// error, so this only fires on a real fault -- here a trigger forcing the
+// NULL -> digest update to raise.
+func TestBotAuthHealFailureReturns500(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	serverID := h.CreateServer(owner, "S")
+	botID, _, token := createBotFull(t, h, owner, serverID)
+	makeLegacy(t, h, botID)
+
+	ctx := context.Background()
+	if _, err := h.Pool.Exec(ctx,
+		`CREATE OR REPLACE FUNCTION block_heal() RETURNS trigger AS $$
+		 BEGIN RAISE EXCEPTION 'forced lazy-heal failure'; END; $$ LANGUAGE plpgsql`); err != nil {
+		t.Fatalf("create fn: %v", err)
+	}
+	if _, err := h.Pool.Exec(ctx,
+		`CREATE TRIGGER block_heal_trg BEFORE UPDATE OF token_lookup ON bots
+		 FOR EACH ROW WHEN (OLD.token_lookup IS NULL AND NEW.token_lookup IS NOT NULL)
+		 EXECUTE FUNCTION block_heal()`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	if code := authAsBot(h, token); code != http.StatusInternalServerError {
+		t.Fatalf("lazy-heal write failure must return 500, got %d", code)
+	}
+}
+
+// TestBotAuthRegenerationRotatesLookup: regenerating a bot's token must rotate
+// the lookup digest -- the old token stops authenticating and the new one uses
+// the fast path. Removing token_lookup from the regeneration update fails here.
+func TestBotAuthRegenerationRotatesLookup(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	serverID := h.CreateServer(owner, "S")
+	botID, _, oldToken := createBotFull(t, h, owner, serverID)
+
+	if code := authAsBot(h, oldToken); code != http.StatusOK {
+		t.Fatalf("pre-rotation auth: expected 200, got %d", code)
+	}
+
+	var resp struct {
+		Token string `json:"token"`
+	}
+	if code := h.Request(http.MethodPost,
+		"/api/v1/servers/"+serverID+"/bots/"+botID+"/regenerate-token",
+		owner.AccessToken, nil, &resp); code != http.StatusOK {
+		t.Fatalf("regenerate: expected 200, got %d", code)
+	}
+	if resp.Token == "" || resp.Token == oldToken {
+		t.Fatal("regeneration must return a fresh token")
+	}
+
+	// The old token no longer authenticates and costs no Argon2 (its digest is
+	// gone and its row is no longer legacy).
+	calls := countArgon2(t)
+	if code := authAsBot(h, oldToken); code != http.StatusUnauthorized {
+		t.Fatalf("old token after rotation: expected 401, got %d", code)
+	}
+	// The new token authenticates via the fast path.
+	if code := authAsBot(h, resp.Token); code != http.StatusOK {
+		t.Fatalf("new token: expected 200, got %d", code)
+	}
+	if got := atomic.LoadInt32(calls); got != 0 {
+		t.Fatalf("rotated tokens must use the fast path, got %d Argon2", got)
+	}
+	// The stored lookup is the new token's 32-byte SHA-256 digest.
+	want := sha256.Sum256([]byte(resp.Token))
+	if got := lookupDigest(t, h, botID); string(got) != string(want[:]) {
+		t.Fatal("regeneration must store the new token's SHA-256 digest")
+	}
+}
