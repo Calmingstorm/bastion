@@ -93,6 +93,83 @@ describe('WebhooksTab', () => {
     ).toBeInTheDocument();
   });
 
+  it('re-enables regeneration after a successful rotation', async () => {
+    vi.mocked(client.apiGetWebhooks).mockResolvedValue([webhook({ id: 'w1', tokenHint: 'abcd1234' })]);
+    vi.mocked(client.apiRegenerateWebhookToken).mockResolvedValue(
+      webhook({ id: 'w1', token: 'whk_r1', tokenHint: 'rot11111' })
+    );
+    render(<WebhooksTab serverId="s1" />);
+    await screen.findByText(/abcd1234/);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Regenerate' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm rotate' }));
+    await screen.findByText(/rot11111/);
+
+    // The finally block clears regeneratingId AND regenConfirm, so the control
+    // returns to an enabled "Regenerate" and a second rotation can be started.
+    // Dropping either clear leaves it stuck disabled on "Rotating…"/"Confirm".
+    const regen = await screen.findByRole('button', { name: 'Regenerate' });
+    expect(regen).toBeEnabled();
+    await userEvent.click(regen);
+    expect(screen.getByRole('button', { name: 'Confirm rotate' })).toBeInTheDocument();
+  });
+
+  it('clears in-flight state after a failed rotation and allows retry', async () => {
+    vi.mocked(client.apiGetWebhooks).mockResolvedValue([webhook({ id: 'w1', tokenHint: 'abcd1234' })]);
+    vi.mocked(client.apiRegenerateWebhookToken)
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValueOnce(webhook({ id: 'w1', token: 'whk_r2', tokenHint: 'retry222' }));
+    render(<WebhooksTab serverId="s1" />);
+    await screen.findByText(/abcd1234/);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Regenerate' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm rotate' }));
+
+    // The rejection is swallowed, but finally must still restore an enabled
+    // "Regenerate" — otherwise a failed rotation wedges the control forever.
+    const regen = await screen.findByRole('button', { name: 'Regenerate' });
+    expect(regen).toBeEnabled();
+
+    // Retry proceeds and succeeds.
+    await userEvent.click(regen);
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm rotate' }));
+    await screen.findByText(/retry222/);
+  });
+
+  it('resets the one-time copy state on a subsequent rotation', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    // Fake timers (auto-advancing so findBy* still settles) let us drop the
+    // 2s copy-reset timeout at the end instead of leaking it into later tests.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+
+    vi.mocked(client.apiGetWebhooks).mockResolvedValue([webhook({ id: 'w1', tokenHint: 'abcd1234' })]);
+    vi.mocked(client.apiRegenerateWebhookToken)
+      .mockResolvedValueOnce(webhook({ id: 'w1', token: 'whk_first', tokenHint: 'first111' }))
+      .mockResolvedValueOnce(webhook({ id: 'w1', token: 'whk_secnd', tokenHint: 'secnd222' }));
+    render(<WebhooksTab serverId="s1" />);
+    await screen.findByText(/abcd1234/);
+
+    // First rotation reveals a token; copy it so copied=true.
+    await userEvent.click(screen.getByRole('button', { name: 'Regenerate' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm rotate' }));
+    await screen.findByText(/first111/);
+    await userEvent.click(screen.getByRole('button', { name: 'Copy URL' }));
+    expect(writeText).toHaveBeenCalledWith('https://cfg.example/api/v1/webhooks/w1/whk_first');
+    expect(screen.getByRole('button', { name: 'Copied!' })).toBeInTheDocument();
+
+    // A second rotation must present the fresh token as un-copied. Without the
+    // setCopied(false) on rotation, the stale "Copied!" carries over.
+    await userEvent.click(screen.getByRole('button', { name: 'Regenerate' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm rotate' }));
+    await screen.findByText(/secnd222/);
+    expect(screen.getByRole('button', { name: 'Copy URL' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Copied!' })).toBeNull();
+
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
   it('guards against a double-click firing two rotations', async () => {
     vi.mocked(client.apiGetWebhooks).mockResolvedValue([webhook({ id: 'w1', tokenHint: 'abcd1234' })]);
     // A rotation that stays pending, so the in-flight guard is observable.

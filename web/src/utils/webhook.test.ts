@@ -1,6 +1,20 @@
 import { describe, it, expect } from 'vitest';
 import type { Webhook } from '../types';
-import { toWebhookSummary } from './webhook';
+import { toWebhookSummary, type WebhookSummary } from './webhook';
+
+// Compile-time guard: a token-bearing Webhook must NOT be assignable to the
+// persistent-row type. If WebhookSummary is loosened back to a bare Omit (which
+// structurally still admits a token), the assignment below stops erroring, the
+// expect-error directive becomes unused, and `npm run test:typecheck` fails.
+// This is the boundary a runtime test cannot express.
+const _tokenBearing: Webhook = {
+  id: 'w', serverId: 's', channelId: 'c', creatorId: 'u', name: 'n',
+  token: 'whk_secret', tokenHint: 'ecret',
+  userId: 'wu', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+};
+// @ts-expect-error a plaintext token is forbidden in persistent client state
+const _forbidden: WebhookSummary = _tokenBearing;
+void _forbidden;
 
 describe('toWebhookSummary', () => {
   it('removes the plaintext token but keeps the hint', () => {
