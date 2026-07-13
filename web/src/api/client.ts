@@ -122,6 +122,11 @@ apiClient.interceptors.response.use(
 
       const refreshToken = getRefreshToken();
       if (!refreshToken) {
+        // Drain any queued requests and clear the refreshing flag, otherwise a
+        // concurrent 401 that queued behind this one waits forever and every
+        // later request skips refresh (isRefreshing stuck true).
+        processQueue(error, null);
+        isRefreshing = false;
         clearTokens();
         onAuthFailure();
         return Promise.reject(error);
@@ -143,8 +148,14 @@ apiClient.interceptors.response.use(
         return apiClient(originalRequest);
       } catch (refreshError) {
         processQueue(refreshError, null);
-        clearTokens();
-        onAuthFailure();
+        // Only end the session when the refresh token itself is rejected. A
+        // transient failure (network drop, 5xx) must not force a logout — leave
+        // the tokens in place so the next request can retry.
+        const status = (refreshError as AxiosError)?.response?.status;
+        if (status === 401 || status === 403) {
+          clearTokens();
+          onAuthFailure();
+        }
         return Promise.reject(refreshError);
       } finally {
         isRefreshing = false;
