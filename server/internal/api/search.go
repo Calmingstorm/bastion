@@ -12,6 +12,7 @@ import (
 
 	"github.com/Calmingstorm/bastion/server/internal/auth"
 	"github.com/Calmingstorm/bastion/server/internal/models"
+	"github.com/Calmingstorm/bastion/server/internal/realtime"
 )
 
 type SearchHandler struct {
@@ -46,6 +47,15 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Search is scoped to the channels the user may view, so a member without
+	// ViewChannel cannot retrieve hidden content through search.
+	viewable, err := realtime.ViewableChannelIDs(r.Context(), h.db, userID)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to resolve viewable channels")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+
 	limit := 25
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 50 {
@@ -75,11 +85,9 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN servers s ON s.id = c.server_id
 		WHERE m.search_vector @@ plainto_tsquery('english', $1)`
 
-	// Access control: user must be member of server or DM
-	accessSQL := ` AND (
-		EXISTS(SELECT 1 FROM server_members sm INNER JOIN channels ch ON ch.server_id = sm.server_id WHERE ch.id = m.channel_id AND sm.user_id = $2)
-		OR EXISTS(SELECT 1 FROM dm_members dm WHERE dm.channel_id = m.channel_id AND dm.user_id = $2)
-	)`
+	// Restrict results to channels the user may view (server channels where they
+	// hold ViewChannel, plus DM channels); see realtime.ViewableChannelIDs.
+	accessSQL := ` AND m.channel_id = ANY($2)`
 
 	orderSQL := ` ORDER BY m.created_at DESC LIMIT $3 OFFSET $4`
 
@@ -92,7 +100,7 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		fullSQL := baseSQL + ` AND m.channel_id = $5` + accessSQL + orderSQL
-		rows, err := h.db.Query(r.Context(), fullSQL, query, userID, limit, offset, channelID)
+		rows, err := h.db.Query(r.Context(), fullSQL, query, viewable, limit, offset, channelID)
 		if err != nil {
 			rows_err = err
 		} else {
@@ -106,7 +114,7 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		fullSQL := baseSQL + ` AND c.server_id = $5` + accessSQL + orderSQL
-		rows, err := h.db.Query(r.Context(), fullSQL, query, userID, limit, offset, serverID)
+		rows, err := h.db.Query(r.Context(), fullSQL, query, viewable, limit, offset, serverID)
 		if err != nil {
 			rows_err = err
 		} else {
@@ -115,7 +123,7 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		fullSQL := baseSQL + accessSQL + orderSQL
-		rows, err := h.db.Query(r.Context(), fullSQL, query, userID, limit, offset)
+		rows, err := h.db.Query(r.Context(), fullSQL, query, viewable, limit, offset)
 		if err != nil {
 			rows_err = err
 		} else {

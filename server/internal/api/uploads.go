@@ -11,6 +11,7 @@ import (
 	"github.com/Calmingstorm/bastion/server/internal/auth"
 	"github.com/Calmingstorm/bastion/server/internal/config"
 	"github.com/Calmingstorm/bastion/server/internal/models"
+	"github.com/Calmingstorm/bastion/server/internal/permissions"
 	"github.com/Calmingstorm/bastion/server/internal/realtime"
 	"github.com/Calmingstorm/bastion/server/internal/storage"
 )
@@ -58,6 +59,15 @@ func (h *UploadHandler) SendWithAttachments(w http.ResponseWriter, r *http.Reque
 	}
 	if len(files) > 10 {
 		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "maximum 10 attachments per message"))
+		return
+	}
+
+	// Enforce the same permissions as a normal message send, plus AttachFiles for
+	// actual attachments, so this route cannot be used to bypass a channel mute.
+	if !requireChannelPermission(h.db, w, r, channelID, userID, permissions.SendMessages) {
+		return
+	}
+	if len(files) > 0 && !requireChannelPermission(h.db, w, r, channelID, userID, permissions.AttachFiles) {
 		return
 	}
 	if content == "" {

@@ -283,11 +283,9 @@ func (h *ServerHandler) Join(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Subscribe new member's WS clients to all server channels
+	// Subscribe new member's WS clients to the server channels they may view.
 	channelIDs, _ := getServerChannelIDs(r.Context(), h.db, serverID)
-	for _, chID := range channelIDs {
-		h.hub.SubscribeUser(userID, chID)
-	}
+	subscribeViewable(r.Context(), h.db, h.hub, userID, channelIDs)
 
 	// Broadcast to all server channels so existing members see the new member
 	for _, chID := range channelIDs {
@@ -493,13 +491,12 @@ func (h *ServerHandler) Leave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Unsubscribe from all server channels
-	channelIDs, _ := getServerChannelIDs(r.Context(), h.db, serverID)
-	for _, chID := range channelIDs {
-		h.hub.UnsubscribeUser(userID, chID)
-	}
+	// Drop the leaver's live channel subscriptions synchronously, so no event
+	// broadcast after this returns can still reach their open socket.
+	reconcileServerSubscriptions(r.Context(), h.db, h.hub, userID, serverID)
 
 	// Broadcast to remaining members
+	channelIDs, _ := getServerChannelIDs(r.Context(), h.db, serverID)
 	for _, chID := range channelIDs {
 		h.hub.BroadcastToChannel(chID, realtime.Event{
 			Type: realtime.EventServerMemberLeave,

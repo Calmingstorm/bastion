@@ -301,11 +301,9 @@ func (h *InviteHandler) Join(w http.ResponseWriter, r *http.Request) {
 		invite.ServerID,
 	).Scan(&s.ID, &s.Name, &s.IconURL, &s.Description, &s.OwnerID, &s.CreatedAt)
 
-	// Subscribe new member's WS clients to all server channels
+	// Subscribe new member's WS clients to the server channels they may view.
 	channelIDs, _ := getServerChannelIDs(r.Context(), h.db, invite.ServerID)
-	for _, chID := range channelIDs {
-		h.hub.SubscribeUser(userID, chID)
-	}
+	subscribeViewable(r.Context(), h.db, h.hub, userID, channelIDs)
 
 	// Broadcast member join to server channels
 	for _, chID := range channelIDs {

@@ -2,6 +2,7 @@ package realtime
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,6 +18,216 @@ import (
 // unbuffered channel with no reader), so every broadcast to it is dropped.
 func newDroppingClient(userID uuid.UUID) *Client {
 	return &Client{userID: userID, send: make(chan Event)}
+}
+
+// channelHas reports whether a client is currently subscribed to a channel.
+func channelHas(h *Hub, channelID uuid.UUID, client *Client) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	set, ok := h.channels[channelID]
+	if !ok {
+		return false
+	}
+	_, ok = set[client]
+	return ok
+}
+
+// TestSubscriptionMutationsAreSynchronous pins the ordering fix: subscribe and
+// unsubscribe take effect immediately under the hub lock, with no async queue, so
+// a revocation cannot be undone by a subscribe that drains from the hub loop
+// afterward. Previously a Subscribe queued before a revocation could be applied
+// by Hub.Run after a synchronous revocation returned, resurrecting access.
+func TestSubscriptionMutationsAreSynchronous(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	userID := uuid.New()
+	channelID := uuid.New()
+	client := newDroppingClient(userID)
+
+	// Connect: register + subscribe, visible immediately.
+	hub.RegisterUser(client)
+	hub.Subscribe(channelID, client)
+	if !channelHas(hub, channelID, client) {
+		t.Fatal("client should be subscribed immediately after Subscribe")
+	}
+
+	// Revoke: unsubscribe synchronously, visible immediately.
+	hub.UnsubscribeUser(userID, channelID)
+	if channelHas(hub, channelID, client) {
+		t.Fatal("client should be unsubscribed immediately after UnsubscribeUser")
+	}
+
+	// Let the hub loop spin: there is no queued command, so nothing can
+	// resurrect the revoked subscription.
+	time.Sleep(50 * time.Millisecond)
+	if channelHas(hub, channelID, client) {
+		t.Fatal("revoked subscription was resurrected by the hub loop")
+	}
+}
+
+// TestConcurrentSubscribeRevokeNoResurrection hammers connect and revoke on the
+// same channel concurrently. Whichever wins the lock last decides the state, but
+// a revocation observed after a completed connect must leave the client off — no
+// partially-applied connect can survive it. Runs clean under -race.
+func TestConcurrentSubscribeRevokeNoResurrection(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	userID := uuid.New()
+	channelID := uuid.New()
+
+	for i := 0; i < 200; i++ {
+		client := newDroppingClient(userID)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			hub.RegisterUser(client)
+			hub.Subscribe(channelID, client)
+		}()
+		go func() {
+			defer wg.Done()
+			hub.UnsubscribeUser(userID, channelID)
+		}()
+		wg.Wait()
+
+		// A final revocation must always win: after both settle, revoke once more
+		// and the client must be gone and stay gone.
+		hub.UnsubscribeUser(userID, channelID)
+		if channelHas(hub, channelID, client) {
+			t.Fatalf("iteration %d: client survived a final revocation", i)
+		}
+		hub.UnsubscribeAll(client)
+	}
+}
+
+// TestConnectRevalidatesStaleSnapshot models the residual race: a connection reads
+// a stale viewable snapshot, a revocation commits and reconciles while the
+// connecting client is not yet subscribed, and the connect then applies the stale
+// snapshot. The revalidation loop must detect the raced revocation via the
+// generation bump and re-read, so the client does NOT end subscribed to the
+// revoked channel — and crucially without a second unconditional revocation
+// papering over the assertion.
+func TestConnectRevalidatesStaleSnapshot(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	userID := uuid.New()
+	revokedChannel := uuid.New()
+	client := newDroppingClient(userID)
+
+	calls := 0
+	_, err := hub.ConnectClient(client, func() ([]uuid.UUID, error) {
+		calls++
+		if calls == 1 {
+			// A revocation commits + reconciles right after we read the (stale)
+			// snapshot but before the connect checks the generation. The client is
+			// registered but not yet subscribed, so the reconcile's UnsubscribeUser
+			// is a no-op on the channel — only the generation bump records it.
+			hub.UnsubscribeUser(userID, revokedChannel)
+			return []uuid.UUID{revokedChannel}, nil // stale: still lists the channel
+		}
+		return nil, nil // fresh read: the channel is no longer viewable
+	})
+	if err != nil {
+		t.Fatalf("ConnectClient: %v", err)
+	}
+	if calls < 2 {
+		t.Fatalf("expected revalidation to re-read viewability, got %d read(s)", calls)
+	}
+	if channelHas(hub, revokedChannel, client) {
+		t.Fatal("stale pre-revocation snapshot resurrected channel access after reconciliation")
+	}
+}
+
+// TestConnectFailsClosedOnUnstableGeneration: if every revalidation attempt is
+// invalidated by a racing revocation, ConnectClient must not install the final
+// stale snapshot on exhaustion — it fails closed and unregisters the client, so
+// no stale subscription persists with nothing left to reconcile it.
+func TestConnectFailsClosedOnUnstableGeneration(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	userID := uuid.New()
+	staleChannel := uuid.New()
+	client := newDroppingClient(userID)
+
+	// Every read bumps the generation (a revocation) and returns a stale snapshot,
+	// so the loop can never observe a stable generation.
+	_, err := hub.ConnectClient(client, func() ([]uuid.UUID, error) {
+		hub.UnsubscribeUser(userID, uuid.New()) // bump gen on an unrelated channel
+		return []uuid.UUID{staleChannel}, nil
+	})
+	if !errors.Is(err, ErrConnectUnstable) {
+		t.Fatalf("expected ErrConnectUnstable, got %v", err)
+	}
+	if channelHas(hub, staleChannel, client) {
+		t.Fatal("exhausted connect left a stale subscription installed")
+	}
+	if hub.IsUserOnline(userID) {
+		t.Fatal("failed connect left the client registered")
+	}
+}
+
+// TestConnectInitialReadErrorCleansUp: an initial viewability read error must not
+// leave the client registered in the hub (ServeWS returns before the pumps that
+// would otherwise call UnsubscribeAll).
+func TestConnectInitialReadErrorCleansUp(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	userID := uuid.New()
+	client := newDroppingClient(userID)
+
+	readErr := errors.New("db down")
+	_, err := hub.ConnectClient(client, func() ([]uuid.UUID, error) {
+		return nil, readErr
+	})
+	if !errors.Is(err, readErr) {
+		t.Fatalf("expected the read error, got %v", err)
+	}
+	if hub.IsUserOnline(userID) {
+		t.Fatal("initial read error left the client registered")
+	}
+}
+
+// TestConnectRevalidationErrorCleansUp: a read error on a later revalidation
+// (after a snapshot was already applied) must clean up both the registration and
+// the previously-applied subscriptions.
+func TestConnectRevalidationErrorCleansUp(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	userID := uuid.New()
+	firstChannel := uuid.New()
+	client := newDroppingClient(userID)
+
+	readErr := errors.New("db down mid-revalidation")
+	calls := 0
+	_, err := hub.ConnectClient(client, func() ([]uuid.UUID, error) {
+		calls++
+		if calls == 1 {
+			hub.UnsubscribeUser(userID, uuid.New()) // bump gen to force a revalidation
+			return []uuid.UUID{firstChannel}, nil   // applied on the first pass
+		}
+		return nil, readErr // the revalidation read fails
+	})
+	if !errors.Is(err, readErr) {
+		t.Fatalf("expected the read error, got %v", err)
+	}
+	if channelHas(hub, firstChannel, client) {
+		t.Fatal("revalidation error left the first snapshot's subscription installed")
+	}
+	if hub.IsUserOnline(userID) {
+		t.Fatal("revalidation error left the client registered")
+	}
 }
 
 // TestBroadcastToUserDropAccounting checks that drops are counted and that the

@@ -12,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
+
+	"github.com/Calmingstorm/bastion/server/internal/permissions"
 )
 
 const (
@@ -84,20 +86,19 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, userID uuid.UUID,
 		rdb:    rdb,
 	}
 
-	// Subscribe to all channels the user has access to
-	channelIDs, err := getUserChannelIDs(r.Context(), db, userID)
+	// Register the user and subscribe to their viewable channels, revalidating if
+	// a permission revocation races the viewability read — otherwise a stale
+	// pre-revocation snapshot could install a subscription that survives the
+	// revocation's reconciliation indefinitely.
+	channelIDs, err := hub.ConnectClient(client, func() ([]uuid.UUID, error) {
+		return ViewableChannelIDs(r.Context(), db, userID)
+	})
 	if err != nil {
-		log.Error().Err(err).Str("userID", userID.String()).Msg("failed to get user channels")
+		// ConnectClient has already removed the client from the hub on failure.
+		log.Error().Err(err).Str("userID", userID.String()).Msg("failed to establish channel subscriptions")
 		conn.Close(websocket.StatusInternalError, "failed to load channels")
 		return
 	}
-
-	for _, chID := range channelIDs {
-		hub.Subscribe(chID, client)
-	}
-
-	// Register this client for user-targeted events
-	hub.RegisterUser(client)
 
 	log.Info().
 		Str("userID", userID.String()).
@@ -207,6 +208,13 @@ func (c *Client) readPump(ctx context.Context, cancel context.CancelFunc) {
 					continue
 				}
 
+				// The sender must currently be allowed to post here; otherwise a
+				// member who lost access (or an outsider who knows the channel
+				// UUID) could leak a typing indicator into a hidden channel.
+				if !CanSendToChannel(ctx, c.db, c.userID, chID) {
+					continue
+				}
+
 				// Debounce with Redis: only broadcast if key doesn't exist
 				if c.rdb != nil {
 					key := "typing:" + td.ChannelID + ":" + c.userID.String()
@@ -274,19 +282,33 @@ func (c *Client) writePump(ctx context.Context, cancel context.CancelFunc) {
 	}
 }
 
-func getUserChannelIDs(ctx context.Context, db *pgxpool.Pool, userID uuid.UUID) ([]uuid.UUID, error) {
+// ViewableChannelIDs returns the IDs of every channel the user may view: server
+// channels where they are the server owner or hold a role granting ViewChannel
+// or Administrator, plus every DM channel they belong to. This is the canonical
+// "what can this user see" query, used both to subscribe a WebSocket client and
+// to scope search results. It enforces server-level permissions only — Bastion's
+// per-channel override table is not yet wired.
+func ViewableChannelIDs(ctx context.Context, db *pgxpool.Pool, userID uuid.UUID) ([]uuid.UUID, error) {
+	viewBits := permissions.ViewChannel | permissions.Administrator
 	query := `
 		SELECT c.id
 		FROM channels c
-		INNER JOIN server_members sm ON sm.server_id = c.server_id
-		WHERE sm.user_id = $1
+		INNER JOIN server_members sm ON sm.server_id = c.server_id AND sm.user_id = $1
+		INNER JOIN servers s ON s.id = c.server_id
+		WHERE s.owner_id = $1
+		   OR (COALESCE((
+		        SELECT bit_or(r.permissions)
+		        FROM member_roles mr
+		        INNER JOIN roles r ON r.id = mr.role_id
+		        WHERE mr.server_id = c.server_id AND mr.user_id = $1
+		      ), 0) & $2) != 0
 		UNION
 		SELECT dm.channel_id
 		FROM dm_members dm
 		WHERE dm.user_id = $1
 	`
 
-	rows, err := db.Query(ctx, query, userID)
+	rows, err := db.Query(ctx, query, userID, viewBits)
 	if err != nil {
 		return nil, err
 	}
@@ -302,4 +324,56 @@ func getUserChannelIDs(ctx context.Context, db *pgxpool.Pool, userID uuid.UUID) 
 	}
 
 	return ids, rows.Err()
+}
+
+// CanSendToChannel reports whether the user may currently post in (and therefore
+// type in) the channel: a DM participant, or a server member whose roles grant
+// both ViewChannel and SendMessages. The server owner and any Administrator role
+// always qualify. It fails closed on any lookup error so an unresolved channel or
+// membership never opens the path.
+func CanSendToChannel(ctx context.Context, db *pgxpool.Pool, userID, channelID uuid.UUID) bool {
+	var serverID *uuid.UUID
+	if err := db.QueryRow(ctx,
+		`SELECT server_id FROM channels WHERE id = $1`, channelID,
+	).Scan(&serverID); err != nil {
+		return false
+	}
+
+	if serverID == nil {
+		// DM channel: participation is the only gate.
+		var ok bool
+		if err := db.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM dm_members WHERE channel_id = $1 AND user_id = $2)`,
+			channelID, userID,
+		).Scan(&ok); err != nil {
+			return false
+		}
+		return ok
+	}
+
+	var ownerID uuid.UUID
+	if err := db.QueryRow(ctx,
+		`SELECT owner_id FROM servers WHERE id = $1`, *serverID,
+	).Scan(&ownerID); err != nil {
+		return false
+	}
+	if ownerID == userID {
+		return true
+	}
+
+	// Non-members hold no member_roles rows, so their bit_or is 0 and this denies.
+	var bits int64
+	if err := db.QueryRow(ctx,
+		`SELECT COALESCE(bit_or(r.permissions), 0)
+		 FROM member_roles mr
+		 INNER JOIN roles r ON r.id = mr.role_id
+		 WHERE mr.server_id = $1 AND mr.user_id = $2`,
+		*serverID, userID,
+	).Scan(&bits); err != nil {
+		return false
+	}
+	if permissions.Has(bits, permissions.Administrator) {
+		return true
+	}
+	return permissions.Has(bits, permissions.ViewChannel) && permissions.Has(bits, permissions.SendMessages)
 }

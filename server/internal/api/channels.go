@@ -79,11 +79,20 @@ func (h *ChannelHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only list channels the member may view, so channel discovery does not leak
+	// hidden channels' names, topics, or IDs.
+	viewable, err := realtime.ViewableChannelIDs(r.Context(), h.db, userID)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to resolve viewable channels")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+
 	rows, err := h.db.Query(r.Context(),
 		`SELECT id, server_id, name, topic, type, position, category_id, created_at
 		 FROM channels
-		 WHERE server_id = $1
-		 ORDER BY position ASC, created_at ASC`, serverID,
+		 WHERE server_id = $1 AND id = ANY($2)
+		 ORDER BY position ASC, created_at ASC`, serverID, viewable,
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to list channels")

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -80,6 +81,117 @@ func (h *MessageHandler) checkChannelAccess(r *http.Request, channelID, userID u
 	return err == nil && isMember
 }
 
+// requireChannelPermission enforces a server-level permission bit for a channel.
+// DM channels (which have no server) are governed by membership alone and always
+// pass. It assumes channel membership has already been verified, and fails closed
+// on any lookup error. On denial it writes a 4xx and returns false.
+//
+// Note: this enforces server-level permissions only. Bastion's per-channel
+// override table and permissions.ComputeChannel remain unwired, so genuinely
+// channel-specific restrictions are not yet enforceable here.
+func requireChannelPermission(db *pgxpool.Pool, w http.ResponseWriter, r *http.Request, channelID, userID uuid.UUID, perm int64) bool {
+	var serverID *uuid.UUID
+	if err := db.QueryRow(r.Context(),
+		`SELECT server_id FROM channels WHERE id = $1`, channelID,
+	).Scan(&serverID); err != nil {
+		// Fail closed: if we cannot resolve the channel, deny rather than allow.
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "channel not found"))
+		return false
+	}
+	if serverID == nil {
+		return true // DM channel: membership is the only gate
+	}
+	perms, err := getMemberPermissions(db, r, *serverID, userID)
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "not a member of this server"))
+		return false
+	}
+	if !permissions.Has(perms, perm) {
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have permission to do that in this channel"))
+		return false
+	}
+	return true
+}
+
+// subscribeViewable subscribes the user's WebSocket clients to the given
+// channels, but only those the user may currently view — so joining (even with
+// an already-connected socket) never subscribes to a hidden channel.
+func subscribeViewable(ctx context.Context, db *pgxpool.Pool, hub *realtime.Hub, userID uuid.UUID, channelIDs []uuid.UUID) {
+	viewable, err := realtime.ViewableChannelIDs(ctx, db, userID)
+	if err != nil {
+		return
+	}
+	set := make(map[uuid.UUID]bool, len(viewable))
+	for _, id := range viewable {
+		set[id] = true
+	}
+	for _, chID := range channelIDs {
+		if set[chID] {
+			hub.SubscribeUser(userID, chID)
+		}
+	}
+}
+
+// reconcileServerSubscriptions makes a user's live WebSocket subscriptions for a
+// server's channels match what they may currently view. Called after a role
+// change so a member who just lost (or gained) ViewChannel stops (or starts)
+// receiving that channel's realtime events without needing to reconnect.
+func reconcileServerSubscriptions(ctx context.Context, db *pgxpool.Pool, hub *realtime.Hub, userID, serverID uuid.UUID) {
+	if !hub.IsUserOnline(userID) {
+		return
+	}
+	channelIDs, err := getServerChannelIDs(ctx, db, serverID)
+	if err != nil {
+		return
+	}
+	viewable, err := realtime.ViewableChannelIDs(ctx, db, userID)
+	if err != nil {
+		return
+	}
+	view := make(map[uuid.UUID]bool, len(viewable))
+	for _, id := range viewable {
+		view[id] = true
+	}
+	// Every hub mutation is synchronous, so when this returns a revoked member is
+	// already off the channel and no later broadcast can reach them — and no
+	// pending queued subscribe can drain afterward to resurrect access.
+	for _, chID := range channelIDs {
+		if view[chID] {
+			hub.SubscribeUser(userID, chID)
+		} else {
+			hub.UnsubscribeUser(userID, chID)
+		}
+	}
+}
+
+// roleMemberIDs returns the user IDs of every member currently holding a role.
+func roleMemberIDs(ctx context.Context, db *pgxpool.Pool, serverID, roleID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := db.Query(ctx,
+		`SELECT user_id FROM member_roles WHERE server_id = $1 AND role_id = $2`, serverID, roleID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// reconcileMembersSubscriptions reconciles live subscriptions for a set of members
+// after a role's permissions change (or the role is deleted), which can flip
+// channel visibility for many members at once.
+func reconcileMembersSubscriptions(ctx context.Context, db *pgxpool.Pool, hub *realtime.Hub, serverID uuid.UUID, memberIDs []uuid.UUID) {
+	for _, uid := range memberIDs {
+		reconcileServerSubscriptions(ctx, db, hub, uid, serverID)
+	}
+}
+
 func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	channelID, err := parseUUID(chi.URLParam(r, "channelID"))
@@ -90,6 +202,9 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	if !h.checkChannelAccess(r, channelID, userID) {
 		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have access to this channel"))
+		return
+	}
+	if !requireChannelPermission(h.db, w, r, channelID, userID, permissions.ViewChannel) {
 		return
 	}
 
@@ -264,6 +379,10 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if !requireChannelPermission(h.db, w, r, channelID, userID, permissions.SendMessages) {
+		return
+	}
+
 	var req sendMessageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid request body"))
@@ -407,6 +526,11 @@ func (h *MessageHandler) Edit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you can only edit your own messages"))
 		return
 	}
+	// Editing requires being able to send in the channel, so a member who has
+	// lost SendMessages (or ViewChannel) cannot modify content there.
+	if !requireChannelPermission(h.db, w, r, channelID, userID, permissions.SendMessages) {
+		return
+	}
 
 	var req editMessageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -509,6 +633,12 @@ func (h *MessageHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Deleting (as author or moderator) requires being able to view the channel,
+	// so a member who lost ViewChannel cannot mutate a hidden channel by known ID.
+	if !requireChannelPermission(h.db, w, r, channelID, userID, permissions.ViewChannel) {
+		return
+	}
+
 	_, err = h.db.Exec(r.Context(),
 		`DELETE FROM messages WHERE id = $1`, messageID,
 	)
@@ -604,6 +734,12 @@ func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, a
 
 	// Send notifications
 	for uid := range notifySet {
+		// A mention must not leak a hidden channel: skip members who cannot view
+		// the channel (its name and a content snippet ride in the notification).
+		if perms, permErr := getMemberPermissions(h.db, r, serverID, uid); permErr != nil || !permissions.Has(perms, permissions.ViewChannel) {
+			continue
+		}
+
 		// Increment mention count in read_states
 		_, err := h.db.Exec(r.Context(),
 			`INSERT INTO read_states (user_id, channel_id, mention_count)
@@ -645,6 +781,9 @@ func (h *MessageHandler) BulkImport(w http.ResponseWriter, r *http.Request) {
 
 	if !h.checkChannelAccess(r, channelID, userID) {
 		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have access to this channel"))
+		return
+	}
+	if !requireChannelPermission(h.db, w, r, channelID, userID, permissions.SendMessages) {
 		return
 	}
 

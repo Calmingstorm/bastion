@@ -10,6 +10,8 @@ import (
 
 	"github.com/Calmingstorm/bastion/server/internal/auth"
 	"github.com/Calmingstorm/bastion/server/internal/models"
+	"github.com/Calmingstorm/bastion/server/internal/permissions"
+	"github.com/Calmingstorm/bastion/server/internal/realtime"
 )
 
 type ReadStateHandler struct {
@@ -44,6 +46,28 @@ func (h *ReadStateHandler) Ack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The caller must be a member of the channel and able to view it — otherwise
+	// an outsider could create read-state rows against arbitrary (hidden) channels.
+	msgHandler := &MessageHandler{db: h.db}
+	if !msgHandler.checkChannelAccess(r, channelID, userID) {
+		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have access to this channel"))
+		return
+	}
+	if !requireChannelPermission(h.db, w, r, channelID, userID, permissions.ViewChannel) {
+		return
+	}
+
+	// The acked message must belong to this channel, so a message ID from another
+	// channel cannot be recorded against this one.
+	var msgExists bool
+	if err := h.db.QueryRow(r.Context(),
+		`SELECT EXISTS(SELECT 1 FROM messages WHERE id = $1 AND channel_id = $2)`,
+		messageID, channelID,
+	).Scan(&msgExists); err != nil || !msgExists {
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "message not found"))
+		return
+	}
+
 	_, err = h.db.Exec(r.Context(),
 		`INSERT INTO read_states (user_id, channel_id, last_message_id, last_read_at, mention_count)
 		 VALUES ($1, $2, $3, NOW(), 0)
@@ -63,9 +87,19 @@ func (h *ReadStateHandler) Ack(w http.ResponseWriter, r *http.Request) {
 func (h *ReadStateHandler) ListReadStates(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 
+	// Only expose read states for channels the user may currently view, so losing
+	// access (or leaving a server) does not keep leaking channel IDs and mention
+	// counts for hidden channels.
+	viewable, err := realtime.ViewableChannelIDs(r.Context(), h.db, userID)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to resolve viewable channels")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+
 	rows, err := h.db.Query(r.Context(),
 		`SELECT user_id, channel_id, last_message_id, last_read_at, mention_count
-		 FROM read_states WHERE user_id = $1`, userID,
+		 FROM read_states WHERE user_id = $1 AND channel_id = ANY($2)`, userID, viewable,
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to list read states")

@@ -51,8 +51,14 @@ func (h *PinHandler) Pin(w http.ResponseWriter, r *http.Request) {
 
 	// Permission check
 	if serverID != nil {
-		// Server channel: require ManageMessages permission
-		if _, ok := requirePermission(h.db, w, r, *serverID, userID, permissions.ManageMessages); !ok {
+		// Server channel: require ManageMessages AND ViewChannel, so a moderator
+		// who cannot see the channel cannot pin/unpin in it by known ID.
+		perms, ok := requirePermission(h.db, w, r, *serverID, userID, permissions.ManageMessages)
+		if !ok {
+			return
+		}
+		if !permissions.Has(perms, permissions.ViewChannel) {
+			writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have permission to do that in this channel"))
 			return
 		}
 	} else {
@@ -145,8 +151,14 @@ func (h *PinHandler) Unpin(w http.ResponseWriter, r *http.Request) {
 
 	// Permission check
 	if serverID != nil {
-		// Server channel: require ManageMessages permission
-		if _, ok := requirePermission(h.db, w, r, *serverID, userID, permissions.ManageMessages); !ok {
+		// Server channel: require ManageMessages AND ViewChannel, so a moderator
+		// who cannot see the channel cannot pin/unpin in it by known ID.
+		perms, ok := requirePermission(h.db, w, r, *serverID, userID, permissions.ManageMessages)
+		if !ok {
+			return
+		}
+		if !permissions.Has(perms, permissions.ViewChannel) {
+			writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have permission to do that in this channel"))
 			return
 		}
 	} else {
@@ -220,6 +232,9 @@ func (h *PinHandler) List(w http.ResponseWriter, r *http.Request) {
 	).Scan(&hasAccess)
 	if err != nil || !hasAccess {
 		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have access to this channel"))
+		return
+	}
+	if !requireChannelPermission(h.db, w, r, channelID, userID, permissions.ViewChannel) {
 		return
 	}
 
