@@ -320,7 +320,9 @@ export const useWSStore = create<WSState>((set) => ({
         const selectedDMId = useDMStore.getState().selectedDMId;
         const activeChannelId = selectedChannelId || selectedDMId;
         if (activeChannelId) {
-          useMessageStore.getState().fetchMessages(activeChannelId);
+          // Merge the resync into existing history instead of replacing it, so a
+          // reconnect does not discard scrolled-in history or drop live events.
+          useMessageStore.getState().fetchMessages(activeChannelId, undefined, true);
         }
         // Refresh member list
         eventBus.emit('bastion:member-update');

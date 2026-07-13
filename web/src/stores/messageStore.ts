@@ -11,7 +11,7 @@ interface MessageState {
   error: string | null;
   replyingTo: Message | null;
   setReplyingTo: (msg: Message | null) => void;
-  fetchMessages: (channelId: string, before?: string) => Promise<void>;
+  fetchMessages: (channelId: string, before?: string, merge?: boolean) => Promise<void>;
   sendMessage: (channelId: string, content: string, replyToId?: string) => Promise<void>;
   editMessage: (channelId: string, messageId: string, content: string) => Promise<void>;
   requestDeleteMessage: (channelId: string, messageId: string) => Promise<void>;
@@ -34,7 +34,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
 
   setReplyingTo: (msg: Message | null) => set({ replyingTo: msg }),
 
-  fetchMessages: async (channelId: string, before?: string) => {
+  fetchMessages: async (channelId: string, before?: string, merge?: boolean) => {
     const state = get();
 
     // Prevent duplicate loading
@@ -66,6 +66,27 @@ export const useMessageStore = create<MessageState>((set, get) => ({
             hasMore: {
               ...s.hasMore,
               [channelId]: fetched.length === MESSAGE_LIMIT,
+            },
+            isLoading: { ...s.isLoading, [channelId]: false },
+          };
+        }
+
+        // Reconnect resync: union the latest page with what we already have,
+        // deduping by id and sorting ascending. This preserves paginated history
+        // the user scrolled in and any live events that arrived during the fetch
+        // (a wholesale replace would discard both). Older-history availability is
+        // unchanged, so hasMore is preserved.
+        if (merge && existing.length > 0) {
+          const byId = new Map(existing.map((m) => [m.id, m]));
+          for (const m of fetched) byId.set(m.id, m);
+          const merged = Array.from(byId.values()).sort(
+            (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+          );
+          return {
+            messages: { ...s.messages, [channelId]: merged },
+            hasMore: {
+              ...s.hasMore,
+              [channelId]: s.hasMore[channelId] ?? fetched.length === MESSAGE_LIMIT,
             },
             isLoading: { ...s.isLoading, [channelId]: false },
           };
