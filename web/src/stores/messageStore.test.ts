@@ -806,4 +806,112 @@ describe('messageStore.fetchMessages', () => {
       vi.useRealTimers();
     }
   });
+
+  // --- Single-flight base-fetch admission (blocker 1) ----------------------
+
+  it('an initial load never commits once a resync preempts it (even if it resolves first)', async () => {
+    const a = deferred<Message[]>();
+    const b = deferred<Message[]>();
+    vi.mocked(client.apiGetMessages)
+      .mockImplementationOnce(() => a.promise) // initial A
+      .mockImplementationOnce(() => b.promise); // resync B preempts A
+    const aDone = useMessageStore.getState().fetchMessages('c1');
+    const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true);
+    a.resolve([msg('m1', tISO(1), 'A')]); // A resolves FIRST
+    await aDone;
+    expect(ids()).toEqual([]); // A was preempted -> never commits
+    b.resolve([msg('m2', tISO(2), 'B')]);
+    await bDone;
+    expect(ids()).toEqual(['m2']); // B is authoritative
+  });
+
+  it('a captured Retry invoked after a resync starts creates no request; B commits', async () => {
+    vi.useFakeTimers();
+    try {
+      const a = deferred<Message[]>();
+      const b = deferred<Message[]>();
+      vi.mocked(client.apiGetMessages)
+        .mockImplementationOnce(() => a.promise) // initial A (hangs)
+        .mockImplementationOnce(() => b.promise); // resync B
+      void useMessageStore.getState().fetchMessages('c1'); // A initial
+      vi.advanceTimersByTime(120_001); // A abandons -> surfaces error, releases the base slot
+      const staleGen = useMessageStore.getState().errorSeq.c1; // the Retry's captured generation
+      expect(useMessageStore.getState().error.c1).toBe('Failed to load messages.');
+      const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true); // reconnect resync
+      const callsBefore = vi.mocked(client.apiGetMessages).mock.calls.length;
+      useMessageStore.getState().retryLoad('c1', staleGen); // the already-captured Retry, invoked now
+      expect(vi.mocked(client.apiGetMessages).mock.calls.length).toBe(callsBefore); // NO new request
+      b.resolve([msg('m1', tISO(1))]);
+      await bDone;
+      expect(ids()).toEqual(['m1']); // B committed, not discarded
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a delayed initial-load effect invoked while a resync is active creates no request', async () => {
+    const b = deferred<Message[]>();
+    vi.mocked(client.apiGetMessages).mockImplementationOnce(() => b.promise);
+    const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true); // resync active
+    const callsBefore = vi.mocked(client.apiGetMessages).mock.calls.length;
+    void useMessageStore.getState().fetchMessages('c1'); // a late initial-load effect
+    expect(vi.mocked(client.apiGetMessages).mock.calls.length).toBe(callsBefore); // no-op
+    b.resolve([msg('m1', tISO(1))]);
+    await bDone;
+    expect(ids()).toEqual(['m1']);
+  });
+
+  it('after a resync abandons, the current Retry starts exactly one new fetch', async () => {
+    vi.useFakeTimers();
+    try {
+      useMessageStore.setState({ messages: { c1: [] } });
+      vi.mocked(client.apiGetMessages).mockImplementation(() => new Promise(() => {})); // hangs
+      void useMessageStore.getState().fetchMessages('c1', undefined, true); // resync (base) hangs
+      vi.advanceTimersByTime(120_001); // resync abandons -> surfaces error, releases the slot
+      const gen = useMessageStore.getState().errorSeq.c1;
+      const callsBefore = vi.mocked(client.apiGetMessages).mock.calls.length;
+      useMessageStore.getState().retryLoad('c1', gen); // no base active, error current -> admitted
+      expect(vi.mocked(client.apiGetMessages).mock.calls.length).toBe(callsBefore + 1); // exactly one
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a stale Retry whose error a completed resync already cleared creates no request', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(client.apiGetMessages).mockImplementationOnce(() => new Promise(() => {})); // A hangs
+      void useMessageStore.getState().fetchMessages('c1'); // initial A
+      vi.advanceTimersByTime(120_001); // A abandons -> surfaces error (this is the Retry's generation)
+      const staleGen = useMessageStore.getState().errorSeq.c1;
+      // A resync now runs to completion: it clears the error and releases the base slot.
+      vi.mocked(client.apiGetMessages).mockResolvedValueOnce([msg('m1', tISO(1))]);
+      await useMessageStore.getState().fetchMessages('c1', undefined, true);
+      expect(useMessageStore.getState().error.c1 ?? null).toBeFalsy();
+      expect(useMessageStore.getState().activeBase.c1).toBeUndefined();
+      // No base is active now, so only the generation check stands between the stale
+      // Retry and a spurious duplicate fetch of an already-healthy window.
+      const callsBefore = vi.mocked(client.apiGetMessages).mock.calls.length;
+      useMessageStore.getState().retryLoad('c1', staleGen);
+      expect(vi.mocked(client.apiGetMessages).mock.calls.length).toBe(callsBefore); // stale gen -> no-op
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a preempted request settling cannot replace the resync as the active base', async () => {
+    const a = deferred<Message[]>();
+    const b = deferred<Message[]>();
+    vi.mocked(client.apiGetMessages)
+      .mockImplementationOnce(() => a.promise) // initial A
+      .mockImplementationOnce(() => b.promise); // resync B preempts A
+    const aDone = useMessageStore.getState().fetchMessages('c1');
+    void useMessageStore.getState().fetchMessages('c1', undefined, true); // B takes the active slot
+    const bId = useMessageStore.getState().activeBase.c1?.id;
+    expect(bId).toBeDefined();
+    a.resolve([msg('m1', tISO(1))]); // the preempted A now settles
+    await aDone;
+    // A's cleanup must NOT touch B's active-base slot.
+    expect(useMessageStore.getState().activeBase.c1?.id).toBe(bId);
+  });
 });

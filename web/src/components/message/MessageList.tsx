@@ -89,6 +89,10 @@ export function MessageList({ onToggleMembers, onToggleSidebar }: MessageListPro
   const channelError = useMessageStore(
     (s) => (activeChannelId ? s.error[activeChannelId] ?? null : null)
   );
+  const channelErrorGen = useMessageStore(
+    (s) => (activeChannelId ? s.errorSeq[activeChannelId] ?? 0 : 0)
+  );
+  const retryLoad = useMessageStore((s) => s.retryLoad);
 
   const { containerRef, scrollToBottomPersistent } = useAutoScroll([
     channelMessages.length,
@@ -433,7 +437,7 @@ export function MessageList({ onToggleMembers, onToggleSidebar }: MessageListPro
         {/* Error state: a latest-window load failed (e.g. abandoned after timing
             out). Show a retry rather than a misleading "no messages" empty state. */}
         {channelMessages.length === 0 && !channelIsLoading && channelError && activeChannelId && (
-          <MessageLoadError error={channelError} onRetry={() => void fetchMessages(activeChannelId)} />
+          <MessageLoadError error={channelError} onRetry={() => retryLoad(activeChannelId, channelErrorGen)} />
         )}
 
         {/* Empty state */}

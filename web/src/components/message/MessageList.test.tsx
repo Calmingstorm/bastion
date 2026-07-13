@@ -28,19 +28,22 @@ describe('MessageList latest-window error', () => {
 
   it('shows a Retry (not the empty state) when the channel failed to load, and retries on click', async () => {
     const fetchSpy = vi.fn(() => Promise.resolve());
+    const retrySpy = vi.fn();
     useMessageStore.setState({
       messages: { c1: [] },
       isLoading: { c1: false },
       error: { c1: 'Failed to load messages.' },
+      errorSeq: { c1: 7 }, // the error generation the Retry must carry
       fetchMessages: fetchSpy,
+      retryLoad: retrySpy,
     });
 
     render(<MessageList onToggleMembers={() => {}} onToggleSidebar={() => {}} />);
 
     const retry = await screen.findByRole('button', { name: 'Retry' });
     expect(screen.queryByText(/No messages yet/)).not.toBeInTheDocument(); // not the misleading empty state
-    fetchSpy.mockClear(); // ignore the mount effect's own fetch
     await userEvent.click(retry);
-    await waitFor(() => expect(fetchSpy).toHaveBeenCalledWith('c1'));
+    // The Retry carries the error generation so a stale click is a no-op in the store.
+    await waitFor(() => expect(retrySpy).toHaveBeenCalledWith('c1', 7));
   });
 });

@@ -19,6 +19,11 @@ interface MessageState {
   journal: Record<string, JournalEntry>;
   activeFetches: Record<number, number>;
   maxStartedBaseSeq: Record<string, number>;
+  // Single-flight base-fetch admission: the one authoritative in-flight base request
+  // per channel (its unique seq + an abort). A resync preempts it; an initial or
+  // retry no-ops while it is set, so a stale Retry / delayed effect never becomes a
+  // fetch that discards a healthy resync.
+  activeBase: Record<string, { id: number; abort: () => void }>;
   windowEpoch: Record<string, number>;
   isLoading: Record<string, boolean>;
   // All keyed by channelId so a race (or an error) in one channel never gates or
@@ -30,7 +35,11 @@ interface MessageState {
   committedSeq: Record<string, number>;
   replyingTo: Message | null;
   setReplyingTo: (msg: Message | null) => void;
-  fetchMessages: (channelId: string, before?: string, merge?: boolean) => Promise<void>;
+  fetchMessages: (channelId: string, before?: string, merge?: boolean, retryGen?: number) => Promise<void>;
+  // Reload after a base-load error. The errorGen (the errorSeq that rendered the
+  // Retry) is checked so a stale Retry that no longer reflects the current error
+  // does nothing.
+  retryLoad: (channelId: string, errorGen: number) => void;
   sendMessage: (channelId: string, content: string, replyToId?: string) => Promise<void>;
   sendMessageWithFiles: (channelId: string, content: string, files: File[]) => Promise<void>;
   editMessage: (channelId: string, messageId: string, content: string) => Promise<void>;
@@ -284,6 +293,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
   journal: {},
   activeFetches: {},
   maxStartedBaseSeq: {},
+  activeBase: {},
   windowEpoch: {},
   isLoading: {},
   error: {},
@@ -293,34 +303,64 @@ export const useMessageStore = create<MessageState>((set, get) => ({
 
   setReplyingTo: (msg: Message | null) => set({ replyingTo: msg }),
 
-  fetchMessages: async (channelId: string, before?: string, merge?: boolean) => {
+  fetchMessages: async (channelId: string, before?: string, merge?: boolean, retryGen?: number) => {
     const state = get();
+    const isBase = !before;
 
-    // A merge resync must run even if a pagination (or another load) is already in
-    // flight, so it is not gated by -- and does not touch -- isLoading. Two
-    // non-merge loads for the same channel still can't overlap (gated here).
-    if (!merge && state.isLoading[channelId]) return;
+    // Admission. Pagination is gated by isLoading. A BASE fetch is single-flight per
+    // channel: a resync always runs and PREEMPTS the current base; an initial or a
+    // retry NO-OPS while a base is active, so a stale Retry or a delayed initial-load
+    // effect can never become a fetch that discards a healthy resync. A retry also
+    // no-ops if the error that rendered it is no longer the current one.
+    if (before) {
+      if (state.isLoading[channelId]) return;
+    } else if (!merge) {
+      if (state.activeBase[channelId]) return;
+      if (retryGen !== undefined && retryGen !== (state.errorSeq[channelId] ?? 0)) return;
+    }
 
     // Request-start provenance, captured now (NOT read from settlement state).
     const startVer = journalVer;
     const startIds = new Set((state.messages[channelId] || []).map((m) => m.id));
     const mySeq = (fetchSeq += 1);
-    const isBase = !before;
     const startEpoch = state.windowEpoch[channelId] ?? 0;
     const startSession = sessionEpoch;
 
+    const controller = new AbortController();
+    // Cancel this request on logout too; unlinked in finally so a completed request
+    // leaves no listener on the session signal.
+    const unlinkSession = linkAbortToSession(controller);
+
+    // Deregister on every exit path: drop pruning protection and, if this request
+    // still owns the channel's active-base slot, release it so a retry may proceed.
     const deregister = () =>
       set((s) => {
-        if (sessionEpoch !== startSession || !(mySeq in s.activeFetches)) return {};
-        const next = { ...s.activeFetches };
-        delete next[mySeq];
-        return { activeFetches: next };
+        if (sessionEpoch !== startSession) return {};
+        const patch: Partial<MessageState> = {};
+        if (mySeq in s.activeFetches) {
+          const next = { ...s.activeFetches };
+          delete next[mySeq];
+          patch.activeFetches = next;
+        }
+        if (s.activeBase[channelId]?.id === mySeq) {
+          const nb = { ...s.activeBase };
+          delete nb[channelId];
+          patch.activeBase = nb;
+        }
+        return patch;
       });
+
+    // A resync preempts the current active base: cancel it so its late response can
+    // no longer commit (it is no longer the newest-started admitted request).
+    if (isBase && merge) state.activeBase[channelId]?.abort();
 
     set((s) => ({
       activeFetches: { ...s.activeFetches, [mySeq]: startVer },
       ...(isBase
-        ? { maxStartedBaseSeq: { ...s.maxStartedBaseSeq, [channelId]: Math.max(s.maxStartedBaseSeq[channelId] ?? 0, mySeq) } }
+        ? {
+            maxStartedBaseSeq: { ...s.maxStartedBaseSeq, [channelId]: Math.max(s.maxStartedBaseSeq[channelId] ?? 0, mySeq) },
+            activeBase: { ...s.activeBase, [channelId]: { id: mySeq, abort: () => controller.abort() } },
+          }
         : {}),
       // A non-merge load owns isLoading. Any BASE fetch (initial load OR resync)
       // refreshes the latest window, so it optimistically clears that window's error
@@ -339,10 +379,6 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     // late stale response can't erase newer state), drop its journal protection, and
     // release a non-merge load's loading state so the UI doesn't hang.
     let abandoned = false;
-    const controller = new AbortController();
-    // Cancel this request on logout too; unlinked in finally so a completed request
-    // leaves no listener on the session signal.
-    const unlinkSession = linkAbortToSession(controller);
     const protectionTimer = setTimeout(() => {
       abandoned = true;
       controller.abort();
@@ -350,21 +386,21 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         if (sessionEpoch !== startSession) return {};
         const next = { ...s.activeFetches };
         delete next[mySeq];
-        // Surface the base-load error (a Retry affordance) instead of staying
-        // falsely empty -- but ONLY when no newer base fetch is still in flight and
-        // the channel has nothing to fall back to. That way the Retry a user can
-        // click never coexists with a healthy in-flight resync (whose fresh
-        // response clicking Retry would discard), and it never loops. We never
-        // auto-retry. A pagination just releases loading; a resync that still has
-        // messages keeps them.
-        const surfaceError =
-          isBase &&
-          mySeq >= (s.maxStartedBaseSeq[channelId] ?? mySeq) && // still the newest-started base -> none in flight
-          mySeq >= (s.committedSeq[channelId] ?? 0) &&
-          mySeq >= (s.errorSeq[channelId] ?? 0) &&
-          (s.messages[channelId]?.length ?? 0) === 0; // nothing loaded to fall back to
+        // Release the active-base slot if this request still owns it, so a retry may
+        // start (a newer resync that preempted us owns it now -> we release nothing).
+        // When we WERE the authoritative base and the channel has nothing to fall
+        // back to, surface the base-load error as a Retry affordance instead of a
+        // false empty. We never auto-retry.
+        const ownsBase = s.activeBase[channelId]?.id === mySeq;
+        let nextBase = s.activeBase;
+        if (ownsBase) {
+          nextBase = { ...s.activeBase };
+          delete nextBase[channelId];
+        }
+        const surfaceError = ownsBase && (s.messages[channelId]?.length ?? 0) === 0;
         return {
           activeFetches: next,
+          activeBase: nextBase,
           ...(merge ? {} : { isLoading: { ...s.isLoading, [channelId]: false } }),
           ...(surfaceError
             ? { error: { ...s.error, [channelId]: LOAD_ERROR }, errorSeq: { ...s.errorSeq, [channelId]: mySeq } }
@@ -500,20 +536,30 @@ export const useMessageStore = create<MessageState>((set, get) => ({
             mySeq < (s.maxStartedBaseSeq[channelId] ?? mySeq);
           return {
             ...(merge ? {} : { isLoading: { ...s.isLoading, [channelId]: false } }),
-            ...(isBase && !superseded
+            // A cancellation (preempted by a resync, or aborted on logout) is not a
+            // load failure, so it does not surface a Retry.
+            ...(isBase && !superseded && !isAbort(err)
               ? { error: { ...s.error, [channelId]: message }, errorSeq: { ...s.errorSeq, [channelId]: mySeq } }
               : {}),
           };
         });
       }
     } finally {
-      // Deregister by unique id on every exit path (the timer backstop may have
-      // done it already; deregister is idempotent and session-guarded). Unlink the
+      // Deregister on every exit path (the timer backstop may have done it already;
+      // deregister is idempotent and session-guarded). It drops pruning protection
+      // and releases the active-base slot if this request still owns it. Unlink the
       // session listener so it never outlives the request.
       clearTimeout(protectionTimer);
       unlinkSession();
       deregister();
     }
+  },
+
+  retryLoad: (channelId: string, errorGen: number) => {
+    // A base-load retry: reloads only if the error that rendered the Retry is still
+    // current and no base fetch is active (both gated inside fetchMessages), so a
+    // stale Retry does nothing.
+    void get().fetchMessages(channelId, undefined, false, errorGen);
   },
 
   editMessage: async (channelId: string, messageId: string, content: string) => {
@@ -654,6 +700,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       journal: {},
       activeFetches: {},
       maxStartedBaseSeq: {},
+      activeBase: {},
       windowEpoch: {},
       isLoading: {},
       error: {},
