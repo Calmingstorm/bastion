@@ -1,5 +1,6 @@
 import type { Embed } from '../../types';
 import { MarkdownRenderer } from './MarkdownRenderer';
+import { safeHttpUrl } from '../../utils/url';
 
 interface EmbedCardProps {
   embed: Embed;
@@ -11,6 +12,11 @@ function intToHex(color: number): string {
 
 export function EmbedCard({ embed }: EmbedCardProps) {
   const borderColor = embed.color ? intToHex(embed.color) : 'var(--border)';
+  // Only render http(s) URLs in href/src; a javascript:/data: value (even if it
+  // slipped past server validation) must not become a clickable link or source.
+  const titleHref = safeHttpUrl(embed.url);
+  const imageSrc = safeHttpUrl(embed.image?.url);
+  const thumbnailSrc = safeHttpUrl(embed.thumbnail?.url);
 
   return (
     <div
@@ -22,9 +28,9 @@ export function EmbedCard({ embed }: EmbedCardProps) {
         <div className="min-w-0 flex-1">
           {embed.title && (
             <div className="font-semibold text-sm text-[var(--text-primary)]">
-              {embed.url ? (
+              {titleHref ? (
                 <a
-                  href={embed.url}
+                  href={titleHref}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="hover:underline text-[var(--accent)]"
@@ -63,10 +69,10 @@ export function EmbedCard({ embed }: EmbedCardProps) {
           )}
 
           {/* Image */}
-          {embed.image && (
+          {imageSrc && (
             <div className="mt-2">
               <img
-                src={embed.image.url}
+                src={imageSrc}
                 alt=""
                 className="max-w-full max-h-[300px] rounded object-contain"
               />
@@ -82,10 +88,10 @@ export function EmbedCard({ embed }: EmbedCardProps) {
         </div>
 
         {/* Thumbnail */}
-        {embed.thumbnail && (
+        {thumbnailSrc && (
           <div className="shrink-0">
             <img
-              src={embed.thumbnail.url}
+              src={thumbnailSrc}
               alt=""
               className="w-20 h-20 rounded object-cover"
             />
