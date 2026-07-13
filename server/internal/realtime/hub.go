@@ -192,6 +192,50 @@ func (h *Hub) UnsubscribeUser(userID, channelID uuid.UUID) {
 	}
 }
 
+// SubscribeUserSync subscribes all of a user's clients to a channel synchronously
+// (directly under the hub lock, not via the async register queue), so the
+// subscription is in effect the instant the call returns. Used by reconciliation
+// on the mutation path where an ordering window would otherwise let an event slip
+// through before the change applied.
+func (h *Hub) SubscribeUserSync(userID, channelID uuid.UUID) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	clients, ok := h.users[userID]
+	if !ok {
+		return
+	}
+	set, ok := h.channels[channelID]
+	if !ok {
+		set = make(map[*Client]struct{})
+		h.channels[channelID] = set
+	}
+	for c := range clients {
+		set[c] = struct{}{}
+	}
+}
+
+// UnsubscribeUserSync unsubscribes all of a user's clients from a channel
+// synchronously (directly under the hub lock), so no broadcast issued after this
+// call returns can still reach the user on that channel.
+func (h *Hub) UnsubscribeUserSync(userID, channelID uuid.UUID) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	clients, ok := h.users[userID]
+	if !ok {
+		return
+	}
+	set, ok := h.channels[channelID]
+	if !ok {
+		return
+	}
+	for c := range clients {
+		delete(set, c)
+	}
+	if len(set) == 0 {
+		delete(h.channels, channelID)
+	}
+}
+
 func (h *Hub) BroadcastToUser(userID uuid.UUID, event Event) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()

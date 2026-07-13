@@ -66,8 +66,10 @@ func TestRevokingViewChannelUnsubscribesLiveSocket(t *testing.T) {
 	if code := patchRolePerms(h, owner, serverID, def, permissions.SendMessages|permissions.CreateInvites|permissions.AttachFiles); code != http.StatusOK {
 		t.Fatalf("strip ViewChannel: got %d", code)
 	}
-	// Give the hub time to process the unsubscribe queued by the reconcile.
-	ws.Drain(500 * time.Millisecond)
+	// Reconciliation is synchronous: the unsubscribe is already applied by the
+	// time the role update returned, so this is not a settle wait — it only clears
+	// the control message's tail from the event pipe.
+	ws.Drain(100 * time.Millisecond)
 
 	_ = postTextMessage(h, owner, channelID, "after revocation")
 	if n := ws.CountEvents("MESSAGE_CREATE", 700*time.Millisecond); n != 0 {
@@ -101,9 +103,10 @@ func TestGrantingViewChannelSubscribesLiveSocket(t *testing.T) {
 		t.Fatalf("member received %d MESSAGE_CREATE before any grant, want 0", n)
 	}
 
-	// Grant a role carrying ViewChannel; the live socket must be subscribed.
+	// Grant a role carrying ViewChannel; reconciliation subscribes the live socket
+	// synchronously before AssignRole returns.
 	makeModerator(h, owner, member, serverID, permissions.ViewChannel, "viewer")
-	ws.Drain(500 * time.Millisecond)
+	ws.Drain(100 * time.Millisecond)
 
 	_ = postTextMessage(h, owner, channelID, "now visible")
 	if n := ws.CountEvents("MESSAGE_CREATE", 700*time.Millisecond); n == 0 {

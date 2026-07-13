@@ -440,6 +440,25 @@ func (ws *WSClient) CountEvents(eventType string, window time.Duration) int {
 	}
 }
 
+// Send writes an inbound message ({"type":..,"data":..}) to the server over the
+// socket, so tests can exercise inbound handlers (e.g. TYPING_START).
+func (ws *WSClient) Send(msgType string, data any) {
+	ws.t.Helper()
+	payload := map[string]any{"type": msgType}
+	if data != nil {
+		payload["data"] = data
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		ws.t.Fatalf("marshal ws message: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := ws.conn.Write(ctx, websocket.MessageText, b); err != nil {
+		ws.t.Fatalf("ws write: %v", err)
+	}
+}
+
 // Drain discards any events that arrive within the window (e.g. the presence /
 // subscription events emitted right after connecting).
 func (ws *WSClient) Drain(window time.Duration) {

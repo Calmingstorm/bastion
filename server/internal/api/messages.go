@@ -152,11 +152,13 @@ func reconcileServerSubscriptions(ctx context.Context, db *pgxpool.Pool, hub *re
 	for _, id := range viewable {
 		view[id] = true
 	}
+	// Apply synchronously: when this returns, a revoked member is already off the
+	// channel, so no broadcast issued after the mutation response can reach them.
 	for _, chID := range channelIDs {
 		if view[chID] {
-			hub.SubscribeUser(userID, chID)
+			hub.SubscribeUserSync(userID, chID)
 		} else {
-			hub.UnsubscribeUser(userID, chID)
+			hub.UnsubscribeUserSync(userID, chID)
 		}
 	}
 }

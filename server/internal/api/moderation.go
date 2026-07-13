@@ -88,6 +88,10 @@ func (h *ModerationHandler) Kick(w http.ResponseWriter, r *http.Request) {
 		serverID, targetID,
 	)
 
+	// The kicked member no longer belongs to the server; drop their live channel
+	// subscriptions so an already-connected socket stops receiving its events.
+	reconcileServerSubscriptions(r.Context(), h.db, h.hub, targetID, serverID)
+
 	writeAuditLog(h.db, r.Context(), serverID, userID, models.AuditMemberKick, "member", targetID, nil, req.Reason)
 
 	// Notify kicked user directly
@@ -182,6 +186,10 @@ func (h *ModerationHandler) Ban(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
+
+	// The banned member no longer belongs to the server; drop their live channel
+	// subscriptions so an already-connected socket stops receiving its events.
+	reconcileServerSubscriptions(r.Context(), h.db, h.hub, targetID, serverID)
 
 	writeAuditLog(h.db, r.Context(), serverID, userID, models.AuditMemberBan, "member", targetID, nil, req.Reason)
 

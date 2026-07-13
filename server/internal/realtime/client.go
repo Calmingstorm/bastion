@@ -209,6 +209,13 @@ func (c *Client) readPump(ctx context.Context, cancel context.CancelFunc) {
 					continue
 				}
 
+				// The sender must currently be allowed to post here; otherwise a
+				// member who lost access (or an outsider who knows the channel
+				// UUID) could leak a typing indicator into a hidden channel.
+				if !CanSendToChannel(ctx, c.db, c.userID, chID) {
+					continue
+				}
+
 				// Debounce with Redis: only broadcast if key doesn't exist
 				if c.rdb != nil {
 					key := "typing:" + td.ChannelID + ":" + c.userID.String()
@@ -318,4 +325,56 @@ func ViewableChannelIDs(ctx context.Context, db *pgxpool.Pool, userID uuid.UUID)
 	}
 
 	return ids, rows.Err()
+}
+
+// CanSendToChannel reports whether the user may currently post in (and therefore
+// type in) the channel: a DM participant, or a server member whose roles grant
+// both ViewChannel and SendMessages. The server owner and any Administrator role
+// always qualify. It fails closed on any lookup error so an unresolved channel or
+// membership never opens the path.
+func CanSendToChannel(ctx context.Context, db *pgxpool.Pool, userID, channelID uuid.UUID) bool {
+	var serverID *uuid.UUID
+	if err := db.QueryRow(ctx,
+		`SELECT server_id FROM channels WHERE id = $1`, channelID,
+	).Scan(&serverID); err != nil {
+		return false
+	}
+
+	if serverID == nil {
+		// DM channel: participation is the only gate.
+		var ok bool
+		if err := db.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM dm_members WHERE channel_id = $1 AND user_id = $2)`,
+			channelID, userID,
+		).Scan(&ok); err != nil {
+			return false
+		}
+		return ok
+	}
+
+	var ownerID uuid.UUID
+	if err := db.QueryRow(ctx,
+		`SELECT owner_id FROM servers WHERE id = $1`, *serverID,
+	).Scan(&ownerID); err != nil {
+		return false
+	}
+	if ownerID == userID {
+		return true
+	}
+
+	// Non-members hold no member_roles rows, so their bit_or is 0 and this denies.
+	var bits int64
+	if err := db.QueryRow(ctx,
+		`SELECT COALESCE(bit_or(r.permissions), 0)
+		 FROM member_roles mr
+		 INNER JOIN roles r ON r.id = mr.role_id
+		 WHERE mr.server_id = $1 AND mr.user_id = $2`,
+		*serverID, userID,
+	).Scan(&bits); err != nil {
+		return false
+	}
+	if permissions.Has(bits, permissions.Administrator) {
+		return true
+	}
+	return permissions.Has(bits, permissions.ViewChannel) && permissions.Has(bits, permissions.SendMessages)
 }
