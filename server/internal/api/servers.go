@@ -283,11 +283,9 @@ func (h *ServerHandler) Join(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Subscribe new member's WS clients to all server channels
+	// Subscribe new member's WS clients to the server channels they may view.
 	channelIDs, _ := getServerChannelIDs(r.Context(), h.db, serverID)
-	for _, chID := range channelIDs {
-		h.hub.SubscribeUser(userID, chID)
-	}
+	subscribeViewable(r.Context(), h.db, h.hub, userID, channelIDs)
 
 	// Broadcast to all server channels so existing members see the new member
 	for _, chID := range channelIDs {

@@ -8,6 +8,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/Calmingstorm/bastion/server/internal/auth"
+	"github.com/Calmingstorm/bastion/server/internal/permissions"
 	"github.com/Calmingstorm/bastion/server/internal/realtime"
 )
 
@@ -43,6 +44,11 @@ func (h *ReactionHandler) AddReaction(w http.ResponseWriter, r *http.Request) {
 	msgHandler := &MessageHandler{db: h.db, hub: h.hub}
 	if !msgHandler.checkChannelAccess(r, channelID, userID) {
 		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have access to this channel"))
+		return
+	}
+	// A member who cannot view the channel cannot react in it either, even when
+	// they know the message ID.
+	if !requireChannelPermission(h.db, w, r, channelID, userID, permissions.ViewChannel) {
 		return
 	}
 
@@ -108,6 +114,11 @@ func (h *ReactionHandler) RemoveReaction(w http.ResponseWriter, r *http.Request)
 	msgHandler := &MessageHandler{db: h.db, hub: h.hub}
 	if !msgHandler.checkChannelAccess(r, channelID, userID) {
 		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have access to this channel"))
+		return
+	}
+	// A member who cannot view the channel cannot react in it either, even when
+	// they know the message ID.
+	if !requireChannelPermission(h.db, w, r, channelID, userID, permissions.ViewChannel) {
 		return
 	}
 

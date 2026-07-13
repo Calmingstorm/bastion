@@ -100,6 +100,21 @@ func (h *BotHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Assign the bot the default @bastion role, exactly as human members receive
+	// it on join. Without a role a bot computes to zero permissions, so the
+	// channel permission gates on send/upload/import would reject every bot write.
+	_, err = h.db.Exec(r.Context(),
+		`INSERT INTO member_roles (server_id, user_id, role_id)
+		 SELECT $1, $2, id FROM roles WHERE server_id = $1 AND is_default = TRUE
+		 ON CONFLICT DO NOTHING`,
+		serverID, botUserID,
+	)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to assign bot default role")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+
 	var bot models.Bot
 	err = h.db.QueryRow(r.Context(),
 		`INSERT INTO bots (server_id, creator_id, user_id, token_hash, token_hint, description)

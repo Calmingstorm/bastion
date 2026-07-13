@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -110,6 +111,25 @@ func requireChannelPermission(db *pgxpool.Pool, w http.ResponseWriter, r *http.R
 		return false
 	}
 	return true
+}
+
+// subscribeViewable subscribes the user's WebSocket clients to the given
+// channels, but only those the user may currently view — so joining (even with
+// an already-connected socket) never subscribes to a hidden channel.
+func subscribeViewable(ctx context.Context, db *pgxpool.Pool, hub *realtime.Hub, userID uuid.UUID, channelIDs []uuid.UUID) {
+	viewable, err := realtime.ViewableChannelIDs(ctx, db, userID)
+	if err != nil {
+		return
+	}
+	set := make(map[uuid.UUID]bool, len(viewable))
+	for _, id := range viewable {
+		set[id] = true
+	}
+	for _, chID := range channelIDs {
+		if set[chID] {
+			hub.SubscribeUser(userID, chID)
+		}
+	}
 }
 
 func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -446,6 +466,11 @@ func (h *MessageHandler) Edit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you can only edit your own messages"))
 		return
 	}
+	// Editing requires being able to send in the channel, so a member who has
+	// lost SendMessages (or ViewChannel) cannot modify content there.
+	if !requireChannelPermission(h.db, w, r, channelID, userID, permissions.SendMessages) {
+		return
+	}
 
 	var req editMessageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -643,6 +668,12 @@ func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, a
 
 	// Send notifications
 	for uid := range notifySet {
+		// A mention must not leak a hidden channel: skip members who cannot view
+		// the channel (its name and a content snippet ride in the notification).
+		if perms, permErr := getMemberPermissions(h.db, r, serverID, uid); permErr != nil || !permissions.Has(perms, permissions.ViewChannel) {
+			continue
+		}
+
 		// Increment mention count in read_states
 		_, err := h.db.Exec(r.Context(),
 			`INSERT INTO read_states (user_id, channel_id, mention_count)
