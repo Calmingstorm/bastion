@@ -14,6 +14,7 @@ import (
 
 	server "github.com/Calmingstorm/bastion/server"
 	"github.com/Calmingstorm/bastion/server/internal/api"
+	"github.com/Calmingstorm/bastion/server/internal/auth"
 	"github.com/Calmingstorm/bastion/server/internal/config"
 	"github.com/Calmingstorm/bastion/server/internal/database"
 	"github.com/Calmingstorm/bastion/server/internal/realtime"
@@ -52,6 +53,9 @@ func main() {
 	if err := database.RunMigrations(server.MigrationsFS, cfg.DB.DSN()); err != nil {
 		log.Fatal().Err(err).Msg("failed to run migrations")
 	}
+
+	// Surface how many bot tokens still use the transitional Argon2 auth path.
+	auth.WarnLegacyBotTokens(context.Background(), pool)
 
 	// Connect to Redis
 	rdb, err := database.NewRedis(cfg)

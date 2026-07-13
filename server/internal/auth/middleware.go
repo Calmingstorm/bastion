@@ -2,11 +2,12 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
-	"github.com/alexedwards/argon2id"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
 )
@@ -130,41 +131,129 @@ func CombinedAuthMiddleware(jwtSecret string, db *pgxpool.Pool) func(http.Handle
 	}
 }
 
+// authenticateBot attaches the resolved bot identity to the request and
+// continues the chain. Used by both the fast and legacy authentication paths.
+func authenticateBot(w http.ResponseWriter, r *http.Request, next http.Handler, botUserID uuid.UUID) {
+	ctx := context.WithValue(r.Context(), userIDKey, botUserID)
+	ctx = context.WithValue(ctx, isBotKey, true)
+	next.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// handleBotAuth authenticates a bot bearer token. The normal path is a single
+// indexed lookup on the token's SHA-256 digest (no Argon2). Only tokens that
+// miss the fast path fall to a transitional Argon2 check, and even then only
+// against un-healed legacy rows sharing the presented token's hint -- never the
+// whole table. This closes the O(number-of-bots) Argon2 amplification the old
+// full-table scan exposed to unauthenticated callers.
 func handleBotAuth(w http.ResponseWriter, r *http.Request, next http.Handler, token string, db *pgxpool.Pool) {
-	// Query all bot token hashes and match
-	rows, err := db.Query(r.Context(),
-		`SELECT b.user_id, b.token_hash FROM bots b`)
-	if err != nil {
-		log.Error().Err(err).Msg("failed to query bots for auth")
-		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
-		return
-	}
-	defer rows.Close()
-
-	var matchedUserID uuid.UUID
-	found := false
-	for rows.Next() {
-		var botUserID uuid.UUID
-		var tokenHash string
-		if err := rows.Scan(&botUserID, &tokenHash); err != nil {
-			continue
-		}
-		match, err := argon2id.ComparePasswordAndHash(token, tokenHash)
-		if err == nil && match {
-			matchedUserID = botUserID
-			found = true
-			break
-		}
-	}
-
-	if !found {
+	// Reject malformed tokens before any database or Argon2 work, so a bogus
+	// input can never trigger credential-verification cost.
+	if !ValidBotTokenShape(token) {
 		http.Error(w, `{"error":"invalid bot token"}`, http.StatusUnauthorized)
 		return
 	}
 
-	ctx := context.WithValue(r.Context(), userIDKey, matchedUserID)
-	ctx = context.WithValue(ctx, isBotKey, true)
-	next.ServeHTTP(w, r.WithContext(ctx))
+	digest := BotTokenDigest(token)
+
+	// Fast path: exact indexed match on the deterministic digest. This is the
+	// normal authenticator for new and healed bots and performs no Argon2.
+	var botUserID uuid.UUID
+	err := db.QueryRow(r.Context(),
+		`SELECT user_id FROM bots WHERE token_lookup = $1`, digest).Scan(&botUserID)
+	if err == nil {
+		authenticateBot(w, r, next, botUserID)
+		return
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		log.Error().Err(err).Msg("bot auth fast-path query failed")
+		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	// Transitional slow path: only legacy rows (never healed) whose stored hint
+	// equals this token's suffix. The partial index on token_hint keeps this to
+	// the tiny collision bucket -- normally one row -- instead of the table.
+	suffix := token[len(token)-8:]
+	rows, err := db.Query(r.Context(),
+		`SELECT id, user_id, token_hash FROM bots WHERE token_lookup IS NULL AND token_hint = $1`,
+		suffix)
+	if err != nil {
+		log.Error().Err(err).Msg("bot auth legacy query failed")
+		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+		return
+	}
+	type legacyCandidate struct {
+		id     uuid.UUID
+		userID uuid.UUID
+		hash   string
+	}
+	var candidates []legacyCandidate
+	for rows.Next() {
+		var c legacyCandidate
+		if err := rows.Scan(&c.id, &c.userID, &c.hash); err != nil {
+			rows.Close()
+			log.Error().Err(err).Msg("bot auth legacy scan failed")
+			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+			return
+		}
+		candidates = append(candidates, c)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		log.Error().Err(err).Msg("bot auth legacy rows error")
+		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	// Unknown hint (or no legacy rows left): no candidate, no Argon2, no oracle.
+	if len(candidates) == 0 {
+		http.Error(w, `{"error":"invalid bot token"}`, http.StatusUnauthorized)
+		return
+	}
+
+	// One Argon2 permit for the whole request, taken only now that real
+	// candidates exist and held across the candidate loop. Saturation means the
+	// transitional Argon2 budget is momentarily full: a valid legacy credential
+	// is throttled (429), not rejected as invalid (401).
+	if !legacyArgon2Gate.tryAcquire() {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, `{"error":"bot authentication temporarily unavailable"}`, http.StatusTooManyRequests)
+		return
+	}
+	defer legacyArgon2Gate.release()
+
+	for _, c := range candidates {
+		match, err := CompareBotToken(token, c.hash)
+		if err == nil && match {
+			// Lazy-heal: install the digest so this bot uses the fast path next
+			// time. The WHERE admits only two valid states -- not yet healed, or
+			// already healed to THIS digest by a concurrent identical auth -- and
+			// we require exactly one affected row.
+			//
+			// A genuine write error is a real database fault -> 500. Zero rows,
+			// however, means the row moved out from under us between the Argon2
+			// match and here: regeneration installed a different digest, or the
+			// bot was deleted. The presented credential is no longer valid, so it
+			// must be rejected rather than admitted on a now-stale Argon2 match.
+			tag, err := db.Exec(r.Context(),
+				`UPDATE bots SET token_lookup = $1
+				 WHERE id = $2 AND (token_lookup IS NULL OR token_lookup = $1)`,
+				digest, c.id)
+			if err != nil {
+				log.Error().Err(err).Msg("bot token lazy-heal failed")
+				http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+				return
+			}
+			if tag.RowsAffected() != 1 {
+				http.Error(w, `{"error":"invalid bot token"}`, http.StatusUnauthorized)
+				return
+			}
+			authenticateBot(w, r, next, c.userID)
+			return
+		}
+	}
+
+	http.Error(w, `{"error":"invalid bot token"}`, http.StatusUnauthorized)
 }
 
 func UserIDFromContext(ctx context.Context) uuid.UUID {
