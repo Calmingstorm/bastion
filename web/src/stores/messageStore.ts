@@ -563,66 +563,68 @@ export const useMessageStore = create<MessageState>((set, get) => ({
   },
 
   editMessage: async (channelId: string, messageId: string, content: string) => {
+    // A logout/reset during the await bumps sessionEpoch; a settled request must
+    // not write its result (or a toast) into the new session.
+    const startSession = sessionEpoch;
     try {
       const updated = await apiEditMessage(channelId, messageId, content);
+      if (sessionEpoch !== startSession) return; // logged out mid-edit -> discard
       get().updateMessage(channelId, updated);
     } catch (err: unknown) {
       const errMsg = extractErrorMessage(err, 'Failed to edit message.');
       // error[channelId] is the latest-window LOAD status (base-owned). A mutation
       // failure surfaces to the user as a toast (and via the thrown error for the
       // caller's control flow) -- never silently, and never as a load error. A
-      // cancellation (e.g. the request aborted on logout) is not a user-facing
-      // failure, so it does not toast into the logged-out / next-user UI.
-      if (!isAbort(err)) useToastStore.getState().addToast(errMsg);
+      // cancellation (aborted on logout) OR a logout that settled the request into
+      // a new session (sessionEpoch moved) must not toast into the next-user UI.
+      if (sessionEpoch === startSession && !isAbort(err)) useToastStore.getState().addToast(errMsg);
       throw new Error(errMsg);
     }
   },
 
   requestDeleteMessage: async (channelId: string, messageId: string) => {
+    const startSession = sessionEpoch;
     try {
       await apiDeleteMessage(channelId, messageId);
+      if (sessionEpoch !== startSession) return; // logged out mid-delete -> discard
       get().deleteMessage(channelId, messageId);
     } catch (err: unknown) {
       const errMsg = extractErrorMessage(err, 'Failed to delete message.');
-      // error[channelId] is the latest-window LOAD status (base-owned). A mutation
-      // failure surfaces to the user as a toast (and via the thrown error for the
-      // caller's control flow) -- never silently, and never as a load error. A
-      // cancellation (e.g. the request aborted on logout) is not a user-facing
-      // failure, so it does not toast into the logged-out / next-user UI.
-      if (!isAbort(err)) useToastStore.getState().addToast(errMsg);
+      // See editMessage: never toast into a new session or on a cancellation.
+      if (sessionEpoch === startSession && !isAbort(err)) useToastStore.getState().addToast(errMsg);
       throw new Error(errMsg);
     }
   },
 
   sendMessage: async (channelId: string, content: string, replyToId?: string) => {
+    const startSession = sessionEpoch;
     try {
       const message = await apiSendMessage(channelId, content, replyToId);
+      if (sessionEpoch !== startSession) return; // logged out mid-send -> don't repopulate the new session
       // Optimistic add (the WebSocket may also deliver it; addMessage dedupes).
       get().addMessage(channelId, message);
       eventBus.emit('bastion:message-sent');
     } catch (err: unknown) {
       const errMsg = extractErrorMessage(err, 'Failed to send message.');
-      // error[channelId] is the latest-window LOAD status (base-owned). A mutation
-      // failure surfaces to the user as a toast (and via the thrown error for the
-      // caller's control flow) -- never silently, and never as a load error. A
-      // cancellation (e.g. the request aborted on logout) is not a user-facing
-      // failure, so it does not toast into the logged-out / next-user UI.
-      if (!isAbort(err)) useToastStore.getState().addToast(errMsg);
+      // See editMessage: never toast into a new session or on a cancellation.
+      if (sessionEpoch === startSession && !isAbort(err)) useToastStore.getState().addToast(errMsg);
       throw new Error(errMsg);
     }
   },
 
   sendMessageWithFiles: async (channelId: string, content: string, files: File[]) => {
+    const startSession = sessionEpoch;
     try {
       const message = await apiSendMessageWithFiles(channelId, content, files);
+      if (sessionEpoch !== startSession) return; // logged out mid-upload -> don't repopulate the new session
       get().addMessage(channelId, message);
       eventBus.emit('bastion:message-sent');
     } catch (err: unknown) {
       const errMsg = extractErrorMessage(err, 'Failed to send message.');
       // Uploads run through the store like a plain send so a failure surfaces as a
-      // toast rather than being silently swallowed by the caller (a cancellation on
-      // logout does not toast).
-      if (!isAbort(err)) useToastStore.getState().addToast(errMsg);
+      // toast rather than being silently swallowed by the caller (never on a
+      // cancellation, and never into a new session after logout).
+      if (sessionEpoch === startSession && !isAbort(err)) useToastStore.getState().addToast(errMsg);
       throw new Error(errMsg);
     }
   },

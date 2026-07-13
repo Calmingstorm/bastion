@@ -914,4 +914,58 @@ describe('messageStore.fetchMessages', () => {
     // A's cleanup must NOT touch B's active-base slot.
     expect(useMessageStore.getState().activeBase.c1?.id).toBe(bId);
   });
+
+  // --- Session-boundary guards on message mutations (round 24 blocker 1) ----
+  // A mutation whose request settles around a logout/reset must not write its
+  // result (or a toast) into the fresh session. reset() bumps sessionEpoch.
+
+  it('a send that resolves after logout does not insert its message into the new session', async () => {
+    const d = deferred<Message>();
+    vi.mocked(client.apiSendMessage).mockReturnValue(d.promise);
+    const p = useMessageStore.getState().sendMessage('c1', 'hi');
+    useMessageStore.getState().reset(); // logout: new session
+    d.resolve(msg('m1', tISO(1)));
+    await p;
+    expect(ids()).toEqual([]); // the old send did not repopulate the cleared store
+  });
+
+  it('a send that rejects after logout does not toast into the new session', async () => {
+    const d = deferred<Message>();
+    vi.mocked(client.apiSendMessage).mockReturnValue(d.promise);
+    const p = useMessageStore.getState().sendMessage('c1', 'hi');
+    useMessageStore.getState().reset();
+    d.reject(new Error('500'));
+    await expect(p).rejects.toThrow();
+    expect(useToastStore.getState().addToast).not.toHaveBeenCalled(); // no toast into the next user's UI
+  });
+
+  it('an upload that resolves after logout does not insert its message into the new session', async () => {
+    const d = deferred<Message>();
+    vi.mocked(client.apiSendMessageWithFiles).mockReturnValue(d.promise);
+    const p = useMessageStore.getState().sendMessageWithFiles('c1', 'hi', [new File([], 'f.png')]);
+    useMessageStore.getState().reset();
+    d.resolve(msg('m1', tISO(1)));
+    await p;
+    expect(ids()).toEqual([]);
+  });
+
+  it('an edit that rejects after logout does not toast into the new session', async () => {
+    const d = deferred<Message>();
+    vi.mocked(client.apiEditMessage).mockReturnValue(d.promise);
+    const p = useMessageStore.getState().editMessage('c1', 'm1', 'edited');
+    useMessageStore.getState().reset();
+    d.reject(new Error('500'));
+    await expect(p).rejects.toThrow();
+    expect(useToastStore.getState().addToast).not.toHaveBeenCalled();
+  });
+
+  it('a delete that rejects after logout does not toast into the new session', async () => {
+    const d = deferred<void>();
+    vi.mocked(client.apiDeleteMessage).mockReturnValue(d.promise);
+    const p = useMessageStore.getState().requestDeleteMessage('c1', 'm1');
+    useMessageStore.getState().reset();
+    d.reject(new Error('500'));
+    await expect(p).rejects.toThrow();
+    expect(useToastStore.getState().addToast).not.toHaveBeenCalled();
+  });
 });
