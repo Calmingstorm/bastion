@@ -38,12 +38,13 @@ func (s *Service) SetStatus(ctx context.Context, userID uuid.UUID, status string
 
 func (s *Service) Heartbeat(ctx context.Context, userID uuid.UUID) {
 	key := keyPrefix + userID.String()
-	// Refresh TTL, set to online if not exists
-	exists, _ := s.rdb.Exists(ctx, key).Result()
-	if exists == 0 {
+	// EXPIRE atomically refreshes the TTL and reports whether the key existed.
+	// Only when it did not (returns false) do we set the default online status --
+	// avoiding the check-then-act race where the key expires between a separate
+	// EXISTS and EXPIRE and the heartbeat is silently lost.
+	refreshed, err := s.rdb.Expire(ctx, key, presenceTTL).Result()
+	if err == nil && !refreshed {
 		s.rdb.Set(ctx, key, "online", presenceTTL)
-	} else {
-		s.rdb.Expire(ctx, key, presenceTTL)
 	}
 }
 
@@ -78,8 +79,8 @@ func (s *Service) GetPresenceBatch(ctx context.Context, userIDs []uuid.UUID) map
 
 	result := make(map[uuid.UUID]string, len(userIDs))
 	for i, id := range userIDs {
-		if vals[i] != nil {
-			result[id] = vals[i].(string)
+		if s, ok := vals[i].(string); ok {
+			result[id] = s
 		} else {
 			result[id] = "offline"
 		}

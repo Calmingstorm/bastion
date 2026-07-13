@@ -275,6 +275,12 @@ func (c *Client) writePump(ctx context.Context, cancel context.CancelFunc) {
 				log.Debug().Err(err).Str("userID", c.userID.String()).Msg("websocket ping failed")
 				return
 			}
+			// A successful ping proves the client is alive, so keep its presence
+			// fresh even if it never sends an application-level HEARTBEAT (the
+			// transport ping fires well inside the presence TTL).
+			if c.rdb != nil {
+				c.rdb.Expire(ctx, "presence:"+c.userID.String(), 90*time.Second)
+			}
 
 		case <-ctx.Done():
 			return
