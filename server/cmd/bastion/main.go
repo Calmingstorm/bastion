@@ -34,6 +34,9 @@ func main() {
 		Str("host", cfg.Host).
 		Str("port", cfg.Port).
 		Msg("starting bastion server")
+	for _, warning := range cfg.SecurityWarnings() {
+		log.Warn().Msg(warning)
+	}
 
 	// Connect to database
 	pool, err := database.New(cfg)
