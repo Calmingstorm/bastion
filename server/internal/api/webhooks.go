@@ -379,6 +379,29 @@ func (h *WebhookHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Normalize the display overrides once, then validate and persist the SAME
+	// values. Validating a trimmed copy while persisting the raw string would let
+	// padding smuggle past the length cap (e.g. 81 spaces trims to "" but stores
+	// at length 81) or store whitespace around the avatar URL.
+	if req.Username != nil {
+		trimmed := strings.TrimSpace(*req.Username)
+		req.Username = &trimmed
+	}
+	if req.AvatarURL != nil {
+		trimmed := strings.TrimSpace(*req.AvatarURL)
+		req.AvatarURL = &trimmed
+	}
+	// Cap the username, and require the avatar to be an http(s) URL so a
+	// javascript:/data: value cannot execute client-side.
+	if req.Username != nil && len(*req.Username) > 80 {
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "username cannot exceed 80 characters"))
+		return
+	}
+	if req.AvatarURL != nil && *req.AvatarURL != "" && !isHTTPURL(*req.AvatarURL) {
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "avatarUrl must be an http(s) URL"))
+		return
+	}
+
 	// Build authorOverride if username or avatar overrides are provided
 	var authorOverride *models.AuthorOverride
 	if (req.Username != nil && *req.Username != "") || (req.AvatarURL != nil && *req.AvatarURL != "") {

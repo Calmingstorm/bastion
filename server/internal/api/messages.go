@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -48,7 +49,19 @@ func validateEmbeds(embeds []models.Embed) error {
 	if len(embeds) > 10 {
 		return fmt.Errorf("maximum 10 embeds per message")
 	}
-	for i, e := range embeds {
+	for i := range embeds {
+		e := &embeds[i]
+		// Normalize URL fields in place so the value that is validated is exactly
+		// the value that is persisted — a padded URL cannot pass validation and
+		// then be stored (and rendered) with its surrounding whitespace.
+		e.URL = strings.TrimSpace(e.URL)
+		if e.Image != nil {
+			e.Image.URL = strings.TrimSpace(e.Image.URL)
+		}
+		if e.Thumbnail != nil {
+			e.Thumbnail.URL = strings.TrimSpace(e.Thumbnail.URL)
+		}
+
 		total := len(e.Title) + len(e.Description)
 		if e.Footer != nil {
 			total += len(e.Footer.Text)
@@ -62,8 +75,44 @@ func validateEmbeds(embeds []models.Embed) error {
 		if len(e.Fields) > 25 {
 			return fmt.Errorf("embed %d exceeds 25 field limit", i)
 		}
+		// URL fields must be http(s) so a stored javascript:/data: URL cannot
+		// execute when a client renders the embed.
+		if !embedURLOK(e.URL) {
+			return fmt.Errorf("embed %d has an invalid url", i)
+		}
+		if e.Image != nil && !embedURLOK(e.Image.URL) {
+			return fmt.Errorf("embed %d image has an invalid url", i)
+		}
+		if e.Thumbnail != nil && !embedURLOK(e.Thumbnail.URL) {
+			return fmt.Errorf("embed %d thumbnail has an invalid url", i)
+		}
 	}
 	return nil
+}
+
+// isHTTPURL reports whether s is a syntactically valid absolute http(s) URL with
+// a hostname. A bare scheme ("http:", "https://"), an opaque value
+// ("https:javascript:alert(1)"), a hostless path, or a port-only authority
+// ("https://:443") is rejected — only a real http(s) target passes.
+func isHTTPURL(s string) bool {
+	u, err := url.Parse(strings.TrimSpace(s))
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+		return u.Hostname() != ""
+	default:
+		return false
+	}
+}
+
+// embedURLOK reports whether an optional embed URL field is empty or http(s).
+func embedURLOK(s string) bool {
+	if strings.TrimSpace(s) == "" {
+		return true
+	}
+	return isHTTPURL(s)
 }
 
 func (h *MessageHandler) checkChannelAccess(r *http.Request, channelID, userID uuid.UUID) bool {
