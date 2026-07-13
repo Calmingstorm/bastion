@@ -871,7 +871,7 @@ function AuditTab({ serverId }: { serverId: string }) {
 
 /* ---- Webhooks ---- */
 
-function WebhooksTab({ serverId }: { serverId: string }) {
+export function WebhooksTab({ serverId }: { serverId: string }) {
   const [webhooks, setWebhooks] = useState<Webhook[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -917,7 +917,6 @@ function WebhooksTab({ serverId }: { serverId: string }) {
   };
 
   const handleRegenerate = async (webhookId: string) => {
-    setRegenConfirm(null);
     if (regeneratingId) return; // guard against double-clicks racing rotations
     setRegeneratingId(webhookId);
     try {
@@ -929,7 +928,10 @@ function WebhooksTab({ serverId }: { serverId: string }) {
       setRevealed(wh);
       setCopied(false);
     } catch { /* handled */ } finally {
+      // Clear the in-flight and confirm state together, so the row shows
+      // "Rotating…" for the whole request rather than reverting immediately.
       setRegeneratingId(null);
+      setRegenConfirm(null);
     }
   };
 

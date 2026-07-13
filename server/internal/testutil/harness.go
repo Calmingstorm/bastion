@@ -77,9 +77,7 @@ func NewMigrationDB(t *testing.T) string {
 		t.Fatalf("create migration test database: %v", err)
 	}
 	t.Cleanup(func() {
-		c := context.Background()
-		_, _ = admin.Exec(c, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1", dbName)
-		_, _ = admin.Exec(c, "DROP DATABASE IF EXISTS "+pgx.Identifier{dbName}.Sanitize())
+		cleanupDatabase(admin, dbName, t)
 		admin.Close()
 	})
 	testDB := baseDB
