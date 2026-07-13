@@ -1,12 +1,24 @@
 package realtime
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
+
+// ErrConnectUnstable is returned by ConnectClient when it cannot obtain a
+// viewability snapshot that is not immediately invalidated by a concurrent
+// revocation within its bounded attempts. The connection is failed closed rather
+// than left holding a possibly-stale subscription set.
+var ErrConnectUnstable = errors.New("realtime: connect could not converge on a stable viewability snapshot")
+
+// connectMaxAttempts bounds ConnectClient's revalidation loop. Real connects
+// converge in one or two iterations; only a pathological revocation flood could
+// exhaust this, and that fails closed.
+const connectMaxAttempts = 8
 
 type broadcastMessage struct {
 	channelID uuid.UUID
@@ -189,22 +201,28 @@ func (h *Hub) ResubscribeClient(client *Client, oldChannels, newChannels []uuid.
 func (h *Hub) ConnectClient(client *Client, readViewable func() ([]uuid.UUID, error)) ([]uuid.UUID, error) {
 	h.RegisterUser(client)
 	var applied []uuid.UUID
-	// The bound is a safety valve against pathological revocation floods; the
-	// registered-client reconcile is the backstop if it is ever hit. Real connects
-	// converge in one or two iterations.
-	for i := 0; i < 8; i++ {
+	for i := 0; i < connectMaxAttempts; i++ {
 		gen := h.ReconcileGen()
 		viewable, err := readViewable()
 		if err != nil {
+			// A read failure must not leave the client registered (and, on a later
+			// attempt, subscribed) with nothing to clean it up — ServeWS returns
+			// before the pumps start, so it never calls UnsubscribeAll.
+			h.UnsubscribeAll(client)
 			return nil, err
 		}
 		h.ResubscribeClient(client, applied, viewable)
 		applied = viewable
 		if h.ReconcileGen() == gen {
-			break
+			// Stable: no revocation raced this read, so the snapshot is current.
+			return applied, nil
 		}
 	}
-	return applied, nil
+	// Exhausted the bound without ever observing a stable generation. The last
+	// snapshot may be stale and nothing will reconcile it later, so fail closed
+	// rather than install it.
+	h.UnsubscribeAll(client)
+	return nil, ErrConnectUnstable
 }
 
 // GetClientChannels returns all channel IDs a client is currently subscribed to.

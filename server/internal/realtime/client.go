@@ -94,7 +94,8 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, userID uuid.UUID,
 		return ViewableChannelIDs(r.Context(), db, userID)
 	})
 	if err != nil {
-		log.Error().Err(err).Str("userID", userID.String()).Msg("failed to get user channels")
+		// ConnectClient has already removed the client from the hub on failure.
+		log.Error().Err(err).Str("userID", userID.String()).Msg("failed to establish channel subscriptions")
 		conn.Close(websocket.StatusInternalError, "failed to load channels")
 		return
 	}

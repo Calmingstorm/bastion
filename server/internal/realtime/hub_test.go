@@ -2,6 +2,7 @@ package realtime
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -140,6 +141,92 @@ func TestConnectRevalidatesStaleSnapshot(t *testing.T) {
 	}
 	if channelHas(hub, revokedChannel, client) {
 		t.Fatal("stale pre-revocation snapshot resurrected channel access after reconciliation")
+	}
+}
+
+// TestConnectFailsClosedOnUnstableGeneration: if every revalidation attempt is
+// invalidated by a racing revocation, ConnectClient must not install the final
+// stale snapshot on exhaustion — it fails closed and unregisters the client, so
+// no stale subscription persists with nothing left to reconcile it.
+func TestConnectFailsClosedOnUnstableGeneration(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	userID := uuid.New()
+	staleChannel := uuid.New()
+	client := newDroppingClient(userID)
+
+	// Every read bumps the generation (a revocation) and returns a stale snapshot,
+	// so the loop can never observe a stable generation.
+	_, err := hub.ConnectClient(client, func() ([]uuid.UUID, error) {
+		hub.UnsubscribeUser(userID, uuid.New()) // bump gen on an unrelated channel
+		return []uuid.UUID{staleChannel}, nil
+	})
+	if !errors.Is(err, ErrConnectUnstable) {
+		t.Fatalf("expected ErrConnectUnstable, got %v", err)
+	}
+	if channelHas(hub, staleChannel, client) {
+		t.Fatal("exhausted connect left a stale subscription installed")
+	}
+	if hub.IsUserOnline(userID) {
+		t.Fatal("failed connect left the client registered")
+	}
+}
+
+// TestConnectInitialReadErrorCleansUp: an initial viewability read error must not
+// leave the client registered in the hub (ServeWS returns before the pumps that
+// would otherwise call UnsubscribeAll).
+func TestConnectInitialReadErrorCleansUp(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	userID := uuid.New()
+	client := newDroppingClient(userID)
+
+	readErr := errors.New("db down")
+	_, err := hub.ConnectClient(client, func() ([]uuid.UUID, error) {
+		return nil, readErr
+	})
+	if !errors.Is(err, readErr) {
+		t.Fatalf("expected the read error, got %v", err)
+	}
+	if hub.IsUserOnline(userID) {
+		t.Fatal("initial read error left the client registered")
+	}
+}
+
+// TestConnectRevalidationErrorCleansUp: a read error on a later revalidation
+// (after a snapshot was already applied) must clean up both the registration and
+// the previously-applied subscriptions.
+func TestConnectRevalidationErrorCleansUp(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	userID := uuid.New()
+	firstChannel := uuid.New()
+	client := newDroppingClient(userID)
+
+	readErr := errors.New("db down mid-revalidation")
+	calls := 0
+	_, err := hub.ConnectClient(client, func() ([]uuid.UUID, error) {
+		calls++
+		if calls == 1 {
+			hub.UnsubscribeUser(userID, uuid.New()) // bump gen to force a revalidation
+			return []uuid.UUID{firstChannel}, nil   // applied on the first pass
+		}
+		return nil, readErr // the revalidation read fails
+	})
+	if !errors.Is(err, readErr) {
+		t.Fatalf("expected the read error, got %v", err)
+	}
+	if channelHas(hub, firstChannel, client) {
+		t.Fatal("revalidation error left the first snapshot's subscription installed")
+	}
+	if hub.IsUserOnline(userID) {
+		t.Fatal("revalidation error left the client registered")
 	}
 }
 
