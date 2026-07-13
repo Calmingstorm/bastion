@@ -493,6 +493,24 @@ describe('messageStore.fetchMessages', () => {
     }
   });
 
+  it('a non-merge load abandoned by the timeout releases its loading state', async () => {
+    vi.useFakeTimers();
+    try {
+      useMessageStore.setState({ messages: {}, isLoading: {} });
+      const a = deferred<Message[]>();
+      vi.mocked(client.apiGetMessages).mockImplementation(() => a.promise);
+      const aDone = useMessageStore.getState().fetchMessages('c1'); // non-merge -> isLoading true
+      expect(useMessageStore.getState().isLoading.c1).toBe(true);
+      vi.advanceTimersByTime(120_001); // abandoned by the protection timeout
+      expect(useMessageStore.getState().isLoading.c1).toBe(false); // spinner released, not hung
+      a.resolve([msg('m1', tISO(1))]); // the late response arrives
+      await aDone;
+      expect(useMessageStore.getState().messages.c1 || []).toEqual([]); // abandoned -> did not commit
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('an older pagination success does not clear a newer resync failure', async () => {
     useMessageStore.setState({ messages: { c1: block('old', LIMIT, 50) }, hasMore: { c1: true } });
     const p = deferred<Message[]>();

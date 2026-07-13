@@ -317,11 +317,20 @@ export const useMessageStore = create<MessageState>((set, get) => ({
 
     // Backstop: a fetch that never settles must not pin protectFloor forever. After
     // a bounded lifetime we ABANDON it -- it may no longer commit (so a very late
-    // stale response can't erase newer state) and its journal protection is dropped.
+    // stale response can't erase newer state), its journal protection is dropped,
+    // and a non-merge load releases its loading state so the UI doesn't hang.
     let abandoned = false;
     const protectionTimer = setTimeout(() => {
       abandoned = true;
-      deregister();
+      set((s) => {
+        if (sessionEpoch !== startSession) return {};
+        const next = { ...s.activeFetches };
+        delete next[mySeq];
+        return {
+          activeFetches: next,
+          ...(merge ? {} : { isLoading: { ...s.isLoading, [channelId]: false } }),
+        };
+      });
     }, FETCH_PROTECTION_TIMEOUT_MS);
 
     try {
