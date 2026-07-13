@@ -9,10 +9,11 @@ import (
 	"github.com/Calmingstorm/bastion/server/internal/testutil"
 )
 
-// TestWSPingRestoresPresence: if a connected client's presence key expires while
-// its socket stays open, the transport-ping-driven refresh restores it. A bare
-// EXPIRE (the previous behavior) could not bring an absent key back.
-func TestWSPingRestoresPresence(t *testing.T) {
+// TestWSPingRefreshesAndRestoresPresence: a transport ping must (a) refresh an
+// existing custom status's TTL WITHOUT clobbering the value back to online, and
+// (b) restore a key that vanished while the socket stayed connected. A bare
+// EXPIRE fails (b); a SET/SetOnline fails (a).
+func TestWSPingRefreshesAndRestoresPresence(t *testing.T) {
 	old := realtime.PingInterval
 	realtime.PingInterval = 40 * time.Millisecond
 	t.Cleanup(func() { realtime.PingInterval = old })
@@ -25,10 +26,10 @@ func TestWSPingRestoresPresence(t *testing.T) {
 	ws := h.DialWS(owner)
 	_ = ws
 
-	waitOnline := func() bool {
+	waitVal := func(want string) bool {
 		deadline := time.Now().Add(2 * time.Second)
 		for time.Now().Before(deadline) {
-			if h.RDB.Get(ctx, key).Val() == "online" {
+			if h.RDB.Get(ctx, key).Val() == want {
 				return true
 			}
 			time.Sleep(20 * time.Millisecond)
@@ -36,16 +37,26 @@ func TestWSPingRestoresPresence(t *testing.T) {
 		return false
 	}
 
-	// Wait for the connect-time set to land, so the delete actually removes the
-	// key instead of racing ahead of it.
-	if !waitOnline() {
+	if !waitVal("online") {
 		t.Fatal("presence never went online on connect")
 	}
+
+	// A custom status with a short TTL: pings must refresh that TTL (so the value
+	// survives well past the short TTL) while preserving "away", not clobbering
+	// it to online.
+	if err := h.RDB.Set(ctx, key, "away", 300*time.Millisecond).Err(); err != nil {
+		t.Fatalf("set away: %v", err)
+	}
+	time.Sleep(600 * time.Millisecond) // several 40ms ping cycles, past the TTL
+	if got := h.RDB.Get(ctx, key).Val(); got != "away" {
+		t.Fatalf("ping must refresh a custom status without clobbering it, got %q", got)
+	}
+
+	// After the key vanishes, a ping restores the default online status.
 	if err := h.RDB.Del(ctx, key).Err(); err != nil {
 		t.Fatalf("delete presence: %v", err)
 	}
-	// A transport ping must bring the vanished key back.
-	if !waitOnline() {
-		t.Fatal("ping-driven refresh did not restore presence")
+	if !waitVal("online") {
+		t.Fatal("ping-driven refresh did not restore vanished presence")
 	}
 }
