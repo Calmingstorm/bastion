@@ -462,6 +462,14 @@ func (h *RoleHandler) Update(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// A permission change can flip channel visibility for every member holding
+	// this role; reconcile their live WebSocket subscriptions so a revoked member
+	// stops receiving hidden-channel events without reconnecting.
+	if req.Permissions != nil {
+		members, _ := roleMemberIDs(r.Context(), h.db, serverID, roleID)
+		reconcileMembersSubscriptions(r.Context(), h.db, h.hub, serverID, members)
+	}
+
 	writeJSON(w, http.StatusOK, role)
 }
 
@@ -502,6 +510,11 @@ func (h *RoleHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Capture the members holding this role before the delete cascades their
+	// member_roles rows, so we can reconcile their subscriptions afterward (losing
+	// a role can remove the last grant of ViewChannel).
+	affectedMembers, _ := roleMemberIDs(r.Context(), h.db, serverID, roleID)
+
 	_, err = h.db.Exec(r.Context(),
 		`DELETE FROM roles WHERE id = $1 AND server_id = $2`, roleID, serverID,
 	)
@@ -524,6 +537,8 @@ func (h *RoleHandler) Delete(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 	}
+
+	reconcileMembersSubscriptions(r.Context(), h.db, h.hub, serverID, affectedMembers)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
@@ -597,6 +612,9 @@ func (h *RoleHandler) AssignRole(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 	}
+
+	// Gaining a role can grant ViewChannel; reconcile the member's subscriptions.
+	reconcileServerSubscriptions(r.Context(), h.db, h.hub, targetID, serverID)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "assigned"})
 }
@@ -674,6 +692,9 @@ func (h *RoleHandler) RemoveRole(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 	}
+
+	// Losing a role can remove ViewChannel; reconcile the member's subscriptions.
+	reconcileServerSubscriptions(r.Context(), h.db, h.hub, targetID, serverID)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 }

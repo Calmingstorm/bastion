@@ -132,6 +132,63 @@ func subscribeViewable(ctx context.Context, db *pgxpool.Pool, hub *realtime.Hub,
 	}
 }
 
+// reconcileServerSubscriptions makes a user's live WebSocket subscriptions for a
+// server's channels match what they may currently view. Called after a role
+// change so a member who just lost (or gained) ViewChannel stops (or starts)
+// receiving that channel's realtime events without needing to reconnect.
+func reconcileServerSubscriptions(ctx context.Context, db *pgxpool.Pool, hub *realtime.Hub, userID, serverID uuid.UUID) {
+	if !hub.IsUserOnline(userID) {
+		return
+	}
+	channelIDs, err := getServerChannelIDs(ctx, db, serverID)
+	if err != nil {
+		return
+	}
+	viewable, err := realtime.ViewableChannelIDs(ctx, db, userID)
+	if err != nil {
+		return
+	}
+	view := make(map[uuid.UUID]bool, len(viewable))
+	for _, id := range viewable {
+		view[id] = true
+	}
+	for _, chID := range channelIDs {
+		if view[chID] {
+			hub.SubscribeUser(userID, chID)
+		} else {
+			hub.UnsubscribeUser(userID, chID)
+		}
+	}
+}
+
+// roleMemberIDs returns the user IDs of every member currently holding a role.
+func roleMemberIDs(ctx context.Context, db *pgxpool.Pool, serverID, roleID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := db.Query(ctx,
+		`SELECT user_id FROM member_roles WHERE server_id = $1 AND role_id = $2`, serverID, roleID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// reconcileMembersSubscriptions reconciles live subscriptions for a set of members
+// after a role's permissions change (or the role is deleted), which can flip
+// channel visibility for many members at once.
+func reconcileMembersSubscriptions(ctx context.Context, db *pgxpool.Pool, hub *realtime.Hub, serverID uuid.UUID, memberIDs []uuid.UUID) {
+	for _, uid := range memberIDs {
+		reconcileServerSubscriptions(ctx, db, hub, uid, serverID)
+	}
+}
+
 func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	channelID, err := parseUUID(chi.URLParam(r, "channelID"))
@@ -571,6 +628,12 @@ func (h *MessageHandler) Delete(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you can only delete your own messages"))
 			return
 		}
+	}
+
+	// Deleting (as author or moderator) requires being able to view the channel,
+	// so a member who lost ViewChannel cannot mutate a hidden channel by known ID.
+	if !requireChannelPermission(h.db, w, r, channelID, userID, permissions.ViewChannel) {
+		return
 	}
 
 	_, err = h.db.Exec(r.Context(),
