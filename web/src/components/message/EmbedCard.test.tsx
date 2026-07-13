@@ -23,4 +23,20 @@ describe('EmbedCard', () => {
     );
     expect(container.querySelector('img')).toBeNull();
   });
+
+  it('does not render a thumbnail with a non-http(s) src', () => {
+    const { container } = render(
+      <EmbedCard embed={{ thumbnail: { url: 'javascript:alert(1)' } } as Embed} />
+    );
+    expect(container.querySelector('img')).toBeNull();
+  });
+
+  it('renders a thumbnail with a valid https src', () => {
+    const { container } = render(
+      <EmbedCard embed={{ thumbnail: { url: 'https://example.com/t.png' } } as Embed} />
+    );
+    const img = container.querySelector('img');
+    expect(img).not.toBeNull();
+    expect(img).toHaveAttribute('src', 'https://example.com/t.png');
+  });
 });
