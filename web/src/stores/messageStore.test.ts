@@ -1023,4 +1023,20 @@ describe('messageStore.fetchMessages', () => {
     expect(useMessageStore.getState().hasMore.c1).toBe(true);
     expect(ids()).toEqual(['w0', 'w1', 'w2', 'w3', 'w4']); // nothing prepended (all deleted)
   });
+
+  it('ends pagination on a duplicate page even if a cached row is realtime-deleted mid-fetch', async () => {
+    const window = block('m', LIMIT, 1); // m0..m49, all loaded at request start
+    useMessageStore.setState({ messages: { c1: window }, hasMore: { c1: true } });
+    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
+      // A realtime delete removes a cached row mid-request, so it is absent from the
+      // settlement cache -- but the fetched page still did not advance the cursor
+      // relative to request start.
+      useMessageStore.getState().deleteMessage('c1', 'm10');
+      return desc(window); // the same page we already had
+    });
+    await useMessageStore.getState().fetchMessages('c1', 'm0');
+    // Progress is judged against request-start state, so the deleted row must not
+    // make this all-duplicate page look novel.
+    expect(useMessageStore.getState().hasMore.c1).toBe(false);
+  });
 });
