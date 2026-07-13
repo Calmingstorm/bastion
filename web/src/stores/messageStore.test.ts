@@ -6,6 +6,7 @@ vi.mock('../api/client', () => ({
   apiSendMessage: vi.fn(),
   apiEditMessage: vi.fn(),
   apiDeleteMessage: vi.fn(),
+  linkAbortToSession: vi.fn(() => () => {}),
 }));
 
 import { useMessageStore } from './messageStore';
@@ -499,19 +500,21 @@ describe('messageStore.fetchMessages', () => {
     }
   });
 
-  it('a non-merge load abandoned by the timeout releases its loading state', async () => {
+  it('an abandoned initial load retries so the channel is not left falsely empty', async () => {
     vi.useFakeTimers();
     try {
+      let calls = 0;
+      vi.mocked(client.apiGetMessages).mockImplementation(() => {
+        calls += 1;
+        return new Promise(() => {}); // hangs
+      });
       useMessageStore.setState({ messages: {}, isLoading: {} });
-      const a = deferred<Message[]>();
-      vi.mocked(client.apiGetMessages).mockImplementation(() => a.promise);
-      const aDone = useMessageStore.getState().fetchMessages('c1'); // non-merge -> isLoading true
+      void useMessageStore.getState().fetchMessages('c1'); // initial load, hangs
+      expect(calls).toBe(1);
       expect(useMessageStore.getState().isLoading.c1).toBe(true);
-      vi.advanceTimersByTime(120_001); // abandoned by the protection timeout
-      expect(useMessageStore.getState().isLoading.c1).toBe(false); // spinner released, not hung
-      a.resolve([msg('m1', tISO(1))]); // the late response arrives
-      await aDone;
-      expect(useMessageStore.getState().messages.c1 || []).toEqual([]); // abandoned -> did not commit
+      vi.advanceTimersByTime(120_001); // abandon -> retry (no other trigger reloads an initial load)
+      expect(calls).toBe(2); // retried instead of leaving the channel falsely empty
+      expect(useMessageStore.getState().isLoading.c1).toBe(true); // loading reflects the retry
     } finally {
       vi.useRealTimers();
     }
@@ -569,6 +572,40 @@ describe('messageStore.fetchMessages', () => {
     expect(useMessageStore.getState().error.c1).toBe('Failed to load messages.');
   });
 
+  it('starting a pagination does not clear an existing latest-window error', async () => {
+    useMessageStore.setState({
+      messages: { c1: block('m', LIMIT, 100) },
+      hasMore: { c1: true },
+      error: { c1: 'Failed to load messages.' },
+      errorSeq: { c1: 5 },
+    });
+    vi.mocked(client.apiGetMessages).mockResolvedValue(desc(block('old', LIMIT, 0))); // older page
+    await useMessageStore.getState().fetchMessages('c1', 'm0'); // pagination
+    // Pagination is non-merge but does not establish the latest window, so its start
+    // must not optimistically clear the window's error.
+    expect(useMessageStore.getState().error.c1).toBe('Failed to load messages.');
+  });
+
+  it('an older pagination failure does not overwrite a newer base failure', async () => {
+    useMessageStore.setState({ messages: { c1: block('m', LIMIT, 100) }, hasMore: { c1: true }, error: {} });
+    const p = deferred<Message[]>();
+    const b = deferred<Message[]>();
+    vi.mocked(client.apiGetMessages)
+      .mockImplementationOnce(() => p.promise) // pagination A (seq 1, starts first)
+      .mockImplementationOnce(() => b.promise); // resync B (seq 2)
+    const pDone = useMessageStore.getState().fetchMessages('c1', 'm0'); // A (seq 1)
+    const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true); // B (seq 2, newer)
+    b.reject(new Error('boom')); // B (newer) fails first -> error stamped with B's seq
+    await bDone;
+    const bErrorSeq = useMessageStore.getState().errorSeq.c1; // B's (newer) sequence
+    expect(bErrorSeq).toBeGreaterThan(0);
+    p.reject(new Error('boom')); // A (older) fails afterward
+    await pDone;
+    // A's older failure must not overwrite B's newer error (seq unchanged).
+    expect(useMessageStore.getState().error.c1).toBe('Failed to load messages.');
+    expect(useMessageStore.getState().errorSeq.c1).toBe(bErrorSeq);
+  });
+
   it('a reaction on an absent message does not resurrect it against an empty response', async () => {
     useMessageStore.setState({ messages: { c1: [msg('m1', tISO(1))] }, hasMore: { c1: true } });
     vi.mocked(client.apiGetMessages).mockImplementation(async () => {
@@ -580,24 +617,26 @@ describe('messageStore.fetchMessages', () => {
     expect(ids()).toEqual([]); // a reaction cannot supply a content baseline, so m1 stays gone
   });
 
-  it('abandoning a fetch aborts the request and releases its loading state', async () => {
+  it('a pagination abandoned by the timeout aborts and releases loading without retrying', async () => {
     vi.useFakeTimers();
     try {
       let aborted = false;
-      vi.mocked(client.apiGetMessages).mockImplementation(
-        (_c, _b, _l, signal) =>
-          new Promise((_res, rej) => {
-            signal?.addEventListener('abort', () => {
-              aborted = true;
-              rej(new DOMException('aborted', 'AbortError'));
-            });
-          })
-      );
-      useMessageStore.setState({ messages: {}, isLoading: {} });
-      const done = useMessageStore.getState().fetchMessages('c1'); // non-merge load
+      let calls = 0;
+      vi.mocked(client.apiGetMessages).mockImplementation((_c, _b, _l, signal) => {
+        calls += 1;
+        return new Promise((_res, rej) => {
+          signal?.addEventListener('abort', () => {
+            aborted = true;
+            rej(new DOMException('aborted', 'AbortError'));
+          });
+        });
+      });
+      useMessageStore.setState({ messages: { c1: block('m', LIMIT, 0) }, hasMore: { c1: true }, isLoading: {} });
+      const done = useMessageStore.getState().fetchMessages('c1', 'm0'); // pagination
       vi.advanceTimersByTime(120_001); // protection timeout -> abandon
       expect(aborted).toBe(true); // the HTTP request was cancelled
-      expect(useMessageStore.getState().isLoading.c1).toBe(false); // loading released
+      expect(useMessageStore.getState().isLoading.c1).toBe(false); // loading released (its .then clears loadingOlderRef)
+      expect(calls).toBe(1); // a pagination is NOT auto-retried (the user re-scrolls)
       await done; // and the promise settles (does not hang)
     } finally {
       vi.useRealTimers();

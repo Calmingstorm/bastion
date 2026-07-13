@@ -8,6 +8,7 @@ import apiClient, {
   getRefreshToken,
   setAuthFailureHandler,
   abortInFlightRequests,
+  linkAbortToSession,
 } from './client';
 import { useAuthStore } from '../stores/authStore';
 
@@ -104,28 +105,23 @@ describe('apiClient auth interceptor', () => {
   // cancelled by logout: the interceptor combines the caller's signal with the
   // session signal, so a message GET in flight at logout cannot resolve and write
   // the previous user's data back.
-  it('cancels a caller-signalled request when the session is aborted', async () => {
-    setTokens('access-1', 'refresh-1');
-    let captured: AbortSignal | undefined;
-    const reached = new Promise<void>((res) => {
-      apiClient.defaults.adapter = ((config) => {
-        const sig = config.signal as AbortSignal | undefined;
-        captured = sig;
-        res();
-        return new Promise((_r, reject) => {
-          sig?.addEventListener('abort', () => reject(new Error('aborted')));
-        });
-      }) as AxiosAdapter;
-    });
-    const own = new AbortController(); // the caller's own signal, never aborted here
-    const req = apiClient.get('/channels/c1/messages', { signal: own.signal });
-    req.catch(() => {}); // it rejects on abort; swallow so no unhandled rejection
-
-    await reached;
-    expect(captured?.aborted).toBe(false); // not aborted yet
+  // A caller that supplies its own request signal links it to the session via
+  // linkAbortToSession, so logout still cancels it -- and unlinks on settlement so
+  // a completed request leaves no listener on the long-lived session signal.
+  it('linkAbortToSession cancels a linked controller on logout and unlinks cleanly', () => {
+    const c1 = new AbortController();
+    const unlink1 = linkAbortToSession(c1);
+    expect(c1.signal.aborted).toBe(false);
     abortInFlightRequests(); // as logout does
-    // The adapter saw a COMBINED signal, so the session abort cancels the request
-    // even though the caller supplied its own (un-aborted) signal.
-    expect(captured?.aborted).toBe(true);
+    expect(c1.signal.aborted).toBe(true); // the linked controller was aborted
+
+    // A controller that unlinks (its request settled) is NOT aborted by a later
+    // session abort, and left no listener behind.
+    const c2 = new AbortController();
+    const unlink2 = linkAbortToSession(c2);
+    unlink2(); // request settled
+    abortInFlightRequests();
+    expect(c2.signal.aborted).toBe(false);
+    unlink1();
   });
 });

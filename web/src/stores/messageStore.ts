@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { Message } from '../types';
-import { apiGetMessages, apiSendMessage, apiEditMessage, apiDeleteMessage } from '../api/client';
+import { apiGetMessages, apiSendMessage, apiEditMessage, apiDeleteMessage, linkAbortToSession } from '../api/client';
 import { extractErrorMessage } from '../utils/errors';
 import { eventBus } from '../utils/eventBus';
 
@@ -312,13 +312,13 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       ...(isBase
         ? { maxStartedBaseSeq: { ...s.maxStartedBaseSeq, [channelId]: Math.max(s.maxStartedBaseSeq[channelId] ?? 0, mySeq) } }
         : {}),
-      ...(merge
-        ? {}
-        : {
-            isLoading: { ...s.isLoading, [channelId]: true },
-            error: { ...s.error, [channelId]: null },
-            errorSeq: { ...s.errorSeq, [channelId]: 0 },
-          }),
+      // Both non-merge loads own isLoading, but only an initial load establishes
+      // the latest window, so only it may optimistically clear that window's error.
+      // A pagination (older history) must leave an existing latest-window error be.
+      ...(merge ? {} : { isLoading: { ...s.isLoading, [channelId]: true } }),
+      ...(isBase && !merge
+        ? { error: { ...s.error, [channelId]: null }, errorSeq: { ...s.errorSeq, [channelId]: 0 } }
+        : {}),
     }));
 
     // Backstop: a fetch that never settles must not pin protectFloor forever. After
@@ -328,11 +328,16 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     // release a non-merge load's loading state so the UI doesn't hang.
     let abandoned = false;
     const controller = new AbortController();
+    // Cancel this request on logout too; unlinked in finally so a completed request
+    // leaves no listener on the session signal.
+    const unlinkSession = linkAbortToSession(controller);
     const protectionTimer = setTimeout(() => {
       abandoned = true;
       controller.abort();
+      let stillCurrent = false;
       set((s) => {
         if (sessionEpoch !== startSession) return {};
+        stillCurrent = true;
         const next = { ...s.activeFetches };
         delete next[mySeq];
         return {
@@ -340,6 +345,14 @@ export const useMessageStore = create<MessageState>((set, get) => ({
           ...(merge ? {} : { isLoading: { ...s.isLoading, [channelId]: false } }),
         };
       });
+      // An initial load has no other trigger to reload -- the component effect runs
+      // once per channel -- so a stuck one we abandon must retry itself rather than
+      // leave the channel falsely empty. (isLoading was just cleared, so the retry
+      // is not gated out.) A pagination retries on the next scroll; a resync is a
+      // background refresh whose existing messages remain.
+      if (stillCurrent && isBase && !merge) {
+        void get().fetchMessages(channelId);
+      }
     }, FETCH_PROTECTION_TIMEOUT_MS);
 
     try {
@@ -464,6 +477,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
           // any request older than one that has already committed successfully.
           const superseded =
             mySeq < (s.committedSeq[channelId] ?? 0) ||
+            mySeq < (s.errorSeq[channelId] ?? 0) ||
             (isBase
               ? mySeq < (s.maxStartedBaseSeq[channelId] ?? mySeq)
               : (s.windowEpoch[channelId] ?? 0) !== startEpoch);
@@ -478,8 +492,10 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       }
     } finally {
       // Deregister by unique id on every exit path (the timer backstop may have
-      // done it already; deregister is idempotent and session-guarded).
+      // done it already; deregister is idempotent and session-guarded). Unlink the
+      // session listener so it never outlives the request.
       clearTimeout(protectionTimer);
+      unlinkSession();
       deregister();
     }
   },

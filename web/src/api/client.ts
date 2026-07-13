@@ -41,19 +41,20 @@ const apiClient = axios.create({
 // write the previous user's data back into a freshly-reset store.
 let sessionAbort = new AbortController();
 
-// Combine multiple abort signals into one that fires when any of them do.
-function anySignal(signals: AbortSignal[]): AbortSignal {
-  const AnyCtor = AbortSignal as typeof AbortSignal & { any?: (s: AbortSignal[]) => AbortSignal };
-  if (typeof AnyCtor.any === 'function') return AnyCtor.any(signals);
-  const controller = new AbortController();
-  for (const s of signals) {
-    if (s.aborted) {
-      controller.abort();
-      break;
-    }
-    s.addEventListener('abort', () => controller.abort(), { once: true });
+// Abort `controller` when the current session is aborted (logout), and return an
+// unlink to call once the request settles so the listener never outlives it. This
+// lets a caller that supplies its own request signal (e.g. a per-fetch abort) still
+// be cancelled by logout, without leaking a listener onto the long-lived session
+// signal for a request that completes normally.
+export function linkAbortToSession(controller: AbortController): () => void {
+  const sig = sessionAbort.signal;
+  if (sig.aborted) {
+    controller.abort();
+    return () => {};
   }
-  return controller.signal;
+  const onAbort = () => controller.abort();
+  sig.addEventListener('abort', onAbort);
+  return () => sig.removeEventListener('abort', onAbort);
 }
 
 // sessionEpoch bumps on every logout. The token-refresh call uses the bare
@@ -106,12 +107,12 @@ apiClient.interceptors.request.use(
     if (token && config.headers) {
       config.headers.Authorization = `Bearer ${token}`;
     }
-    // Tie the request to the current session so logout can cancel it. When the
-    // caller supplies its own signal (e.g. a per-fetch abort), combine the two so
-    // BOTH the caller's abort and logout cancel the request.
-    config.signal = config.signal
-      ? anySignal([config.signal as AbortSignal, sessionAbort.signal])
-      : sessionAbort.signal;
+    // Tie a request that has no signal of its own to the current session so logout
+    // can cancel it. A caller that supplies its own signal is expected to link it to
+    // the session itself (see linkAbortToSession) so it can unlink on settlement.
+    if (!config.signal) {
+      config.signal = sessionAbort.signal;
+    }
     return config;
   },
   (error) => Promise.reject(error)
