@@ -98,6 +98,12 @@ export function ChannelList() {
   const [editCategoryName, setEditCategoryName] = useState('');
   const [deletingCategoryId, setDeletingCategoryId] = useState<string | null>(null);
   const editCategoryRef = useRef<HTMLInputElement>(null);
+  // The delete-category confirm is opened from a context menu whose portal holds
+  // focus when the dialog captures it; hand the dialog the category's persistent
+  // trigger to restore focus to. One shared dialog serves every category, so record
+  // the triggering category's button (from this map) when delete is chosen.
+  const categoryTriggerRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const pendingReturnFocusRef = useRef<HTMLElement | null>(null);
 
   const selectedServer = servers.find((s) => s.id === selectedServerId);
   const isOwner = selectedServer && user && selectedServer.ownerId === user.id;
@@ -450,6 +456,9 @@ export function ChannelList() {
                         <ContextMenu.Root>
                           <ContextMenu.Trigger asChild>
                             <button
+                              ref={(el) => {
+                                categoryTriggerRefs.current[cat.id] = el;
+                              }}
                               onClick={() => toggleCategory(cat.id)}
                               className="flex min-w-0 flex-1 items-center gap-1 text-[11px] font-bold uppercase tracking-wide text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
                             >
@@ -485,7 +494,10 @@ export function ChannelList() {
                                 </ContextMenu.Item>
                                 <ContextMenu.Separator className="my-1 h-px bg-[var(--border)]" />
                                 <ContextMenu.Item
-                                  onSelect={() => setDeletingCategoryId(cat.id)}
+                                  onSelect={() => {
+                                    pendingReturnFocusRef.current = categoryTriggerRefs.current[cat.id] ?? null;
+                                    setDeletingCategoryId(cat.id);
+                                  }}
                                   className="flex w-full cursor-default items-center rounded px-2.5 py-1.5 text-sm outline-none text-[var(--danger)] hover:bg-[var(--danger)] hover:text-white"
                                 >
                                   Delete Category
@@ -564,6 +576,7 @@ export function ChannelList() {
         onConfirm={handleDeleteCategory}
         title="Delete Category"
         description="Are you sure you want to delete this category? Channels in this category will become uncategorized."
+        returnFocusRef={pendingReturnFocusRef}
       />
     </div>
   );

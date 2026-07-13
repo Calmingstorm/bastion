@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -54,6 +54,35 @@ function FallbackHarness() {
         }}
         title="Delete Channel"
         description="Are you sure you want to delete this? This cannot be undone."
+      />
+    </>
+  );
+}
+
+// Mimics a menu-launched dialog: the "menu item" that opens the dialog unmounts
+// (like a context-menu portal closing), so the auto-captured opener is gone by
+// close time -- the caller passes a stable returnFocusRef (the persistent trigger).
+function MenuHarness({ removeTriggerOnConfirm = false }: { removeTriggerOnConfirm?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [deleted, setDeleted] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  return (
+    <>
+      <div data-focus-fallback tabIndex={-1}>
+        app
+      </div>
+      {!deleted && <button ref={triggerRef}>persistent trigger</button>}
+      {!open && <button onClick={() => setOpen(true)}>menu item</button>}
+      <ConfirmDialog
+        open={open}
+        onOpenChange={setOpen}
+        onConfirm={() => {
+          if (removeTriggerOnConfirm) setDeleted(true); // deletion removes the trigger too
+          setOpen(false);
+        }}
+        title="Delete Category"
+        description="Are you sure you want to delete this? This cannot be undone."
+        returnFocusRef={triggerRef}
       />
     </>
   );
@@ -158,6 +187,27 @@ describe('ConfirmDialog', () => {
     await user.click(screen.getByRole('button', { name: 'Delete' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     // The opener is gone; focus must land on the app landmark, never <body>.
+    expect(document.activeElement).toBe(document.querySelector('[data-focus-fallback]'));
+  });
+
+  // Menu handoff: the element focused at open time is the (ephemeral) menu item, so
+  // an explicit returnFocusRef -- the menu's persistent trigger -- must win.
+  it('restores focus to returnFocusRef (not the gone menu opener) on a menu-launched dialog', async () => {
+    const user = userEvent.setup();
+    render(<MenuHarness />);
+    await user.click(screen.getByRole('button', { name: 'menu item' })); // opens; the item unmounts
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'persistent trigger' }));
+  });
+
+  it('a menu-launched dialog whose returnFocusRef target is removed on confirm uses the fallback', async () => {
+    const user = userEvent.setup();
+    render(<MenuHarness removeTriggerOnConfirm />);
+    await user.click(screen.getByRole('button', { name: 'menu item' }));
+    await user.click(screen.getByRole('button', { name: 'Delete' })); // removes the trigger too
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(document.activeElement).toBe(document.querySelector('[data-focus-fallback]'));
   });
 });

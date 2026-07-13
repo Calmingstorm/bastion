@@ -1,4 +1,4 @@
-import { useRef, type ReactNode } from 'react';
+import { useRef, type ReactNode, type RefObject } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 
 interface ConfirmDialogProps {
@@ -14,6 +14,14 @@ interface ConfirmDialogProps {
   /** Disables the confirm button and shows pendingLabel while an action is in flight. */
   isPending?: boolean;
   pendingLabel?: string;
+  /**
+   * Explicit, stable element to return focus to on close. Pass this from a caller
+   * that opens the dialog from a menu (e.g. a Radix context menu): by the time the
+   * dialog captures focus, the menu portal that held it has unmounted, so the
+   * auto-captured opener is unreliable -- point this at the menu's persistent
+   * trigger instead. Ordinary button callers omit it and rely on the auto capture.
+   */
+  returnFocusRef?: RefObject<HTMLElement | null>;
 }
 
 /**
@@ -25,10 +33,11 @@ interface ConfirmDialogProps {
  *
  * Focus restoration is handled here rather than by Radix: this is a CONTROLLED
  * dialog with no `Dialog.Trigger`, so Radix's built-in restoration targets an empty
- * internal trigger ref and drops focus to <body>. Instead we capture whatever had
- * focus when the dialog opened (the opener) and restore it on close -- or, if that
- * element is gone (a confirmed deletion removed it), focus the app's
- * `[data-focus-fallback]` landmark so focus never lands on <body>.
+ * internal trigger ref and drops focus to <body>. Instead, on close we return focus
+ * to `returnFocusRef` if the caller gave one (required for menu-launched dialogs --
+ * see that prop), else to the auto-captured opener; and if that target is gone (a
+ * confirmed deletion removed it), to the app's `[data-focus-fallback]` landmark so
+ * focus never lands on <body>.
  */
 export function ConfirmDialog({
   open,
@@ -41,6 +50,7 @@ export function ConfirmDialog({
   destructive = true,
   isPending = false,
   pendingLabel,
+  returnFocusRef,
 }: ConfirmDialogProps) {
   const openerRef = useRef<HTMLElement | null>(null);
   const confirmClasses = destructive
@@ -57,14 +67,15 @@ export function ConfirmDialog({
             openerRef.current = document.activeElement as HTMLElement | null;
           }}
           onCloseAutoFocus={(e) => {
-            // Take over restoration (see the component doc): return focus to the
-            // opener if it is still in the document. If it is gone -- a confirmed
-            // deletion removed the launching control -- fall back to the app's focus
-            // landmark instead of letting focus drop to <body>.
+            // Take over restoration (see the component doc). An explicit
+            // returnFocusRef (menu callers) is authoritative; otherwise use the
+            // auto-captured opener (ordinary buttons). If that target is gone -- a
+            // confirmed deletion removed it -- fall back to the app's focus landmark
+            // rather than letting focus drop to <body>.
             e.preventDefault();
-            const opener = openerRef.current;
-            if (opener && document.contains(opener) && typeof opener.focus === 'function') {
-              opener.focus();
+            const target = returnFocusRef ? returnFocusRef.current : openerRef.current;
+            if (target && document.contains(target) && typeof target.focus === 'function') {
+              target.focus();
               return;
             }
             document.querySelector<HTMLElement>('[data-focus-fallback]')?.focus();

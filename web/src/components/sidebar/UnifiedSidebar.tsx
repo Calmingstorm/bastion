@@ -75,6 +75,10 @@ export function UnifiedSidebar() {
   const [editCategoryName, setEditCategoryName] = useState('');
   const [deletingCategoryId, setDeletingCategoryId] = useState<string | null>(null);
   const editCategoryRef = useRef<HTMLInputElement>(null);
+  // See ChannelList: restore focus to the deleting category's persistent context-menu
+  // trigger (the shared dialog captures the menu portal, which unmounts on close).
+  const categoryTriggerRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const pendingReturnFocusRef = useRef<HTMLElement | null>(null);
 
   // Fetch DMs on mount
   useEffect(() => { fetchDMs(); }, [fetchDMs]);
@@ -611,6 +615,9 @@ export function UnifiedSidebar() {
                                 <ContextMenu.Root>
                                   <ContextMenu.Trigger asChild>
                                     <button
+                                      ref={(el) => {
+                                        categoryTriggerRefs.current[cat.id] = el;
+                                      }}
                                       onClick={() => toggleCategory(cat.id)}
                                       className="flex min-w-0 flex-1 items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
                                     >
@@ -637,7 +644,10 @@ export function UnifiedSidebar() {
                                         </ContextMenu.Item>
                                         <ContextMenu.Separator className="my-1 h-px bg-[var(--border)]" />
                                         <ContextMenu.Item
-                                          onSelect={() => setDeletingCategoryId(cat.id)}
+                                          onSelect={() => {
+                                            pendingReturnFocusRef.current = categoryTriggerRefs.current[cat.id] ?? null;
+                                            setDeletingCategoryId(cat.id);
+                                          }}
                                           className="flex w-full cursor-default items-center rounded px-2.5 py-1.5 text-sm outline-none text-[var(--danger)] hover:bg-[var(--danger)] hover:text-white"
                                         >
                                           Delete Category
@@ -747,6 +757,7 @@ export function UnifiedSidebar() {
         onConfirm={handleDeleteCategory}
         title="Delete Category"
         description="Are you sure you want to delete this category? Channels in this category will become uncategorized."
+        returnFocusRef={pendingReturnFocusRef}
       />
     </div>
   );

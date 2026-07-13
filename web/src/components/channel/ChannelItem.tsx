@@ -22,6 +22,10 @@ export function ChannelItem({ channel, isSelected, onClick, canManage, serverId,
   const [editName, setEditName] = useState(channel.name);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const editRef = useRef<HTMLInputElement>(null);
+  // The delete confirm is opened from the context menu; its portal holds focus when
+  // the dialog captures it, so we hand the dialog this persistent trigger to restore
+  // focus to on Escape/Cancel (on delete the channel unmounts -> app fallback).
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (isEditing && editRef.current) {
@@ -91,6 +95,7 @@ export function ChannelItem({ channel, isSelected, onClick, canManage, serverId,
 
   const channelButton = (
     <button
+      ref={triggerRef}
       onClick={onClick}
       className={`group flex w-full items-center gap-1.5 rounded-[4px] px-2 py-1.5 text-left transition-colors ${
         isSelected
@@ -136,6 +141,7 @@ export function ChannelItem({ channel, isSelected, onClick, canManage, serverId,
           open={showDeleteConfirm}
           onOpenChange={setShowDeleteConfirm}
           onConfirm={handleDelete}
+          returnFocusRef={triggerRef}
           title="Delete Channel"
           description={
             <>
@@ -213,6 +219,7 @@ export function ChannelItem({ channel, isSelected, onClick, canManage, serverId,
         open={showDeleteConfirm}
         onOpenChange={setShowDeleteConfirm}
         onConfirm={handleDelete}
+        returnFocusRef={triggerRef}
         title="Delete Channel"
         description={
           <>
