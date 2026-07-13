@@ -378,15 +378,13 @@ export const useMessageStore = create<MessageState>((set, get) => ({
           }
           const existingIds = new Set(existing.map((m) => m.id));
           const older = reconciledFetched.filter((m) => !existingIds.has(m.id));
+          // Pagination loads OLDER history; it does not refresh the latest window,
+          // so it does NOT touch committedSeq or the load error -- a pagination
+          // success must not suppress or clear a latest-window (base) failure.
           return {
             messages: { ...s.messages, [channelId]: [...older, ...existing] },
             hasMore: { ...s.hasMore, [channelId]: fetched.length === MESSAGE_LIMIT },
             isLoading: { ...s.isLoading, [channelId]: false },
-            committedSeq: { ...s.committedSeq, [channelId]: Math.max(s.committedSeq[channelId] ?? 0, mySeq) },
-            // Clear a raced request's error only if this success is at least as new.
-            ...(mySeq >= (s.errorSeq[channelId] ?? 0)
-              ? { error: { ...s.error, [channelId]: null }, errorSeq: { ...s.errorSeq, [channelId]: 0 } }
-              : {}),
           };
         }
 

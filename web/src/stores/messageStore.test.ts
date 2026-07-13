@@ -551,6 +551,24 @@ describe('messageStore.fetchMessages', () => {
     expect(useMessageStore.getState().error.c1).toBeFalsy(); // A's failure did not overwrite B's newer success
   });
 
+  it('a newer pagination success does not suppress a resync failure', async () => {
+    useMessageStore.setState({ messages: { c1: block('old', LIMIT, 50) }, hasMore: { c1: true }, error: {} });
+    const b = deferred<Message[]>();
+    const p = deferred<Message[]>();
+    vi.mocked(client.apiGetMessages)
+      .mockImplementationOnce(() => b.promise) // resync B (base, seq 1, started first)
+      .mockImplementationOnce(() => p.promise); // pagination A (seq 2)
+    const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true); // resync (seq 1)
+    const pDone = useMessageStore.getState().fetchMessages('c1', 'old0'); // pagination (seq 2, newer)
+    p.resolve(desc(block('p', LIMIT, 0))); // pagination succeeds first
+    await pDone;
+    b.reject(new Error('boom')); // resync fails afterward
+    await bDone;
+    // Pagination loads older history; it cannot refresh the latest window, so its
+    // success must not suppress the resync's genuine latest-window failure.
+    expect(useMessageStore.getState().error.c1).toBe('Failed to load messages.');
+  });
+
   it('a reaction on an absent message does not resurrect it against an empty response', async () => {
     useMessageStore.setState({ messages: { c1: [msg('m1', tISO(1))] }, hasMore: { c1: true } });
     vi.mocked(client.apiGetMessages).mockImplementation(async () => {
