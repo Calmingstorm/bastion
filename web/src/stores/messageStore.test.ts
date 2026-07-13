@@ -420,4 +420,56 @@ describe('messageStore.fetchMessages', () => {
     const patches = useMessageStore.getState().journal['m1']?.reactions.length ?? 0;
     expect(patches).toBeLessThanOrEqual(1); // compacted -- not one-per-reaction
   });
+
+  it('reaction patches stay bounded even while a fetch holds the protection floor', async () => {
+    useMessageStore.setState({ messages: { c1: [msg('m1', tISO(1))] }, hasMore: { c1: false } });
+    const b = deferred<Message[]>();
+    vi.mocked(client.apiGetMessages).mockImplementation(() => b.promise);
+    const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true); // held -> pins protectFloor low
+    for (let i = 0; i < 2000; i++) useMessageStore.getState().addReaction('c1', 'm1', '👍', `u${i}`);
+    expect((useMessageStore.getState().journal['m1']?.reactions.length ?? 0)).toBeLessThanOrEqual(500); // hard cap
+    b.resolve([msg('m1', tISO(1))]);
+    await bDone;
+  });
+
+  // --- Full creates reconcile whole, not as partial edits ------------------
+
+  it('a full realtime create during a resync keeps its attachments and reply metadata', async () => {
+    useMessageStore.setState({ messages: { c1: [] }, hasMore: { c1: false } });
+    const fullCreate = {
+      ...msg('m9', tISO(9), 'hi'),
+      attachments: [
+        { id: 'a1', messageId: 'm9', filename: 'f.png', storedName: 's', contentType: 'image/png', size: 1, url: '/u', createdAt: tISO(9) },
+      ],
+      replyTo: { id: 'r1', content: 'parent', author: { id: 'u3' } },
+    } as Message;
+    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
+      useMessageStore.getState().addMessage('c1', fullCreate); // full MESSAGE_CREATE during the fetch
+      return [msg('m9', tISO(9), 'hi')]; // the fetched copy lacks attachments/replyTo
+    });
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+    const m = useMessageStore.getState().messages.c1.find((x) => x.id === 'm9')!;
+    expect(m.attachments?.length).toBe(1); // not merged away as if it were a partial edit
+    expect(m.replyTo?.id).toBe('r1');
+  });
+
+  // --- A successful commit clears a stale error ----------------------------
+
+  it('a successful resync clears a stale error from a failed pagination', async () => {
+    useMessageStore.setState({ messages: { c1: block('old', LIMIT, 50) }, hasMore: { c1: true } });
+    const p = deferred<Message[]>();
+    const b = deferred<Message[]>();
+    vi.mocked(client.apiGetMessages)
+      .mockImplementationOnce(() => p.promise) // pagination
+      .mockImplementationOnce(() => b.promise); // resync (starts before the pagination fails)
+
+    const pDone = useMessageStore.getState().fetchMessages('c1', 'old0'); // pagination (epoch 0)
+    const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true); // resync starts, epoch still 0
+    p.reject(new Error('network')); // pagination fails before the resync commits -> writes an error
+    await pDone;
+    expect(useMessageStore.getState().error).toBe('Failed to load messages.');
+    b.resolve(desc(block('n', LIMIT, 200))); // resync commits fresh state
+    await bDone;
+    expect(useMessageStore.getState().error).toBeNull(); // the successful commit cleared it
+  });
 });

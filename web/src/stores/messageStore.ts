@@ -66,6 +66,7 @@ type JournalEntry = {
   ts: number;
   contentVer: number; // version of the latest content op (0 = none yet)
   content?: Message; // latest content baseline
+  fullContent: boolean; // true if the latest content op was a full create (vs a partial edit)
   deletedVer: number; // version of a delete op (0 = not deleted)
   reactions: ReactionPatch[]; // version-stamped reaction patches, in version order
 };
@@ -75,6 +76,16 @@ let fetchSeq = 0;
 let sessionEpoch = 0;
 const RECENT_MAX_AGE_MS = 60000;
 const RECENT_CAP = 5000;
+// Hard cap on reaction patches per message id. Patches only bridge the race window
+// between a fetch response being generated and the client applying it, so a
+// generous cap always covers the real need; it bounds memory even while a fetch
+// holds protectFloor low under reaction churn.
+const MAX_PATCHES_PER_ENTRY = 500;
+// A fetch that never settles (no request timeout on the client) would pin
+// protectFloor forever; after this long we drop its journal protection so pruning
+// can proceed. Set well beyond RECENT_MAX_AGE_MS so it only releases genuinely
+// stuck fetches -- a real fetch resolves in a few seconds.
+const FETCH_PROTECTION_TIMEOUT_MS = 120000;
 
 // nowMs is wrapped so pruning is deterministic under fake timers in tests.
 function nowMs(): number {
@@ -117,10 +128,14 @@ function mergeEditFields(base: Message, update: Message): Message {
 // Returns null if the message was deleted after start (and not recreated).
 function reconcile(entry: JournalEntry, fetched: Message, startVer: number): Message | null {
   if (entry.deletedVer > startVer && entry.deletedVer > entry.contentVer) return null;
-  // A realtime content op newer than the fetch overrides only its content-bearing
-  // fields; reactions/reply/attachments stay from the fetched baseline. Then layer
-  // on realtime reaction patches recorded after the fetch started.
-  let content = entry.contentVer > startVer && entry.content ? mergeEditFields(fetched, entry.content) : fetched;
+  // A realtime content op newer than the fetch supersedes it: a full create
+  // replaces the whole message (it is complete); a partial edit overrides only its
+  // content-bearing fields, keeping reactions/reply/attachments from the fetched
+  // baseline. Then layer on realtime reaction patches recorded after fetch start.
+  let content = fetched;
+  if (entry.contentVer > startVer && entry.content) {
+    content = entry.fullContent ? entry.content : mergeEditFields(fetched, entry.content);
+  }
   for (const p of entry.reactions) {
     if (p.ver > startVer) content = applyReaction(content, p.emoji, p.userId, p.op);
   }
@@ -130,6 +145,15 @@ function reconcile(entry: JournalEntry, fetched: Message, startVer: number): Mes
 function protectFloorOf(activeFetches: Record<number, number>): number {
   const vers = Object.values(activeFetches);
   return vers.length ? Math.min(...vers) : Infinity;
+}
+
+// Keep only reaction patches an in-flight fetch could still replay (ver >
+// protectFloor -- older ones are already in every active fetch's baseline), then
+// hard-cap the survivors so churn while a fetch is held cannot grow the list
+// without bound.
+function boundPatches(patches: ReactionPatch[], protectFloor: number): ReactionPatch[] {
+  const kept = patches.filter((p) => p.ver > protectFloor);
+  return kept.length > MAX_PATCHES_PER_ENTRY ? kept.slice(kept.length - MAX_PATCHES_PER_ENTRY) : kept;
 }
 
 // Prune journal entries by age and size, but never one an active fetch may still
@@ -158,20 +182,22 @@ function recordUpsert(
   journal: Record<string, JournalEntry>,
   id: string,
   message: Message,
-  protectFloor: number
+  protectFloor: number,
+  full: boolean
 ): Record<string, JournalEntry> {
   journalVer += 1;
   const prev = journal[id];
   // A content op sets a new baseline but PRESERVES accumulated reaction patches
   // (a content edit must not drop a reaction) and clears any prior tombstone.
+  // `full` marks a create (whole message) vs an edit (content-bearing fields only).
   const next: JournalEntry = {
     ver: journalVer,
     ts: nowMs(),
     contentVer: journalVer,
     content: message,
+    fullContent: full,
     deletedVer: 0,
-    // Keep only patches an in-flight fetch could still need (see recordReaction).
-    reactions: (prev?.reactions || []).filter((p) => p.ver > protectFloor),
+    reactions: boundPatches(prev?.reactions || [], protectFloor),
   };
   return pruneJournal({ ...journal, [id]: next }, protectFloor);
 }
@@ -186,6 +212,7 @@ function recordDelete(
     ver: journalVer,
     ts: nowMs(),
     contentVer: 0,
+    fullContent: false,
     deletedVer: journalVer,
     reactions: [],
   };
@@ -204,21 +231,17 @@ function recordReaction(
   // A reaction to an already-deleted message is meaningless -- keep the tombstone.
   if (prev && prev.deletedVer > prev.contentVer) return journal;
   journalVer += 1;
-  // Compact the patch list: a patch with ver <= protectFloor is older than every
-  // in-flight fetch's start, so no active fetch will replay it (it is already in
-  // their fetched baselines) -- drop it. This bounds one entry's patch list to the
-  // active-fetch window, so reaction churn can't grow it without bound (with no
-  // active fetch, protectFloor is Infinity and the list collapses entirely).
-  const kept = (prev?.reactions || []).filter((p) => p.ver > protectFloor);
-  const nextPatch: ReactionPatch = { ver: journalVer, emoji, userId, op };
-  const reactions = journalVer > protectFloor ? [...kept, nextPatch] : kept;
+  // boundPatches drops patches older than every in-flight fetch's start (already
+  // in their baselines) and hard-caps the survivors. With no active fetch,
+  // protectFloor is Infinity and the list collapses to empty.
   const next: JournalEntry = {
     ver: journalVer,
     ts: nowMs(),
     contentVer: prev?.contentVer ?? 0,
     content: prev?.content,
+    fullContent: prev?.fullContent ?? false,
     deletedVer: prev?.deletedVer ?? 0,
-    reactions,
+    reactions: boundPatches([...(prev?.reactions || []), { ver: journalVer, emoji, userId, op }], protectFloor),
   };
   return pruneJournal({ ...journal, [id]: next }, protectFloor);
 }
@@ -267,6 +290,14 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     const startEpoch = state.windowEpoch[channelId] ?? 0;
     const startSession = sessionEpoch;
 
+    const deregister = () =>
+      set((s) => {
+        if (sessionEpoch !== startSession || !(mySeq in s.activeFetches)) return {};
+        const next = { ...s.activeFetches };
+        delete next[mySeq];
+        return { activeFetches: next };
+      });
+
     set((s) => ({
       activeFetches: { ...s.activeFetches, [mySeq]: startVer },
       ...(isBase
@@ -274,6 +305,11 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         : {}),
       ...(merge ? {} : { isLoading: { ...s.isLoading, [channelId]: true }, error: null }),
     }));
+
+    // Backstop: a fetch that never settles must not pin protectFloor forever, so
+    // drop its journal protection after a bounded lifetime (it self-heals on the
+    // next resync if it later commits against a compacted journal).
+    const protectionTimer = setTimeout(deregister, FETCH_PROTECTION_TIMEOUT_MS);
 
     try {
       const rawFetched = await apiGetMessages(channelId, before, MESSAGE_LIMIT);
@@ -309,6 +345,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
             messages: { ...s.messages, [channelId]: [...older, ...existing] },
             hasMore: { ...s.hasMore, [channelId]: fetched.length === MESSAGE_LIMIT },
             isLoading: { ...s.isLoading, [channelId]: false },
+            error: null, // a successful commit clears any stale error from a raced request
           };
         }
 
@@ -361,6 +398,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         return {
           messages: { ...s.messages, [channelId]: sortMessages(Array.from(result.values())) },
           hasMore: { ...s.hasMore, [channelId]: newHasMore },
+          error: null, // a successful commit clears any stale error from a raced request
           ...(epochAdvanced
             ? { windowEpoch: { ...s.windowEpoch, [channelId]: (s.windowEpoch[channelId] ?? 0) + 1 } }
             : {}),
@@ -385,16 +423,10 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         });
       }
     } finally {
-      // Deregister by unique id on every exit path; a reset already cleared the
-      // registry, so skip touching the new session.
-      if (sessionEpoch === startSession) {
-        set((s) => {
-          if (!(mySeq in s.activeFetches)) return {};
-          const next = { ...s.activeFetches };
-          delete next[mySeq];
-          return { activeFetches: next };
-        });
-      }
+      // Deregister by unique id on every exit path (the timer backstop may have
+      // done it already; deregister is idempotent and session-guarded).
+      clearTimeout(protectionTimer);
+      deregister();
     }
   },
 
@@ -436,7 +468,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
   addMessage: (channelId: string, message: Message) => {
     set((state) => {
       const existing = state.messages[channelId] || [];
-      const journal = recordUpsert(state.journal, message.id, message, protectFloorOf(state.activeFetches));
+      const journal = recordUpsert(state.journal, message.id, message, protectFloorOf(state.activeFetches), true);
       if (existing.some((m) => m.id === message.id)) return { journal };
       return { journal, messages: { ...state.messages, [channelId]: [...existing, message] } };
     });
@@ -446,7 +478,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     set((state) => {
       const existing = state.messages[channelId];
       return {
-        journal: recordUpsert(state.journal, message.id, message, protectFloorOf(state.activeFetches)),
+        journal: recordUpsert(state.journal, message.id, message, protectFloorOf(state.activeFetches), false),
         // A live edit is partial (content-only); merge its fields so the loaded
         // copy keeps its reactions/reply/attachments.
         messages: existing
