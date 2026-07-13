@@ -45,10 +45,11 @@ func TestSubscriptionMutationsAreSynchronous(t *testing.T) {
 	channelID := uuid.New()
 	client := newDroppingClient(userID)
 
-	// Connect: register + subscribe atomically, visible immediately.
-	hub.RegisterAndSubscribe(client, []uuid.UUID{channelID})
+	// Connect: register + subscribe, visible immediately.
+	hub.RegisterUser(client)
+	hub.Subscribe(channelID, client)
 	if !channelHas(hub, channelID, client) {
-		t.Fatal("client should be subscribed immediately after RegisterAndSubscribe")
+		t.Fatal("client should be subscribed immediately after Subscribe")
 	}
 
 	// Revoke: unsubscribe synchronously, visible immediately.
@@ -83,7 +84,8 @@ func TestConcurrentSubscribeRevokeNoResurrection(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			hub.RegisterAndSubscribe(client, []uuid.UUID{channelID})
+			hub.RegisterUser(client)
+			hub.Subscribe(channelID, client)
 		}()
 		go func() {
 			defer wg.Done()
@@ -98,6 +100,46 @@ func TestConcurrentSubscribeRevokeNoResurrection(t *testing.T) {
 			t.Fatalf("iteration %d: client survived a final revocation", i)
 		}
 		hub.UnsubscribeAll(client)
+	}
+}
+
+// TestConnectRevalidatesStaleSnapshot models the residual race: a connection reads
+// a stale viewable snapshot, a revocation commits and reconciles while the
+// connecting client is not yet subscribed, and the connect then applies the stale
+// snapshot. The revalidation loop must detect the raced revocation via the
+// generation bump and re-read, so the client does NOT end subscribed to the
+// revoked channel — and crucially without a second unconditional revocation
+// papering over the assertion.
+func TestConnectRevalidatesStaleSnapshot(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	userID := uuid.New()
+	revokedChannel := uuid.New()
+	client := newDroppingClient(userID)
+
+	calls := 0
+	_, err := hub.ConnectClient(client, func() ([]uuid.UUID, error) {
+		calls++
+		if calls == 1 {
+			// A revocation commits + reconciles right after we read the (stale)
+			// snapshot but before the connect checks the generation. The client is
+			// registered but not yet subscribed, so the reconcile's UnsubscribeUser
+			// is a no-op on the channel — only the generation bump records it.
+			hub.UnsubscribeUser(userID, revokedChannel)
+			return []uuid.UUID{revokedChannel}, nil // stale: still lists the channel
+		}
+		return nil, nil // fresh read: the channel is no longer viewable
+	})
+	if err != nil {
+		t.Fatalf("ConnectClient: %v", err)
+	}
+	if calls < 2 {
+		t.Fatalf("expected revalidation to re-read viewability, got %d read(s)", calls)
+	}
+	if channelHas(hub, revokedChannel, client) {
+		t.Fatal("stale pre-revocation snapshot resurrected channel access after reconciliation")
 	}
 }
 

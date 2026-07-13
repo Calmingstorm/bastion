@@ -86,18 +86,18 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, userID uuid.UUID,
 		rdb:    rdb,
 	}
 
-	// Subscribe to all channels the user has access to
-	channelIDs, err := ViewableChannelIDs(r.Context(), db, userID)
+	// Register the user and subscribe to their viewable channels, revalidating if
+	// a permission revocation races the viewability read — otherwise a stale
+	// pre-revocation snapshot could install a subscription that survives the
+	// revocation's reconciliation indefinitely.
+	channelIDs, err := hub.ConnectClient(client, func() ([]uuid.UUID, error) {
+		return ViewableChannelIDs(r.Context(), db, userID)
+	})
 	if err != nil {
 		log.Error().Err(err).Str("userID", userID.String()).Msg("failed to get user channels")
 		conn.Close(websocket.StatusInternalError, "failed to load channels")
 		return
 	}
-
-	// Register the user and subscribe to their viewable channels in one locked
-	// section, so a concurrent revocation cannot observe the client as registered
-	// but not yet subscribed (or vice versa) and leave a stale subscription.
-	hub.RegisterAndSubscribe(client, channelIDs)
 
 	log.Info().
 		Str("userID", userID.String()).

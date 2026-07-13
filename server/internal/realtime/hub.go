@@ -2,6 +2,7 @@ package realtime
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -21,6 +22,12 @@ type Hub struct {
 
 	broadcastCh chan broadcastMessage
 	stopCh      chan struct{}
+
+	// revGen increments on every revocation (UnsubscribeUser). A connecting
+	// client samples it before reading its viewable channels and again after
+	// subscribing; a change means a revocation raced the read, so the connect
+	// path re-reads and reconciles rather than leave a stale subscription.
+	revGen atomic.Uint64
 }
 
 func NewHub() *Hub {
@@ -127,28 +134,77 @@ func (h *Hub) RegisterUser(client *Client) {
 	clients[client] = struct{}{}
 }
 
-// RegisterAndSubscribe registers a newly connected client and subscribes it to
-// the given channels in a single locked section. Doing both atomically means a
-// concurrent revocation can only observe the client as fully connected or not at
-// all — it can never slip between "registered" and "subscribed" and miss the
-// client, which would otherwise let a stale subscription survive.
-func (h *Hub) RegisterAndSubscribe(client *Client, channelIDs []uuid.UUID) {
+// ReconcileGen returns the current revocation generation. A connect that samples
+// it before reading viewability and sees the same value after subscribing knows
+// no revocation raced it.
+func (h *Hub) ReconcileGen() uint64 {
+	return h.revGen.Load()
+}
+
+// ResubscribeClient adjusts a single client's channel membership from oldChannels
+// to newChannels in one locked section (subscribe the additions, unsubscribe the
+// removals). Used by the connect revalidation loop to converge on the current
+// viewable set without a subscribe/unsubscribe flicker.
+func (h *Hub) ResubscribeClient(client *Client, oldChannels, newChannels []uuid.UUID) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	users, ok := h.users[client.userID]
-	if !ok {
-		users = make(map[*Client]struct{})
-		h.users[client.userID] = users
+	newSet := make(map[uuid.UUID]struct{}, len(newChannels))
+	for _, ch := range newChannels {
+		newSet[ch] = struct{}{}
 	}
-	users[client] = struct{}{}
-	for _, channelID := range channelIDs {
-		set, ok := h.channels[channelID]
+	oldSet := make(map[uuid.UUID]struct{}, len(oldChannels))
+	for _, ch := range oldChannels {
+		oldSet[ch] = struct{}{}
+	}
+	for ch := range newSet {
+		if _, had := oldSet[ch]; had {
+			continue
+		}
+		set, ok := h.channels[ch]
 		if !ok {
 			set = make(map[*Client]struct{})
-			h.channels[channelID] = set
+			h.channels[ch] = set
 		}
 		set[client] = struct{}{}
 	}
+	for ch := range oldSet {
+		if _, keep := newSet[ch]; keep {
+			continue
+		}
+		if set, ok := h.channels[ch]; ok {
+			delete(set, client)
+			if len(set) == 0 {
+				delete(h.channels, ch)
+			}
+		}
+	}
+}
+
+// ConnectClient registers a newly connected client and subscribes it to its
+// viewable channels, revalidating if a revocation races the viewability read so a
+// stale pre-revocation snapshot cannot install a persistent subscription. The
+// client is registered first, so any revocation that commits after the final read
+// reconciles it directly; any that commits during a read bumps the generation and
+// forces a re-read. readViewable returns the caller's current viewable channels.
+func (h *Hub) ConnectClient(client *Client, readViewable func() ([]uuid.UUID, error)) ([]uuid.UUID, error) {
+	h.RegisterUser(client)
+	var applied []uuid.UUID
+	// The bound is a safety valve against pathological revocation floods; the
+	// registered-client reconcile is the backstop if it is ever hit. Real connects
+	// converge in one or two iterations.
+	for i := 0; i < 8; i++ {
+		gen := h.ReconcileGen()
+		viewable, err := readViewable()
+		if err != nil {
+			return nil, err
+		}
+		h.ResubscribeClient(client, applied, viewable)
+		applied = viewable
+		if h.ReconcileGen() == gen {
+			break
+		}
+	}
+	return applied, nil
 }
 
 // GetClientChannels returns all channel IDs a client is currently subscribed to.
@@ -188,6 +244,11 @@ func (h *Hub) SubscribeUser(userID, channelID uuid.UUID) {
 // synchronously, so no broadcast issued after this returns can still reach the
 // user on that channel.
 func (h *Hub) UnsubscribeUser(userID, channelID uuid.UUID) {
+	// Signal a revocation to any in-flight connect revalidation, even if the user
+	// has no clients or no subscription right now — a client may be mid-connect
+	// with a snapshot that predates this call.
+	h.revGen.Add(1)
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	clients, ok := h.users[userID]
