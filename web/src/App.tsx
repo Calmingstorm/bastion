@@ -1,9 +1,8 @@
 import { useEffect, useState, Component } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
-import { BrowserRouter, HashRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+import { BrowserRouter, HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from './stores/authStore';
-import { setAuthFailureHandler } from './api/client';
-import { resetAllStores } from './stores/resetAll';
+import { AuthFailureBridge } from './components/AuthFailureBridge';
 import { isTauri, isDesktopReady, isMobileReady, getPlatform } from './platform';
 import { LoginPage } from './pages/LoginPage';
 import { RegisterPage } from './pages/RegisterPage';
@@ -15,22 +14,6 @@ import { InvitePage } from './pages/InvitePage';
 
 // Import theme store so it initializes and applies the saved theme on load
 import './stores/themeStore';
-
-// AuthFailureBridge wires the api client's auth-failure callback to router
-// navigation. Rendered inside the router so useNavigate works — and so a
-// terminal auth failure routes to /login (working under both BrowserRouter and
-// Tauri's HashRouter) instead of the default hard window.location redirect,
-// which breaks the desktop/mobile shells. It also clears per-user stores.
-function AuthFailureBridge() {
-  const navigate = useNavigate();
-  useEffect(() => {
-    setAuthFailureHandler(() => {
-      resetAllStores();
-      navigate('/login', { replace: true });
-    });
-  }, [navigate]);
-  return null;
-}
 
 class ErrorBoundary extends Component<
   { children: ReactNode },

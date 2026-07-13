@@ -35,6 +35,19 @@ const apiClient = axios.create({
   },
 });
 
+// A per-session AbortController whose signal is attached to every request.
+// Logout aborts it, cancelling all in-flight requests at once — otherwise a
+// response already underway when the user logs out could resolve afterward and
+// write the previous user's data back into a freshly-reset store.
+let sessionAbort = new AbortController();
+
+// abortInFlightRequests cancels every request currently in flight and starts a
+// fresh session signal for subsequent requests. Called on logout.
+export function abortInFlightRequests(): void {
+  sessionAbort.abort();
+  sessionAbort = new AbortController();
+}
+
 function getAccessToken(): string | null {
   return storage.getItem('accessToken');
 }
@@ -69,6 +82,10 @@ apiClient.interceptors.request.use(
     const token = getAccessToken();
     if (token && config.headers) {
       config.headers.Authorization = `Bearer ${token}`;
+    }
+    // Tie the request to the current session so logout can cancel it.
+    if (!config.signal) {
+      config.signal = sessionAbort.signal;
     }
     return config;
   },

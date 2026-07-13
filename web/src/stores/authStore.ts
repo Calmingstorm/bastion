@@ -6,6 +6,7 @@ import {
   apiGetMe,
   setTokens as persistTokens,
   clearTokens,
+  abortInFlightRequests,
 } from '../api/client';
 import { extractErrorMessage } from '../utils/errors';
 import { storage } from '../utils/storage';
@@ -81,6 +82,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   logout: () => {
+    // Cancel in-flight requests first, so a response already underway cannot
+    // resolve after the reset and repopulate a store with the old user's data.
+    abortInFlightRequests();
     clearTokens();
     set({
       user: null,
