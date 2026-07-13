@@ -79,6 +79,10 @@ func validateEmbeds(embeds []models.Embed) error {
 }
 
 // isHTTPURL reports whether s parses as an http or https URL.
+// isHTTPURL reports whether s is a syntactically valid absolute http(s) URL with
+// a host. A bare scheme ("http:", "https://"), an opaque value
+// ("https:javascript:alert(1)"), or a hostless path is rejected — only a real
+// http(s) target passes.
 func isHTTPURL(s string) bool {
 	u, err := url.Parse(strings.TrimSpace(s))
 	if err != nil {
@@ -86,7 +90,7 @@ func isHTTPURL(s string) bool {
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "http", "https":
-		return true
+		return u.Host != ""
 	default:
 		return false
 	}

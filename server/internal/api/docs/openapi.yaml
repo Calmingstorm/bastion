@@ -1624,11 +1624,12 @@ components:
           description: Message content (required if no embeds)
         username:
           type: string
-          description: Override the webhook's display name for this message (persisted as authorOverride)
+          maxLength: 80
+          description: Override the webhook's display name for this message (trimmed, max 80 chars; persisted as authorOverride)
         avatarUrl:
           type: string
           format: uri
-          description: Override the webhook's avatar for this message (persisted as authorOverride)
+          description: Override the webhook's avatar for this message; must be an http(s) URL (persisted as authorOverride)
         embeds:
           type: array
           items:
@@ -2304,11 +2305,13 @@ components:
       properties:
         content:
           type: string
-          description: Message content
+          maxLength: 4000
+          description: Message content (required if no embeds)
         embeds:
           type: array
           items:
             $ref: '#/components/schemas/Embed'
+          maxItems: 10
         ephemeral:
           type: boolean
           description: "If true, only the invoking user sees this response (not stored in DB)"
