@@ -117,10 +117,10 @@ func (h *BotHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	var bot models.Bot
 	err = h.db.QueryRow(r.Context(),
-		`INSERT INTO bots (server_id, creator_id, user_id, token_hash, token_hint, description)
-		 VALUES ($1, $2, $3, $4, $5, $6)
+		`INSERT INTO bots (server_id, creator_id, user_id, token_hash, token_hint, token_lookup, description)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 RETURNING id, server_id, creator_id, user_id, token_hint, description, created_at, updated_at`,
-		serverID, userID, botUserID, tokenHash, tokenHint, req.Description,
+		serverID, userID, botUserID, tokenHash, tokenHint, auth.BotTokenDigest(token), req.Description,
 	).Scan(&bot.ID, &bot.ServerID, &bot.CreatorID, &bot.UserID,
 		&bot.TokenHint, &bot.Description, &bot.CreatedAt, &bot.UpdatedAt)
 	if err != nil {
@@ -391,10 +391,12 @@ func (h *BotHandler) RegenerateToken(w http.ResponseWriter, r *http.Request) {
 
 	tokenHint := token[len(token)-8:]
 
+	// Overwrite the digest together with the hash and hint so the previous
+	// token's fast-path lookup is invalidated in the same statement.
 	_, err = h.db.Exec(r.Context(),
-		`UPDATE bots SET token_hash = $1, token_hint = $2, updated_at = NOW()
-		 WHERE id = $3`,
-		tokenHash, tokenHint, botID,
+		`UPDATE bots SET token_hash = $1, token_hint = $2, token_lookup = $3, updated_at = NOW()
+		 WHERE id = $4`,
+		tokenHash, tokenHint, auth.BotTokenDigest(token), botID,
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to regenerate bot token")
