@@ -9,8 +9,8 @@ interface MessageState {
   hasMore: Record<string, boolean>;
   // Internal reconnect-reconciliation bookkeeping (see the block comment below).
   journal: Record<string, JournalEntry>;
-  activeFetchVers: number[];
-  appliedBaseSeq: Record<string, number>;
+  activeFetches: Record<number, number>;
+  maxStartedBaseSeq: Record<string, number>;
   windowEpoch: Record<string, number>;
   isLoading: Record<string, boolean>;
   error: string | null;
@@ -33,34 +33,41 @@ const MESSAGE_LIMIT = 50;
 // --- Reconnect reconciliation model --------------------------------------------
 //
 // Reconciling a fetched page against realtime changes that raced it is a real
-// distributed-systems problem. The load-bearing idea is that PROVENANCE, not
-// object identity, decides who wins: a fetch write and a realtime write both
-// produce new objects, so identity cannot tell them apart.
+// distributed-systems problem. PROVENANCE, not object identity, decides who wins:
+// a fetch write and a realtime write both produce new objects.
 //
-// journal: a per-message-id log of realtime/local MUTATIONS (create/update ->
-//   upsert; delete -> tombstone; reaction add/remove -> an ordered, idempotent,
-//   set-based patch applied on top of a baseline). Every mutation bumps the
-//   monotonic journalVer. A fetch commit NEVER writes the journal, so a fetched
-//   copy can never masquerade as a mutation. "Changed during this fetch" == a
-//   journal entry with ver > the journalVer captured at the fetch's start.
-// fetchSeq: a separate monotonic clock ticking once per fetch START, used only to
-//   order competing latest-window fetches (initial load / resync).
-// windowEpoch: per channel, bumped whenever a base response REPLACES the cache or
-//   declares a no-overlap gap. A pagination that started against an older epoch is
-//   discarded so it cannot splice a stale history segment back in.
-// sessionEpoch: bumped by reset(); a response begun before a reset cannot commit.
-// activeFetchVers: start versions of every in-flight fetch; pruning may never drop
-//   a journal entry newer than the earliest of these (a slow fetch still needs it).
-type ReactionPatch = { emoji: string; userId: string; op: 'add' | 'remove' };
+// journal: a per-message-id record of realtime/local MUTATIONS, composed so that
+//   content and reactions are INDEPENDENT dimensions (a content edit must not drop
+//   a reaction; a reaction must not revert a content edit):
+//     - content (create/update) sets a version-stamped baseline;
+//     - delete sets a version-stamped tombstone;
+//     - reaction add/remove append version-stamped, set-based, idempotent patches.
+//   Every mutation bumps the monotonic journalVer. A fetch commit NEVER writes the
+//   journal, so a fetched copy can't masquerade as a mutation. Reconciling a
+//   fetched message m at fetch-start version V: if a content op has ver > V its
+//   baseline supersedes m's content (else m's content stands), then every reaction
+//   patch with ver > V is layered on top; a tombstone newer than V (and any
+//   content op) drops it.
+// fetchSeq: a monotonic clock ticking once per fetch START. mySeq identifies a
+//   fetch uniquely (deregistration) and orders competing latest-window fetches.
+// maxStartedBaseSeq: per channel, the highest base-fetch seq that has STARTED. A
+//   base fetch may commit only if it is still the newest-started one, so an
+//   earlier-started response that resolves late cannot commit stale data.
+// windowEpoch: per channel, bumped when a base commit replaces the cache or
+//   declares a no-overlap gap; a pagination started against an older epoch is
+//   discarded so it can't splice a stale history segment back in.
+// sessionEpoch: bumped by reset(); no path of a request begun earlier may touch
+//   the new session (commit, error, or deregistration).
+// activeFetches: keyed by unique mySeq -> the fetch's start version. Pruning may
+//   never drop a journal entry newer than the earliest active fetch's version.
+type ReactionPatch = { ver: number; emoji: string; userId: string; op: 'add' | 'remove' };
 type JournalEntry = {
-  ver: number;
+  ver: number; // max version recorded (pruning/protection ordering)
   ts: number;
-  kind: 'upsert' | 'delete';
-  // Materialized realtime state for an upsert whose baseline is known.
-  message?: Message;
-  // Reaction patches awaiting a baseline (the message was not loaded when they
-  // arrived); applied to a fetched copy if/when one appears.
-  patches?: ReactionPatch[];
+  contentVer: number; // version of the latest content op (0 = none yet)
+  content?: Message; // latest content baseline
+  deletedVer: number; // version of a delete op (0 = not deleted)
+  reactions: ReactionPatch[]; // version-stamped reaction patches, in version order
 };
 
 let journalVer = 0;
@@ -96,20 +103,26 @@ function applyReaction(m: Message, emoji: string, userId: string, op: 'add' | 'r
   return { ...m, reactions };
 }
 
-function applyPatches(m: Message, patches: ReactionPatch[] | undefined): Message {
-  let out = m;
-  for (const p of patches || []) out = applyReaction(out, p.emoji, p.userId, p.op);
-  return out;
+// Reconstruct the authoritative view of a message at fetch-start version startVer:
+// content from the newest source (a realtime content op after start, else the
+// fetched baseline), then every realtime reaction patch since start layered on.
+// Returns null if the message was deleted after start (and not recreated).
+function reconcile(entry: JournalEntry, fetched: Message, startVer: number): Message | null {
+  if (entry.deletedVer > startVer && entry.deletedVer > entry.contentVer) return null;
+  let content = entry.contentVer > startVer && entry.content ? entry.content : fetched;
+  for (const p of entry.reactions) {
+    if (p.ver > startVer) content = applyReaction(content, p.emoji, p.userId, p.op);
+  }
+  return content;
 }
 
-// The earliest generation any in-flight fetch could still need; events at or below
-// it are safe to prune, above it are protected.
-function protectFloorOf(activeFetchVers: number[]): number {
-  return activeFetchVers.length ? Math.min(...activeFetchVers) : Infinity;
+function protectFloorOf(activeFetches: Record<number, number>): number {
+  const vers = Object.values(activeFetches);
+  return vers.length ? Math.min(...vers) : Infinity;
 }
 
 // Prune journal entries by age and size, but never one an active fetch may still
-// consume (gen > protectFloor). If everything left is protected we transiently
+// consume (ver > protectFloor). If everything left is protected we transiently
 // exceed the cap -- bounded by the in-flight fetch's own lifetime -- rather than
 // corrupt reconciliation.
 function pruneJournal(
@@ -137,9 +150,18 @@ function recordUpsert(
   protectFloor: number
 ): Record<string, JournalEntry> {
   journalVer += 1;
-  // A materialized upsert supersedes any pending patches for this id.
-  const next = { ...journal, [id]: { ver: journalVer, ts: nowMs(), kind: 'upsert' as const, message } };
-  return pruneJournal(next, protectFloor);
+  const prev = journal[id];
+  // A content op sets a new baseline but PRESERVES accumulated reaction patches
+  // (a content edit must not drop a reaction) and clears any prior tombstone.
+  const next: JournalEntry = {
+    ver: journalVer,
+    ts: nowMs(),
+    contentVer: journalVer,
+    content: message,
+    deletedVer: 0,
+    reactions: prev?.reactions || [],
+  };
+  return pruneJournal({ ...journal, [id]: next }, protectFloor);
 }
 
 function recordDelete(
@@ -148,37 +170,43 @@ function recordDelete(
   protectFloor: number
 ): Record<string, JournalEntry> {
   journalVer += 1;
-  const next = { ...journal, [id]: { ver: journalVer, ts: nowMs(), kind: 'delete' as const } };
-  return pruneJournal(next, protectFloor);
+  const next: JournalEntry = {
+    ver: journalVer,
+    ts: nowMs(),
+    contentVer: 0,
+    deletedVer: journalVer,
+    reactions: [],
+  };
+  return pruneJournal({ ...journal, [id]: next }, protectFloor);
 }
 
 function recordReaction(
   journal: Record<string, JournalEntry>,
   id: string,
-  patch: ReactionPatch,
-  baseline: Message | undefined,
+  emoji: string,
+  userId: string,
+  op: 'add' | 'remove',
   protectFloor: number
 ): Record<string, JournalEntry> {
-  const entry = journal[id];
+  const prev = journal[id];
   // A reaction to an already-deleted message is meaningless -- keep the tombstone.
-  if (entry && entry.kind === 'delete') return journal;
+  if (prev && prev.deletedVer > prev.contentVer) return journal;
   journalVer += 1;
-  const base = entry?.message ?? baseline;
-  let value: JournalEntry;
-  if (base !== undefined) {
-    // Baseline known -> materialize the reacted message; drop now-subsumed patches.
-    value = { ver: journalVer, ts: nowMs(), kind: 'upsert', message: applyReaction(base, patch.emoji, patch.userId, patch.op) };
-  } else {
-    // No baseline yet -> retain the ordered patch to replay onto a future fetch.
-    value = { ver: journalVer, ts: nowMs(), kind: 'upsert', patches: [...(entry?.patches || []), patch] };
-  }
-  return pruneJournal({ ...journal, [id]: value }, protectFloor);
+  const next: JournalEntry = {
+    ver: journalVer,
+    ts: nowMs(),
+    contentVer: prev?.contentVer ?? 0,
+    content: prev?.content,
+    deletedVer: prev?.deletedVer ?? 0,
+    reactions: [...(prev?.reactions || []), { ver: journalVer, emoji, userId, op }],
+  };
+  return pruneJournal({ ...journal, [id]: next }, protectFloor);
 }
 
 // Strictly-newer test against the oldest fetched message, matching the server's
-// created_at ordering. Boundary ties (equal created_at) are treated as NOT within
-// the window -- the conservative choice, since the server has no id tie-breaker so
-// a tie could sit on either side of the 50-row cut; we never wrongly delete one.
+// created_at ordering. Boundary ties are treated as NOT within the window -- the
+// conservative choice, since the server has no id tie-breaker so a tie could sit on
+// either side of the 50-row cut; we never wrongly delete one.
 function isWithinWindow(m: Message, oldest: Message): boolean {
   return new Date(m.createdAt).getTime() > new Date(oldest.createdAt).getTime();
 }
@@ -190,17 +218,12 @@ function sortMessages(list: Message[]): Message[] {
   });
 }
 
-function removeOne(arr: number[], value: number): number[] {
-  const i = arr.indexOf(value);
-  return i < 0 ? arr : [...arr.slice(0, i), ...arr.slice(i + 1)];
-}
-
 export const useMessageStore = create<MessageState>((set, get) => ({
   messages: {},
   hasMore: {},
   journal: {},
-  activeFetchVers: [],
-  appliedBaseSeq: {},
+  activeFetches: {},
+  maxStartedBaseSeq: {},
   windowEpoch: {},
   isLoading: {},
   error: null,
@@ -216,17 +239,19 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     // non-merge loads for the same channel still can't overlap (gated here).
     if (!merge && state.isLoading[channelId]) return;
 
-    // Request-start provenance. IDs and versions are captured now, NOT read from
-    // settlement state, so a realtime change during the fetch can't rewrite the
-    // basis on which we reconcile.
+    // Request-start provenance, captured now (NOT read from settlement state).
     const startVer = journalVer;
     const startIds = new Set((state.messages[channelId] || []).map((m) => m.id));
     const mySeq = (fetchSeq += 1);
+    const isBase = !before;
     const startEpoch = state.windowEpoch[channelId] ?? 0;
     const startSession = sessionEpoch;
 
     set((s) => ({
-      activeFetchVers: [...s.activeFetchVers, startVer],
+      activeFetches: { ...s.activeFetches, [mySeq]: startVer },
+      ...(isBase
+        ? { maxStartedBaseSeq: { ...s.maxStartedBaseSeq, [channelId]: Math.max(s.maxStartedBaseSeq[channelId] ?? 0, mySeq) } }
+        : {}),
       ...(merge ? {} : { isLoading: { ...s.isLoading, [channelId]: true }, error: null }),
     }));
 
@@ -240,24 +265,15 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         if (sessionEpoch !== startSession) return {};
 
         const existing = s.messages[channelId] || [];
-        const currentById = new Map(existing.map((m) => [m.id, m]));
-
-        // Reconcile one fetched message against realtime mutations recorded AFTER
-        // this fetch started. Provenance (journal ver > startVer), never identity.
-        const reconcileFetched = (m: Message): Message | null => {
-          const j = s.journal[m.id];
-          const touched = j !== undefined && j.ver > startVer;
-          if (!touched) return m; // untouched by realtime -> fetched copy is authoritative
-          if (j.kind === 'delete') return null; // deleted during the fetch
-          const cur = currentById.get(m.id);
-          if (cur !== undefined) return cur; // loaded copy already carries the realtime state
-          if (j.message !== undefined) return j.message; // materialized realtime create/update
-          return applyPatches(m, j.patches); // reaction patch(es) onto the fetched baseline
-        };
 
         const reconciledFetched: Message[] = [];
         for (const m of fetched) {
-          const r = reconcileFetched(m);
+          const j = s.journal[m.id];
+          if (!j || j.ver <= startVer) {
+            reconciledFetched.push(m); // untouched by realtime -> fetched copy is authoritative
+            continue;
+          }
+          const r = reconcile(j, m, startVer);
           if (r) reconciledFetched.push(r);
         }
 
@@ -277,8 +293,8 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         }
 
         // Latest-window fetch (initial load or resync). Commit only if still the
-        // newest-started base request for this channel.
-        if (mySeq < (s.appliedBaseSeq[channelId] ?? 0)) {
+        // newest-STARTED base request for this channel.
+        if (mySeq < (s.maxStartedBaseSeq[channelId] ?? mySeq)) {
           return merge ? {} : { isLoading: { ...s.isLoading, [channelId]: false } };
         }
 
@@ -298,34 +314,32 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         for (const m of existing) {
           if (result.has(m.id)) continue;
           const j = s.journal[m.id];
-          const touchedUpsert = j !== undefined && j.ver > startVer && j.kind === 'upsert';
-          if (touchedUpsert) {
-            result.set(m.id, m); // realtime create/update during the fetch -> keep
+          const touched = j !== undefined && j.ver > startVer;
+          if (touched) {
+            if (j.deletedVer > startVer && j.deletedVer > j.contentVer) continue; // deleted during fetch
+            result.set(m.id, m); // realtime create/update/reaction during the fetch -> keep
             continue;
           }
           if (!fullPage) continue; // partial/empty page is authoritative for the whole channel -> drop
           if (oldest && isWithinWindow(m, oldest)) continue; // inside window, absent -> deleted -> drop
           if (merge && overlap) result.set(m.id, m); // contiguous history below the window -> keep
-          // else: gap (full/no-overlap) or fresh initial load -> drop the old segment
         }
 
-        // hasMore + whether this commit invalidates in-flight paginations.
         let newHasMore: boolean;
         let epochAdvanced: boolean;
         if (!fullPage) {
-          newHasMore = false; // reached channel start
-          epochAdvanced = true; // cache authoritatively replaced
+          newHasMore = false;
+          epochAdvanced = true;
         } else if (merge && overlap) {
-          newHasMore = s.hasMore[channelId] ?? true; // continuity -> preserve prior provenance
+          newHasMore = s.hasMore[channelId] ?? true;
           epochAdvanced = false;
         } else {
-          newHasMore = true; // gap/fresh window -> scroll can rebuild history
+          newHasMore = true;
           epochAdvanced = true;
         }
 
         return {
           messages: { ...s.messages, [channelId]: sortMessages(Array.from(result.values())) },
-          appliedBaseSeq: { ...s.appliedBaseSeq, [channelId]: mySeq },
           hasMore: { ...s.hasMore, [channelId]: newHasMore },
           ...(epochAdvanced
             ? { windowEpoch: { ...s.windowEpoch, [channelId]: (s.windowEpoch[channelId] ?? 0) + 1 } }
@@ -335,14 +349,29 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       });
     } catch (err: unknown) {
       const message = extractErrorMessage(err, 'Failed to load messages.');
-      set((s) => ({
-        isLoading: merge ? s.isLoading : { ...s.isLoading, [channelId]: false },
-        error: message,
-      }));
+      // A request begun before a reset must not write into the new session.
+      if (sessionEpoch === startSession) {
+        set((s) => {
+          // Superseded by a later-started base fetch -> clear own loading but do not
+          // surface a stale error.
+          const superseded = isBase && mySeq < (s.maxStartedBaseSeq[channelId] ?? mySeq);
+          return {
+            ...(merge ? {} : { isLoading: { ...s.isLoading, [channelId]: false } }),
+            ...(superseded ? {} : { error: message }),
+          };
+        });
+      }
     } finally {
-      // Deregister on every exit path (success, error, discard); pruning may now
-      // reclaim events only this fetch protected.
-      set((s) => ({ activeFetchVers: removeOne(s.activeFetchVers, startVer) }));
+      // Deregister by unique id on every exit path; a reset already cleared the
+      // registry, so skip touching the new session.
+      if (sessionEpoch === startSession) {
+        set((s) => {
+          if (!(mySeq in s.activeFetches)) return {};
+          const next = { ...s.activeFetches };
+          delete next[mySeq];
+          return { activeFetches: next };
+        });
+      }
     }
   },
 
@@ -384,13 +413,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
   addMessage: (channelId: string, message: Message) => {
     set((state) => {
       const existing = state.messages[channelId] || [];
-      // Record the create so an in-flight fetch whose page predates it keeps it.
-      const journal = recordUpsert(
-        state.journal,
-        message.id,
-        message,
-        protectFloorOf(state.activeFetchVers)
-      );
+      const journal = recordUpsert(state.journal, message.id, message, protectFloorOf(state.activeFetches));
       if (existing.some((m) => m.id === message.id)) return { journal };
       return { journal, messages: { ...state.messages, [channelId]: [...existing, message] } };
     });
@@ -400,7 +423,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     set((state) => {
       const existing = state.messages[channelId];
       return {
-        journal: recordUpsert(state.journal, message.id, message, protectFloorOf(state.activeFetchVers)),
+        journal: recordUpsert(state.journal, message.id, message, protectFloorOf(state.activeFetches)),
         messages: existing
           ? { ...state.messages, [channelId]: existing.map((m) => (m.id === message.id ? message : m)) }
           : state.messages,
@@ -412,7 +435,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     set((state) => {
       const existing = state.messages[channelId];
       return {
-        journal: recordDelete(state.journal, messageId, protectFloorOf(state.activeFetchVers)),
+        journal: recordDelete(state.journal, messageId, protectFloorOf(state.activeFetches)),
         messages: existing
           ? { ...state.messages, [channelId]: existing.filter((m) => m.id !== messageId) }
           : state.messages,
@@ -423,15 +446,8 @@ export const useMessageStore = create<MessageState>((set, get) => ({
   addReaction: (channelId: string, messageId: string, emoji: string, userId: string) => {
     set((state) => {
       const existing = state.messages[channelId];
-      const loaded = existing?.find((m) => m.id === messageId);
-      const journal = recordReaction(
-        state.journal,
-        messageId,
-        { emoji, userId, op: 'add' },
-        loaded,
-        protectFloorOf(state.activeFetchVers)
-      );
-      if (!existing || !loaded) return { journal };
+      const journal = recordReaction(state.journal, messageId, emoji, userId, 'add', protectFloorOf(state.activeFetches));
+      if (!existing || !existing.some((m) => m.id === messageId)) return { journal };
       return {
         journal,
         messages: {
@@ -445,15 +461,8 @@ export const useMessageStore = create<MessageState>((set, get) => ({
   removeReaction: (channelId: string, messageId: string, emoji: string, userId: string) => {
     set((state) => {
       const existing = state.messages[channelId];
-      const loaded = existing?.find((m) => m.id === messageId);
-      const journal = recordReaction(
-        state.journal,
-        messageId,
-        { emoji, userId, op: 'remove' },
-        loaded,
-        protectFloorOf(state.activeFetchVers)
-      );
-      if (!existing || !loaded) return { journal };
+      const journal = recordReaction(state.journal, messageId, emoji, userId, 'remove', protectFloorOf(state.activeFetches));
+      if (!existing || !existing.some((m) => m.id === messageId)) return { journal };
       return {
         journal,
         messages: {
@@ -470,8 +479,8 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       messages: {},
       hasMore: {},
       journal: {},
-      activeFetchVers: [],
-      appliedBaseSeq: {},
+      activeFetches: {},
+      maxStartedBaseSeq: {},
       windowEpoch: {},
       isLoading: {},
       error: null,

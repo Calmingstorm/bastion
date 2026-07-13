@@ -28,12 +28,19 @@ function desc(list: Message[]): Message[] {
 function ids(): string[] {
   return (useMessageStore.getState().messages.c1 || []).map((m) => m.id);
 }
-function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void; reject: (e: unknown) => void } {
   let resolve!: (v: T) => void;
-  const promise = new Promise<T>((r) => {
-    resolve = r;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
+}
+
+function reactionUsers(id: string, emoji: string): string[] {
+  const m = (useMessageStore.getState().messages.c1 || []).find((x) => x.id === id);
+  return m?.reactions?.find((r) => r.emoji === emoji)?.users || [];
 }
 
 const LIMIT = 50;
@@ -103,11 +110,6 @@ describe('messageStore.fetchMessages', () => {
   });
 
   // --- Matrix 2: reactions during a held fetch, loaded and absent ----------
-
-  function reactionUsers(id: string, emoji: string): string[] {
-    const m = (useMessageStore.getState().messages.c1 || []).find((x) => x.id === id);
-    return m?.reactions?.find((r) => r.emoji === emoji)?.users || [];
-  }
 
   it('applies a reaction that lands during a resync on a LOADED message', async () => {
     useMessageStore.setState({ messages: { c1: [msg('m1', tISO(1))] }, hasMore: { c1: false } });
@@ -298,8 +300,70 @@ describe('messageStore.fetchMessages', () => {
   });
 
   it('reset clears the reconciliation journal', () => {
-    useMessageStore.setState({ journal: { m1: { ver: 1, ts: Date.now(), kind: 'delete' } } });
+    useMessageStore.getState().deleteMessage('c1', 'm1'); // records a journal entry
+    expect(Object.keys(useMessageStore.getState().journal).length).toBeGreaterThan(0);
     useMessageStore.getState().reset();
     expect(useMessageStore.getState().journal).toEqual({});
+  });
+
+  // --- Journal composition: content and reactions are independent ----------
+
+  it('a reaction on a loaded message does not let its stale content beat a fetched edit', async () => {
+    useMessageStore.setState({ messages: { c1: [msg('m1', tISO(1), 'old')] }, hasMore: { c1: false } });
+    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
+      useMessageStore.getState().addReaction('c1', 'm1', '👍', 'u2'); // reaction during the fetch
+      return [msg('m1', tISO(1), 'server-edit')]; // the server also edited the content
+    });
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+    const m = useMessageStore.getState().messages.c1[0];
+    expect(m.content).toBe('server-edit'); // content edit wins on its dimension
+    expect(reactionUsers('m1', '👍')).toEqual(['u2']); // reaction preserved on its dimension
+  });
+
+  it('a reaction then a content update on an absent message keeps both', async () => {
+    useMessageStore.setState({ messages: { c1: [] }, hasMore: { c1: false } });
+    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
+      useMessageStore.getState().addReaction('c1', 'm9', '🎉', 'u2'); // patch (m9 absent)
+      useMessageStore.getState().updateMessage('c1', msg('m9', tISO(9), 'updated')); // content op after
+      return [msg('m9', tISO(9), 'orig')]; // stale baseline
+    });
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+    const m = useMessageStore.getState().messages.c1[0];
+    expect(m.content).toBe('updated'); // realtime content update wins
+    expect(reactionUsers('m9', '🎉')).toEqual(['u2']); // reaction survived the later content update
+  });
+
+  // --- Base ordering by newest-STARTED, not newest-applied -----------------
+
+  it('an initial load that resolves first does not commit when a later resync has started', async () => {
+    useMessageStore.setState({ messages: { c1: [] }, hasMore: { c1: false } });
+    const a = deferred<Message[]>();
+    const b = deferred<Message[]>();
+    vi.mocked(client.apiGetMessages)
+      .mockImplementationOnce(() => a.promise) // A: initial (seq 1)
+      .mockImplementationOnce(() => b.promise); // B: resync (seq 2, started later)
+    const aDone = useMessageStore.getState().fetchMessages('c1');
+    const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true);
+    a.resolve([msg('m1', tISO(1), 'A')]); // A resolves FIRST
+    await aDone;
+    expect(ids()).toEqual([]); // A did NOT commit -- a newer base fetch had already started
+    b.resolve(desc([msg('m1', tISO(1), 'B'), msg('m2', tISO(2))]));
+    await bDone;
+    expect(ids()).toEqual(['m1', 'm2']);
+    expect(useMessageStore.getState().messages.c1[0].content).toBe('B');
+  });
+
+  // --- Reset isolates a request begun before it ----------------------------
+
+  it('an error from a request begun before reset does not touch the new session', async () => {
+    useMessageStore.setState({ messages: { c1: [] } });
+    const a = deferred<Message[]>();
+    vi.mocked(client.apiGetMessages).mockImplementation(() => a.promise);
+    const aDone = useMessageStore.getState().fetchMessages('c1'); // sets isLoading, error=null
+    useMessageStore.getState().reset(); // new session
+    a.reject(new Error('network')); // the old request fails after the reset
+    await aDone;
+    expect(useMessageStore.getState().error).toBeNull(); // no stale error written
+    expect(useMessageStore.getState().isLoading.c1).toBeFalsy();
   });
 });
