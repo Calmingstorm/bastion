@@ -209,23 +209,26 @@ func handleBotAuth(w http.ResponseWriter, r *http.Request, next http.Handler, to
 		return
 	}
 
-	// No legacy candidate. This is normally an unknown token, but a concurrent
-	// request may also have healed this bot between our fast-path miss and this
-	// query -- moving token_lookup off NULL so the legacy filter no longer sees
-	// a valid token. Re-check the fast path before rejecting, so a genuinely
-	// valid credential is not spuriously 401'd by that race.
+	// A concurrent request may have healed the target between our fast-path miss
+	// and the legacy query, moving its token_lookup off NULL so it no longer
+	// appears in the still-NULL bucket -- even when that bucket is non-empty with
+	// an unrelated bot that shares the same hint. Re-check the fast path
+	// unconditionally, before spending any Argon2, so a healed valid token is
+	// never rejected.
+	err = db.QueryRow(r.Context(),
+		`SELECT user_id FROM bots WHERE token_lookup = $1`, digest).Scan(&botUserID)
+	if err == nil {
+		authenticateBot(w, r, next, botUserID)
+		return
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		log.Error().Err(err).Msg("bot auth fast-path recheck failed")
+		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	// Genuinely unknown token with no legacy candidate: reject without Argon2.
 	if len(candidates) == 0 {
-		err := db.QueryRow(r.Context(),
-			`SELECT user_id FROM bots WHERE token_lookup = $1`, digest).Scan(&botUserID)
-		if err == nil {
-			authenticateBot(w, r, next, botUserID)
-			return
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			log.Error().Err(err).Msg("bot auth fast-path recheck failed")
-			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
-			return
-		}
 		http.Error(w, `{"error":"invalid bot token"}`, http.StatusUnauthorized)
 		return
 	}
