@@ -18,6 +18,7 @@ import { PERMISSIONS } from '../../utils/permissions';
 import { eventBus } from '../../utils/eventBus';
 import bastionLogo from '../../assets/bastion-logo.svg';
 import type { ChannelCategory } from '../../types';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
 
 const DM_VISIBLE_COUNT = 8;
 
@@ -738,31 +739,15 @@ export function UnifiedSidebar() {
         />
       )}
 
-      {/* Delete category confirmation */}
-      {deletingCategoryId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
-          <div className="w-full max-w-sm rounded-md bg-[var(--bg-primary)] p-6 shadow-xl">
-            <h3 className="mb-2 text-lg font-bold text-[var(--text-primary)]">Delete Category</h3>
-            <p className="mb-4 text-sm text-[var(--text-secondary)]">
-              Are you sure you want to delete this category? Channels in this category will become uncategorized.
-            </p>
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setDeletingCategoryId(null)}
-                className="rounded-[3px] px-4 py-2 text-sm font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleDeleteCategory}
-                className="rounded-[3px] bg-[var(--danger)] px-4 py-2 text-sm font-medium text-white hover:opacity-90"
-              >
-                Delete
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <ConfirmDialog
+        open={!!deletingCategoryId}
+        onOpenChange={(open) => {
+          if (!open) setDeletingCategoryId(null);
+        }}
+        onConfirm={handleDeleteCategory}
+        title="Delete Category"
+        description="Are you sure you want to delete this category? Channels in this category will become uncategorized."
+      />
     </div>
   );
 }
