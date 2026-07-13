@@ -332,7 +332,8 @@ export async function apiDeleteChannel(
 export async function apiGetMessages(
   channelId: string,
   before?: string,
-  limit: number = 50
+  limit: number = 50,
+  signal?: AbortSignal
 ): Promise<Message[]> {
   const params: Record<string, string | number> = { limit };
   if (before) {
@@ -340,7 +341,7 @@ export async function apiGetMessages(
   }
   const response = await apiClient.get<Message[]>(
     `/channels/${channelId}/messages`,
-    { params }
+    { params, signal }
   );
   return Array.isArray(response.data) ? response.data : [];
 }

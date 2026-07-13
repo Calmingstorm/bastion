@@ -435,44 +435,50 @@ describe('messageStore.fetchMessages', () => {
 
   // --- Full creates reconcile whole, not as partial edits ------------------
 
-  it('a full realtime create during a resync keeps its attachments and reply metadata', async () => {
+  const attach = () => [
+    { id: 'a1', messageId: 'm9', filename: 'f.png', storedName: 's', contentType: 'image/png', size: 1, url: '/u', createdAt: tISO(9) },
+  ];
+
+  it('a realtime create during a resync recovers its attachments (the List omits them)', async () => {
     useMessageStore.setState({ messages: { c1: [] }, hasMore: { c1: false } });
-    const fullCreate = {
-      ...msg('m9', tISO(9), 'hi'),
-      attachments: [
-        { id: 'a1', messageId: 'm9', filename: 'f.png', storedName: 's', contentType: 'image/png', size: 1, url: '/u', createdAt: tISO(9) },
-      ],
-      replyTo: { id: 'r1', content: 'parent', author: { id: 'u3' } },
-    } as Message;
+    const create = { ...msg('m9', tISO(9), 'hi'), attachments: attach() } as Message;
     vi.mocked(client.apiGetMessages).mockImplementation(async () => {
-      useMessageStore.getState().addMessage('c1', fullCreate); // full MESSAGE_CREATE during the fetch
-      return [msg('m9', tISO(9), 'hi')]; // the fetched copy lacks attachments/replyTo
+      useMessageStore.getState().addMessage('c1', create); // realtime create carries attachments
+      // The List returns the message WITHOUT attachments but WITH a fresh reply preview.
+      return [{ ...msg('m9', tISO(9), 'hi'), replyTo: { id: 'r1', content: 'parent', author: { id: 'u3' } } } as Message];
     });
     await useMessageStore.getState().fetchMessages('c1', undefined, true);
     const m = useMessageStore.getState().messages.c1.find((x) => x.id === 'm9')!;
-    expect(m.attachments?.length).toBe(1); // not merged away as if it were a partial edit
-    expect(m.replyTo?.id).toBe('r1');
+    expect(m.attachments?.length).toBe(1); // recovered from the create
+    expect(m.replyTo?.id).toBe('r1'); // from the fetched copy (server), not lost
   });
 
-  it('a full create THEN a partial edit during a resync keeps attachments and reply', async () => {
+  it('a create then a partial edit keeps attachments but takes fresh author/reply from the fetch', async () => {
     useMessageStore.setState({ messages: { c1: [] }, hasMore: { c1: false } });
-    const fullCreate = {
+    const staleCreate = {
       ...msg('m9', tISO(9), 'hi'),
-      attachments: [
-        { id: 'a1', messageId: 'm9', filename: 'f.png', storedName: 's', contentType: 'image/png', size: 1, url: '/u', createdAt: tISO(9) },
-      ],
-      replyTo: { id: 'r1', content: 'parent', author: { id: 'u3' } },
+      attachments: attach(),
+      author: { id: 'u1', username: 'old-name' },
+      replyTo: { id: 'r1', content: 'STALE parent', author: { id: 'u3' } },
     } as Message;
     vi.mocked(client.apiGetMessages).mockImplementation(async () => {
-      useMessageStore.getState().addMessage('c1', fullCreate); // full create
-      useMessageStore.getState().updateMessage('c1', msg('m9', tISO(9), 'edited')); // partial edit AFTER the create
-      return [msg('m9', tISO(9), 'hi')]; // fetched copy lacks attachments/replyTo
+      useMessageStore.getState().addMessage('c1', staleCreate); // create (pre-fetch metadata)
+      useMessageStore.getState().updateMessage('c1', msg('m9', tISO(9), 'edited')); // partial edit
+      // Fetched has FRESH author/reply from the server (and, as always, no attachments).
+      return [
+        {
+          ...msg('m9', tISO(9), 'hi'),
+          author: { id: 'u1', username: 'new-name' },
+          replyTo: { id: 'r1', content: 'FRESH parent', author: { id: 'u3' } },
+        } as Message,
+      ];
     });
     await useMessageStore.getState().fetchMessages('c1', undefined, true);
     const m = useMessageStore.getState().messages.c1.find((x) => x.id === 'm9')!;
-    expect(m.content).toBe('edited'); // edit applied
-    expect(m.attachments?.length).toBe(1); // create's attachments survive the later edit
-    expect(m.replyTo?.id).toBe('r1');
+    expect(m.content).toBe('edited'); // newest content op wins
+    expect(m.attachments?.length).toBe(1); // create's attachments recovered (List omits them)
+    expect(m.replyTo?.content).toBe('FRESH parent'); // fresh reply preview from fetch, not the stale create
+    expect(m.author.username).toBe('new-name'); // fresh author from fetch, not the stale create
   });
 
   it('a fetch abandoned by the protection timeout cannot erase later realtime state', async () => {
@@ -526,6 +532,58 @@ describe('messageStore.fetchMessages', () => {
     p.resolve(desc(block('p', LIMIT, 0))); // A (older) succeeds afterward
     await pDone;
     expect(useMessageStore.getState().error).toBe('Failed to load messages.'); // A did not clear B's newer error
+  });
+
+  it('an older pagination failure does not publish an error over a newer resync success', async () => {
+    useMessageStore.setState({ messages: { c1: block('old', LIMIT, 50) }, hasMore: { c1: true }, error: null });
+    const p = deferred<Message[]>();
+    const b = deferred<Message[]>();
+    vi.mocked(client.apiGetMessages)
+      .mockImplementationOnce(() => p.promise) // pagination A (seq 1)
+      .mockImplementationOnce(() => b.promise); // resync B (seq 2)
+    const pDone = useMessageStore.getState().fetchMessages('c1', 'old0'); // A
+    const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true); // B (newer)
+    b.resolve(desc(block('old', LIMIT, 50))); // full-overlap resync -> commits, epoch NOT advanced
+    await bDone;
+    expect(useMessageStore.getState().error).toBeNull();
+    p.reject(new Error('boom')); // A (older) fails afterward
+    await pDone;
+    expect(useMessageStore.getState().error).toBeNull(); // A's failure did not overwrite B's newer success
+  });
+
+  it('a reaction on an absent message does not resurrect it against an empty response', async () => {
+    useMessageStore.setState({ messages: { c1: [msg('m1', tISO(1))] }, hasMore: { c1: true } });
+    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
+      // m1 was deleted server-side; a stray reaction races in during the fetch.
+      useMessageStore.getState().addReaction('c1', 'm1', '👍', 'u2');
+      return []; // authoritative empty response
+    });
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+    expect(ids()).toEqual([]); // a reaction cannot supply a content baseline, so m1 stays gone
+  });
+
+  it('abandoning a fetch aborts the request and releases its loading state', async () => {
+    vi.useFakeTimers();
+    try {
+      let aborted = false;
+      vi.mocked(client.apiGetMessages).mockImplementation(
+        (_c, _b, _l, signal) =>
+          new Promise((_res, rej) => {
+            signal?.addEventListener('abort', () => {
+              aborted = true;
+              rej(new DOMException('aborted', 'AbortError'));
+            });
+          })
+      );
+      useMessageStore.setState({ messages: {}, isLoading: {} });
+      const done = useMessageStore.getState().fetchMessages('c1'); // non-merge load
+      vi.advanceTimersByTime(120_001); // protection timeout -> abandon
+      expect(aborted).toBe(true); // the HTTP request was cancelled
+      expect(useMessageStore.getState().isLoading.c1).toBe(false); // loading released
+      await done; // and the promise settles (does not hang)
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // --- A successful commit clears a stale error ----------------------------

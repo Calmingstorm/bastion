@@ -17,6 +17,9 @@ interface MessageState {
   // Fetch sequence that set the current error; a success clears the error only if
   // it is at least as new, so an older success can't erase a newer failure.
   errorSeq: number;
+  // Highest fetch sequence that has successfully committed; a failure publishes an
+  // error only if it is newer, so an older failure can't overwrite a newer success.
+  committedSeq: number;
   replyingTo: Message | null;
   setReplyingTo: (msg: Message | null) => void;
   fetchMessages: (channelId: string, before?: string, merge?: boolean) => Promise<void>;
@@ -68,8 +71,7 @@ type JournalEntry = {
   ver: number; // max version recorded (pruning/protection ordering)
   ts: number;
   contentVer: number; // version of the latest content op (0 = none yet)
-  content?: Message; // latest content baseline
-  fullContent: boolean; // true if the latest content op was a full create (vs a partial edit)
+  content?: Message; // latest content baseline (create, with edits merged in so it keeps attachments)
   deletedVer: number; // version of a delete op (0 = not deleted)
   reactions: ReactionPatch[]; // version-stamped reaction patches, in version order
 };
@@ -128,21 +130,23 @@ function mergeEditFields(base: Message, update: Message): Message {
 // Returns null if the message was deleted after start (and not recreated).
 function reconcile(entry: JournalEntry, fetched: Message, startVer: number): Message | null {
   if (entry.deletedVer > startVer && entry.deletedVer > entry.contentVer) return null;
-  // A realtime content op newer than the fetch supersedes it. A full baseline
-  // (descends from a create) is authoritative for content AND attachments/reply,
-  // but its reactions may be stale, so reactions come from the fetched copy. A
-  // partial-edit-only baseline overrides just its content-bearing fields onto the
-  // fetched copy. Either way, layer on realtime reaction patches after fetch start.
-  let content = fetched;
+  // Field-level merge. The fetched copy is authoritative for author, reply preview,
+  // and reactions (the server returns them, fresh). A realtime content op newer than
+  // the fetch overrides only the content-bearing fields. Attachments are recovered
+  // from a journal create because the List endpoint omits them (see F37) -- they are
+  // immutable, so a create's copy is valid at any age. Then layer realtime reaction
+  // patches recorded after the fetch started.
+  let msg = fetched;
   if (entry.contentVer > startVer && entry.content) {
-    content = entry.fullContent
-      ? { ...entry.content, reactions: fetched.reactions }
-      : mergeEditFields(fetched, entry.content);
+    msg = { ...msg, content: entry.content.content, editedAt: entry.content.editedAt, embeds: entry.content.embeds };
+  }
+  if (entry.content?.attachments?.length) {
+    msg = { ...msg, attachments: entry.content.attachments };
   }
   for (const p of entry.reactions) {
-    if (p.ver > startVer) content = applyReaction(content, p.emoji, p.userId, p.op);
+    if (p.ver > startVer) msg = applyReaction(msg, p.emoji, p.userId, p.op);
   }
-  return content;
+  return msg;
 }
 
 function protectFloorOf(activeFetches: Record<number, number>): number {
@@ -194,16 +198,13 @@ function recordUpsert(
   // A content op sets a new baseline but PRESERVES accumulated reaction patches
   // (a content edit must not drop a reaction) and clears any prior tombstone.
   // A create is a full message. An edit is partial (content-bearing fields only):
-  // merge it onto the prior baseline so a create's attachments/reply survive, and
-  // keep the baseline's fullness (full iff it still descends from a create).
+  // merge it onto the prior baseline so a create's attachments survive the edit.
   const content = isCreate ? message : prev?.content ? mergeEditFields(prev.content, message) : message;
-  const fullContent = isCreate ? true : prev?.content ? prev.fullContent : false;
   const next: JournalEntry = {
     ver: journalVer,
     ts: nowMs(),
     contentVer: journalVer,
     content,
-    fullContent,
     deletedVer: 0,
     reactions: boundPatches(prev?.reactions || [], protectFloor),
   };
@@ -220,7 +221,6 @@ function recordDelete(
     ver: journalVer,
     ts: nowMs(),
     contentVer: 0,
-    fullContent: false,
     deletedVer: journalVer,
     reactions: [],
   };
@@ -247,7 +247,6 @@ function recordReaction(
     ts: nowMs(),
     contentVer: prev?.contentVer ?? 0,
     content: prev?.content,
-    fullContent: prev?.fullContent ?? false,
     deletedVer: prev?.deletedVer ?? 0,
     reactions: boundPatches([...(prev?.reactions || []), { ver: journalVer, emoji, userId, op }], protectFloor),
   };
@@ -279,6 +278,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
   isLoading: {},
   error: null,
   errorSeq: 0,
+  committedSeq: 0,
   replyingTo: null,
 
   setReplyingTo: (msg: Message | null) => set({ replyingTo: msg }),
@@ -316,12 +316,15 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     }));
 
     // Backstop: a fetch that never settles must not pin protectFloor forever. After
-    // a bounded lifetime we ABANDON it -- it may no longer commit (so a very late
-    // stale response can't erase newer state), its journal protection is dropped,
-    // and a non-merge load releases its loading state so the UI doesn't hang.
+    // a bounded lifetime we ABANDON it -- abort the HTTP request (which settles this
+    // promise so awaiters/loading refs release), forbid it from committing (so a very
+    // late stale response can't erase newer state), drop its journal protection, and
+    // release a non-merge load's loading state so the UI doesn't hang.
     let abandoned = false;
+    const controller = new AbortController();
     const protectionTimer = setTimeout(() => {
       abandoned = true;
+      controller.abort();
       set((s) => {
         if (sessionEpoch !== startSession) return {};
         const next = { ...s.activeFetches };
@@ -334,7 +337,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     }, FETCH_PROTECTION_TIMEOUT_MS);
 
     try {
-      const rawFetched = await apiGetMessages(channelId, before, MESSAGE_LIMIT);
+      const rawFetched = await apiGetMessages(channelId, before, MESSAGE_LIMIT, controller.signal);
       const fetched = Array.isArray(rawFetched) ? rawFetched : [];
       fetched.reverse(); // API returns DESC (newest first) -> ASC
 
@@ -368,6 +371,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
             messages: { ...s.messages, [channelId]: [...older, ...existing] },
             hasMore: { ...s.hasMore, [channelId]: fetched.length === MESSAGE_LIMIT },
             isLoading: { ...s.isLoading, [channelId]: false },
+            committedSeq: Math.max(s.committedSeq, mySeq),
             // Clear a raced request's error only if this success is at least as new.
             ...(mySeq >= s.errorSeq ? { error: null, errorSeq: 0 } : {}),
           };
@@ -395,10 +399,14 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         for (const m of existing) {
           if (result.has(m.id)) continue;
           const j = s.journal[m.id];
-          const touched = j !== undefined && j.ver > startVer;
-          if (touched) {
+          // Only a realtime content op (create/update) after the fetch started can
+          // preserve a message the authoritative page omits -- a reaction patch
+          // cannot supply a content baseline, so it must not resurrect a message an
+          // empty/partial response says is gone.
+          const touchedContent = j !== undefined && j.contentVer > startVer;
+          if (touchedContent) {
             if (j.deletedVer > startVer && j.deletedVer > j.contentVer) continue; // deleted during fetch
-            result.set(m.id, m); // realtime create/update/reaction during the fetch -> keep
+            result.set(m.id, m); // realtime create/update during the fetch -> keep
             continue;
           }
           if (!fullPage) continue; // partial/empty page is authoritative for the whole channel -> drop
@@ -422,6 +430,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         return {
           messages: { ...s.messages, [channelId]: sortMessages(Array.from(result.values())) },
           hasMore: { ...s.hasMore, [channelId]: newHasMore },
+          committedSeq: Math.max(s.committedSeq, mySeq),
           // Clear a raced request's error only if this success is at least as new.
           ...(mySeq >= s.errorSeq ? { error: null, errorSeq: 0 } : {}),
           ...(epochAdvanced
@@ -438,10 +447,13 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         set((s) => {
           // Obsolete requests clear their own loading but must not surface a stale
           // error over the fresh state: a base fetch superseded by a later-started
-          // one, or a pagination whose window was replaced/gapped since it started.
-          const superseded = isBase
-            ? mySeq < (s.maxStartedBaseSeq[channelId] ?? mySeq)
-            : (s.windowEpoch[channelId] ?? 0) !== startEpoch;
+          // one, a pagination whose window was replaced/gapped since it started, or
+          // any request older than one that has already committed successfully.
+          const superseded =
+            mySeq < s.committedSeq ||
+            (isBase
+              ? mySeq < (s.maxStartedBaseSeq[channelId] ?? mySeq)
+              : (s.windowEpoch[channelId] ?? 0) !== startEpoch);
           return {
             ...(merge ? {} : { isLoading: { ...s.isLoading, [channelId]: false } }),
             // Stamp the error with this fetch's sequence so an older success can't clear it.
@@ -569,6 +581,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       isLoading: {},
       error: null,
       errorSeq: 0,
+      committedSeq: 0,
       replyingTo: null,
     });
   },
