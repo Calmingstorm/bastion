@@ -1,11 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
 
@@ -13,6 +16,21 @@ import (
 	"github.com/Calmingstorm/bastion/server/internal/models"
 	"github.com/Calmingstorm/bastion/server/internal/realtime"
 )
+
+// directDMKey returns the two user IDs in canonical order (lo < hi by the same
+// byte comparison PostgreSQL uses for uuid), so a 1:1 DM maps to exactly one key
+// regardless of who initiates it.
+func directDMKey(a, b uuid.UUID) (lo, hi uuid.UUID) {
+	if bytes.Compare(a[:], b[:]) > 0 {
+		return b, a
+	}
+	return a, b
+}
+
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
 
 type DMHandler struct {
 	db  *pgxpool.Pool
@@ -41,43 +59,14 @@ func (h *DMHandler) CreateOrGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// For 1:1 DMs, check if one already exists
+	// 1:1 DMs are keyed by their canonical member pair and de-duplicated by a
+	// unique index, so concurrent creates converge on one channel.
 	if len(req.RecipientIDs) == 1 {
-		recipientID, err := parseUUID(req.RecipientIDs[0])
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid recipient ID"))
-			return
-		}
-
-		// Find existing DM between these two users
-		var existingChannelID *string
-		err = h.db.QueryRow(r.Context(),
-			`SELECT dm1.channel_id
-			 FROM dm_members dm1
-			 INNER JOIN dm_members dm2 ON dm1.channel_id = dm2.channel_id
-			 INNER JOIN channels c ON c.id = dm1.channel_id
-			 WHERE dm1.user_id = $1 AND dm2.user_id = $2 AND c.type = 'dm'
-			 LIMIT 1`,
-			userID, recipientID,
-		).Scan(&existingChannelID)
-
-		if existingChannelID != nil {
-			// Reopen if closed by current user
-			h.db.Exec(r.Context(),
-				`UPDATE dm_members SET closed_at = NULL
-				 WHERE channel_id = $1 AND user_id = $2 AND closed_at IS NOT NULL`,
-				*existingChannelID, userID,
-			)
-			// Return existing DM channel with recipients
-			ch := h.getDMChannel(r, *existingChannelID, userID)
-			if ch != nil {
-				writeJSON(w, http.StatusOK, ch)
-				return
-			}
-		}
+		h.createOrGetDirect(w, r, userID, req.RecipientIDs[0])
+		return
 	}
 
-	// Create new DM channel
+	// Group DM: always a fresh channel (no direct key).
 	tx, err := h.db.Begin(r.Context())
 	if err != nil {
 		log.Error().Err(err).Msg("failed to begin transaction")
@@ -88,7 +77,7 @@ func (h *DMHandler) CreateOrGet(w http.ResponseWriter, r *http.Request) {
 
 	var channelID string
 	err = tx.QueryRow(r.Context(),
-		`INSERT INTO channels (name, type) VALUES ('DM', 'dm')
+		`INSERT INTO channels (name, type, dm_kind) VALUES ('DM', 'dm', 'group')
 		 RETURNING id`,
 	).Scan(&channelID)
 	if err != nil {
@@ -156,6 +145,116 @@ func (h *DMHandler) CreateOrGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, ch)
+}
+
+// createOrGetDirect returns the existing 1:1 DM for (userID, recipient) or
+// creates it. Concurrent creates converge on one channel via the unique dm_key:
+// the transaction that inserts the row gets 201 and the DM_CREATE fan-out; a
+// conflict loser or an already-existing channel gets 200 with no fan-out.
+func (h *DMHandler) createOrGetDirect(w http.ResponseWriter, r *http.Request, userID uuid.UUID, recipientRaw string) {
+	recipientID, err := parseUUID(recipientRaw)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid recipient ID"))
+		return
+	}
+	if recipientID == userID {
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "cannot create a DM with yourself"))
+		return
+	}
+	lo, hi := directDMKey(userID, recipientID)
+
+	// Fast path: an existing keyed channel (no group-DM false match).
+	if id := h.lookupDirectDM(r, lo, hi); id != "" {
+		h.reopenDirect(r, id, userID)
+		if ch := h.getDMChannel(r, id, userID); ch != nil {
+			writeJSON(w, http.StatusOK, ch)
+			return
+		}
+	}
+
+	tx, err := h.db.Begin(r.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("failed to begin transaction")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+
+	var channelID string
+	err = tx.QueryRow(r.Context(),
+		`INSERT INTO channels (name, type, dm_kind, dm_user_lo, dm_user_hi)
+		 VALUES ('DM', 'dm', 'direct', $1, $2) RETURNING id`,
+		lo, hi,
+	).Scan(&channelID)
+	if err != nil {
+		// A concurrent create won the race for this pair; return its channel.
+		if isUniqueViolation(err) {
+			_ = tx.Rollback(r.Context())
+			if id := h.lookupDirectDM(r, lo, hi); id != "" {
+				h.reopenDirect(r, id, userID)
+				if ch := h.getDMChannel(r, id, userID); ch != nil {
+					writeJSON(w, http.StatusOK, ch)
+					return
+				}
+			}
+		}
+		log.Error().Err(err).Msg("failed to create DM channel")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+
+	for _, uid := range []uuid.UUID{userID, recipientID} {
+		if _, err = tx.Exec(r.Context(),
+			`INSERT INTO dm_members (channel_id, user_id) VALUES ($1, $2)`, channelID, uid); err != nil {
+			log.Error().Err(err).Msg("failed to add DM member")
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+			return
+		}
+	}
+
+	if err := tx.Commit(r.Context()); err != nil {
+		log.Error().Err(err).Msg("failed to commit transaction")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+
+	ch := h.getDMChannel(r, channelID, userID)
+	if ch == nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+
+	// Only the creating transaction subscribes participants and fans out.
+	if chUUID, perr := uuid.Parse(channelID); perr == nil {
+		h.hub.SubscribeUser(userID, chUUID)
+		h.hub.SubscribeUser(recipientID, chUUID)
+		h.hub.BroadcastToUser(recipientID, realtime.Event{
+			Type: realtime.EventDMCreate,
+			Data: h.getDMChannel(r, channelID, recipientID),
+		})
+	}
+
+	writeJSON(w, http.StatusCreated, ch)
+}
+
+// lookupDirectDM returns the channel id for a canonical direct-DM pair, or "".
+func (h *DMHandler) lookupDirectDM(r *http.Request, lo, hi uuid.UUID) string {
+	var id string
+	if err := h.db.QueryRow(r.Context(),
+		`SELECT id FROM channels WHERE dm_user_lo = $1 AND dm_user_hi = $2 AND dm_kind = 'direct'`, lo, hi).Scan(&id); err != nil {
+		return ""
+	}
+	return id
+}
+
+// reopenDirect clears the caller's own closed_at so returning to a DM re-opens it.
+func (h *DMHandler) reopenDirect(r *http.Request, channelID string, userID uuid.UUID) {
+	if _, err := h.db.Exec(r.Context(),
+		`UPDATE dm_members SET closed_at = NULL
+		 WHERE channel_id = $1 AND user_id = $2 AND closed_at IS NOT NULL`,
+		channelID, userID); err != nil {
+		log.Error().Err(err).Msg("failed to reopen DM membership")
+	}
 }
 
 func (h *DMHandler) Close(w http.ResponseWriter, r *http.Request) {
