@@ -200,9 +200,15 @@ apiClient.interceptors.response.use(
         processQueue(refreshError, null);
         // Only end the session when the refresh token itself is rejected. A
         // transient failure (network drop, 5xx) must not force a logout — leave
-        // the tokens in place so the next request can retry.
+        // the tokens in place so the next request can retry. And only if this
+        // refresh still belongs to the current session: a stale refresh (a newer
+        // account logged in while it was in flight) rejecting must not clear the
+        // new account's tokens or trigger its auth failure.
         const status = (refreshError as AxiosError)?.response?.status;
-        if (status === 401 || status === 403) {
+        if (
+          (status === 401 || status === 403) &&
+          isSessionGenerationCurrent(generationAtRefresh)
+        ) {
           clearTokens();
           onAuthFailure();
         }

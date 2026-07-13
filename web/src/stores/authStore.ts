@@ -8,7 +8,11 @@ import {
   clearTokens,
   abortInFlightRequests,
 } from '../api/client';
-import { invalidateSession } from '../api/session';
+import {
+  invalidateSession,
+  captureSessionGeneration,
+  isSessionGenerationCurrent,
+} from '../api/session';
 import { extractErrorMessage } from '../utils/errors';
 import { storage } from '../utils/storage';
 import { resetAllStores } from './resetAll';
@@ -42,11 +46,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   login: async (email: string, password: string) => {
     set({ isLoading: true, error: null });
+    // A login attempt is a new identity boundary: advance the generation now so it
+    // supersedes any older in-flight auth op or session work, and capture it to
+    // detect a newer boundary (a concurrent login, or a logout) during the request.
+    invalidateSession();
+    const generation = captureSessionGeneration();
     try {
       const response = await apiLogin(email, password);
-      // A new identity takes over: invalidate any work still tied to a prior one
-      // (account replacement) before the new tokens/user are established.
-      invalidateSession();
+      if (!isSessionGenerationCurrent(generation)) return; // superseded -> do not resurrect
       persistTokens(response.accessToken, response.refreshToken);
       storage.setItem('user', JSON.stringify(response.user));
       set({
@@ -58,6 +65,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         error: null,
       });
     } catch (err: unknown) {
+      if (!isSessionGenerationCurrent(generation)) return; // superseded
       const message = extractErrorMessage(err, 'Login failed. Please check your credentials.');
       set({ isLoading: false, error: message });
       throw new Error(message);
@@ -66,8 +74,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   register: async (username: string, email: string, password: string) => {
     set({ isLoading: true, error: null });
+    // Registration also establishes a new identity -- same boundary as login.
+    invalidateSession();
+    const generation = captureSessionGeneration();
     try {
       const response = await apiRegister(username, email, password);
+      if (!isSessionGenerationCurrent(generation)) return; // superseded -> do not resurrect
       persistTokens(response.accessToken, response.refreshToken);
       storage.setItem('user', JSON.stringify(response.user));
       set({
@@ -79,6 +91,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         error: null,
       });
     } catch (err: unknown) {
+      if (!isSessionGenerationCurrent(generation)) return; // superseded
       const message = extractErrorMessage(err, 'Registration failed. Please try again.');
       set({ isLoading: false, error: message });
       throw new Error(message);

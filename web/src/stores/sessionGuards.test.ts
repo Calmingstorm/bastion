@@ -27,9 +27,12 @@ vi.mock('../api/client', () => ({
 vi.mock('./resetAll', () => ({ resetAllStores: vi.fn() }));
 
 import * as client from '../api/client';
+import type { LoginResponse, ReadState } from '../types';
 import { resetAllStores } from './resetAll';
 import { useServerStore } from './serverStore';
 import { useDMStore } from './dmStore';
+import { useUnreadStore } from './unreadStore';
+import { usePermissionStore } from './permissionStore';
 import { useAuthStore } from './authStore';
 import {
   captureSessionGeneration,
@@ -127,6 +130,59 @@ describe('session-boundary guards', () => {
     const result = await p;
     expect(result).toBeUndefined(); // not returned as a new-session success
     expect(useDMStore.getState().dmChannels).toEqual([]);
+  });
+
+  it('unreadStore.fetchReadStates: a response after the session ends does not write', async () => {
+    useUnreadStore.setState({ readStates: {} });
+    const d = deferred<ReadState[]>();
+    vi.mocked(client.apiGetReadStates).mockReturnValue(d.promise);
+    const p = useUnreadStore.getState().fetchReadStates();
+    invalidateSession();
+    d.resolve([{ channelId: 'c-old', userId: 'u', lastMessageId: 'm', lastReadAt: '', mentionCount: 0 } as ReadState]);
+    await p;
+    expect(useUnreadStore.getState().readStates).toEqual({});
+  });
+
+  it('unreadStore.ackChannel: an ack that resolves after the session ends does not write', async () => {
+    useUnreadStore.setState({ readStates: {}, unreadChannels: new Set(['c1']) });
+    const d = deferred<void>();
+    vi.mocked(client.apiAckChannel).mockReturnValue(d.promise);
+    const p = useUnreadStore.getState().ackChannel('c1', 'm1');
+    invalidateSession();
+    d.resolve();
+    await p;
+    expect(useUnreadStore.getState().readStates).toEqual({}); // no read-state written
+    expect(useUnreadStore.getState().unreadChannels.has('c1')).toBe(true); // not cleared
+  });
+
+  it('permissionStore.fetchPermissions: a response after the session ends does not write', async () => {
+    usePermissionStore.setState({ permissions: {} });
+    const d = deferred<{ permissions: number }>();
+    vi.mocked(client.apiGetMemberPermissions).mockReturnValue(d.promise);
+    const p = usePermissionStore.getState().fetchPermissions('s-old');
+    invalidateSession();
+    d.resolve({ permissions: 7 });
+    await p;
+    expect(usePermissionStore.getState().permissions).toEqual({});
+  });
+
+  it('a login response resolving after a newer identity boundary does not resurrect the session', async () => {
+    useAuthStore.setState({ isAuthenticated: false, user: null });
+    const d = deferred<LoginResponse>();
+    vi.mocked(client.apiLogin).mockReturnValue(d.promise);
+    const p = useAuthStore.getState().login('a@b.c', 'pw'); // invalidates + captures at entry
+    invalidateSession(); // a newer boundary (concurrent login / logout) supersedes it
+    d.resolve({ user: { id: 'u-old', username: 'old' }, accessToken: 'a', refreshToken: 'r' } as LoginResponse);
+    await p;
+    expect(useAuthStore.getState().isAuthenticated).toBe(false); // stale login did not authenticate
+    expect(useAuthStore.getState().user).toBeNull();
+  });
+
+  it('register advances the session generation at entry (establishes a new identity)', () => {
+    const g = captureSessionGeneration();
+    vi.mocked(client.apiRegister).mockReturnValue(new Promise(() => {})); // hangs
+    void useAuthStore.getState().register('u', 'a@b.c', 'pw');
+    expect(isSessionGenerationCurrent(g)).toBe(false); // prior generation invalidated
   });
 
   it('logout advances the session generation BEFORE it aborts requests or resets stores', () => {
