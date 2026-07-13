@@ -145,6 +145,13 @@ export class WebSocketClient {
     // and will no-op, even though onmessage is not nulled and close() is async.
     this.connectionGen++;
     this.intentionalClose = true;
+    // A disconnect ends the session (logout / a fresh connect's leading teardown).
+    // Reset the reconnect lineage so the NEXT session's first open is classified as
+    // an initial connection, not a reconnect -- otherwise it would fire a spurious
+    // resyncAfterReconnect. A network-drop reconnect does NOT come through here (it
+    // runs onclose -> scheduleReconnect -> doConnect), so it correctly stays a
+    // reconnect.
+    this.wasConnectedBefore = false;
     this.removeAllHandlers();
 
     if (this.reconnectTimer) {

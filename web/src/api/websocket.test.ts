@@ -42,7 +42,14 @@ describe('WebSocketClient connection generation', () => {
 
   afterEach(() => {
     globalThis.WebSocket = original;
+    vi.useRealTimers();
   });
+
+  // Reach the private timers to prove a superseded callback did not touch live
+  // connection state (start/stop the heartbeat, schedule a reconnect).
+  function timers(client: WebSocketClient) {
+    return client as unknown as { heartbeatTimer: unknown; reconnectTimer: unknown };
+  }
 
   it('a frame buffered on a superseded socket is not dispatched to the next session handlers', () => {
     const client = new WebSocketClient();
@@ -92,5 +99,57 @@ describe('WebSocketClient connection generation', () => {
     // otherwise fire the new session's reconnect resync from a dead socket.
     ws1.onopen?.();
     expect(newConnected).not.toHaveBeenCalled();
+  });
+
+  it('the first connection of a new session is initial, not a reconnect', () => {
+    const client = new WebSocketClient();
+    client.connect('token-old');
+    const ws1 = FakeWS.instances[0];
+    ws1.onopen?.(); // first-ever open: sets wasConnectedBefore
+
+    client.disconnect(); // logout ends the session
+
+    // New session connects and registers its CONNECTED handler.
+    const connected = vi.fn();
+    client.on('CONNECTED', connected);
+    client.connect('token-new');
+    const ws2 = FakeWS.instances[FakeWS.instances.length - 1];
+    ws2.onopen?.();
+
+    // A fresh authentication session must not be classified as a reconnect (which
+    // would fire a spurious resyncAfterReconnect). Only a network-drop reconnect --
+    // which never calls disconnect() -- keeps isReconnect true.
+    expect(connected).toHaveBeenCalledWith({ isReconnect: false });
+  });
+
+  it('a superseded onopen firing after disconnect (before the next connect) does nothing', () => {
+    vi.useFakeTimers();
+    const client = new WebSocketClient();
+    client.connect('token-old');
+    const ws1 = FakeWS.instances[0];
+    client.disconnect(); // supersedes ws1's generation and stops the heartbeat
+
+    // ws1's connect attempt opens late, after disconnect but before any new connect.
+    // It must not restart the heartbeat (which disconnect just stopped).
+    ws1.onopen?.();
+    expect(timers(client).heartbeatTimer).toBeNull();
+  });
+
+  it('a superseded onclose firing after the new socket opens does not stop its heartbeat or reconnect', () => {
+    vi.useFakeTimers();
+    const client = new WebSocketClient();
+    client.connect('token-old');
+    const ws1 = FakeWS.instances[0];
+    client.disconnect(); // ws1.close() is called but ws1.onclose is not nulled
+    client.connect('token-new');
+    const ws2 = FakeWS.instances[FakeWS.instances.length - 1];
+    ws2.onopen?.(); // the live socket starts its heartbeat
+    expect(timers(client).heartbeatTimer).not.toBeNull();
+
+    // ws1's close event fires late, after ws2 is live. Its generation is stale, so
+    // it must not stop ws2's heartbeat nor schedule a reconnect.
+    ws1.onclose?.();
+    expect(timers(client).heartbeatTimer).not.toBeNull(); // ws2's heartbeat survives
+    expect(timers(client).reconnectTimer).toBeNull(); // no spurious reconnect
   });
 });
