@@ -210,4 +210,20 @@ describe('ConfirmDialog', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(document.activeElement).toBe(document.querySelector('[data-focus-fallback]'));
   });
+
+  it('confirm sends focus to the fallback even while the trigger still exists (async removal)', async () => {
+    // Production category delete closes the dialog, then an async refetch unmounts
+    // the trigger. If confirm restored focus to the still-present trigger, focus
+    // would orphan to <body> when the refetch removes it. Here the trigger is NOT
+    // removed on confirm, yet focus must still go to the fallback, not the trigger.
+    const user = userEvent.setup();
+    render(<MenuHarness />); // onConfirm closes but does not remove the trigger
+    await user.click(screen.getByRole('button', { name: 'menu item' }));
+    await user.click(screen.getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    const trigger = screen.getByRole('button', { name: 'persistent trigger' });
+    expect(trigger).toBeInTheDocument(); // still here (removal would be async in prod)
+    expect(document.activeElement).toBe(document.querySelector('[data-focus-fallback]'));
+    expect(document.activeElement).not.toBe(trigger);
+  });
 });
