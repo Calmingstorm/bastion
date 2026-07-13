@@ -11,9 +11,32 @@ vi.mock('../api/client', () => ({
 import { useMessageStore } from './messageStore';
 import * as client from '../api/client';
 
+function tISO(sec: number): string {
+  return `2026-01-01T00:00:${String(sec).padStart(2, '0')}.000Z`;
+}
 function msg(id: string, createdAt: string, content = id): Message {
   return { id, channelId: 'c1', author: { id: 'u1' }, content, createdAt } as Message;
 }
+// ASC block of `count` messages, ids `${prefix}0..`, timestamps starting at startSec.
+function block(prefix: string, count: number, startSec: number): Message[] {
+  return Array.from({ length: count }, (_, i) => msg(`${prefix}${i}`, tISO(startSec + i)));
+}
+// API returns DESC (newest first).
+function desc(list: Message[]): Message[] {
+  return [...list].reverse();
+}
+function ids(): string[] {
+  return (useMessageStore.getState().messages.c1 || []).map((m) => m.id);
+}
+function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+const LIMIT = 50;
 
 describe('messageStore.fetchMessages', () => {
   beforeEach(() => {
@@ -21,216 +44,262 @@ describe('messageStore.fetchMessages', () => {
     vi.mocked(client.apiGetMessages).mockReset();
   });
 
+  // --- Basics --------------------------------------------------------------
+
   it('replaces on an initial load', async () => {
-    // The API returns DESC (newest first); the store reverses to ASC.
-    vi.mocked(client.apiGetMessages).mockResolvedValue([msg('m3', '2026-01-03'), msg('m2', '2026-01-02')]);
+    vi.mocked(client.apiGetMessages).mockResolvedValue(desc([msg('m2', tISO(2)), msg('m3', tISO(3))]));
     await useMessageStore.getState().fetchMessages('c1');
-    expect(useMessageStore.getState().messages.c1.map((m) => m.id)).toEqual(['m2', 'm3']);
+    expect(ids()).toEqual(['m2', 'm3']);
   });
 
-  it('merges on a reconnect resync, preserving scrolled-in history and deduping', async () => {
-    // Existing: older scrolled-in history (m1, m2) plus a later live message (m5).
-    useMessageStore.setState({
-      messages: { c1: [msg('m1', '2026-01-01'), msg('m2', '2026-01-02'), msg('m5', '2026-01-05')] },
-      hasMore: { c1: true },
-    });
-    // The resync returns the latest page: m5 (overlap) and a new m4.
-    vi.mocked(client.apiGetMessages).mockResolvedValue([msg('m5', '2026-01-05'), msg('m4', '2026-01-04')]);
-
+  it('applies a server edit missed while disconnected (no realtime event -> fetched wins)', async () => {
+    useMessageStore.setState({ messages: { c1: [msg('m1', tISO(1), 'stale')] }, hasMore: { c1: false } });
+    vi.mocked(client.apiGetMessages).mockResolvedValue([msg('m1', tISO(1), 'server-edited')]);
     await useMessageStore.getState().fetchMessages('c1', undefined, true);
-
-    // Union deduped by id and sorted ascending: history (m1, m2) survives (a
-    // wholesale replace would drop it), m4 is added, and m5 is not duplicated.
-    expect(useMessageStore.getState().messages.c1.map((m) => m.id)).toEqual(['m1', 'm2', 'm4', 'm5']);
-    // Older-history availability is unchanged by a resync.
-    expect(useMessageStore.getState().hasMore.c1).toBe(true);
-  });
-
-  it('does not overwrite live updates or resurrect live deletes during the resync', async () => {
-    useMessageStore.setState({
-      messages: { c1: [msg('m1', '2026-01-01', 'v1'), msg('m2', '2026-01-02')] },
-      hasMore: { c1: false },
-    });
-
-    // While the fetch is in flight, live events land: m1 is edited and m2 is
-    // deleted. The fetched page is the pre-change (stale) snapshot.
-    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
-      useMessageStore.setState((s) => ({
-        messages: {
-          c1: (s.messages.c1 || [])
-            .filter((m) => m.id !== 'm2')
-            .map((m) => (m.id === 'm1' ? msg('m1', '2026-01-01', 'edited') : m)),
-        },
-      }));
-      return [msg('m2', '2026-01-02'), msg('m1', '2026-01-01', 'v1')]; // DESC, stale
-    });
-
-    await useMessageStore.getState().fetchMessages('c1', undefined, true);
-
-    const list = useMessageStore.getState().messages.c1;
-    expect(list.map((m) => m.id)).toEqual(['m1']); // m2 stays deleted, not resurrected
-    expect(list[0].content).toBe('edited'); // live edit preserved, not clobbered by stale fetch
-  });
-
-  it('applies a server edit missed while disconnected (unchanged local -> fetched wins)', async () => {
-    // Local copy is stale and untouched since the request began.
-    useMessageStore.setState({
-      messages: { c1: [msg('m1', '2026-01-01', 'stale')] },
-      hasMore: { c1: false },
-    });
-    // The server edited m1 while we were disconnected; the resync must apply it.
-    vi.mocked(client.apiGetMessages).mockResolvedValue([msg('m1', '2026-01-01', 'server-edited')]);
-
-    await useMessageStore.getState().fetchMessages('c1', undefined, true);
-
-    const list = useMessageStore.getState().messages.c1;
-    expect(list.map((m) => m.id)).toEqual(['m1']);
-    expect(list[0].content).toBe('server-edited');
-  });
-
-  it('does not resurrect when live deletes empty the list during the resync', async () => {
-    useMessageStore.setState({
-      messages: { c1: [msg('m1', '2026-01-01'), msg('m2', '2026-01-02')] },
-      hasMore: { c1: false },
-    });
-    // Both messages are deleted during the fetch; the fetched page is stale.
-    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
-      useMessageStore.setState({ messages: { c1: [] } });
-      return [msg('m2', '2026-01-02'), msg('m1', '2026-01-01')];
-    });
-
-    await useMessageStore.getState().fetchMessages('c1', undefined, true);
-    expect(useMessageStore.getState().messages.c1).toEqual([]);
-  });
-
-  it('does not resurrect a message deleted during the fetch that was absent at start', async () => {
-    useMessageStore.setState({ messages: { c1: [] }, hasMore: { c1: false }, recentEvents: {} });
-    // A realtime delete for m9 arrives during the fetch; m9 was never loaded here,
-    // but the older fetched page still contains it.
-    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
-      useMessageStore.getState().deleteMessage('c1', 'm9');
-      return [msg('m9', '2026-01-09')];
-    });
-
-    await useMessageStore.getState().fetchMessages('c1', undefined, true);
-    expect(useMessageStore.getState().messages.c1).toEqual([]);
-  });
-
-  it('applies a realtime update during the fetch to a message absent at start', async () => {
-    useMessageStore.setState({ messages: { c1: [] }, hasMore: { c1: false }, recentEvents: {} });
-    // m9 is not loaded; a realtime update lands during the fetch, and the older
-    // fetched page carries the pre-update (stale) copy.
-    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
-      useMessageStore.getState().updateMessage('c1', msg('m9', '2026-01-09', 'live-edit'));
-      return [msg('m9', '2026-01-09', 'stale')];
-    });
-
-    await useMessageStore.getState().fetchMessages('c1', undefined, true);
-    const list = useMessageStore.getState().messages.c1;
-    expect(list.map((m) => m.id)).toEqual(['m9']);
-    expect(list[0].content).toBe('live-edit'); // realtime update wins over the stale fetch
+    expect(useMessageStore.getState().messages.c1[0].content).toBe('server-edited');
   });
 
   it('runs a merge resync even when a load is already in flight', async () => {
     useMessageStore.setState({
-      messages: { c1: [msg('m1', '2026-01-01')] },
+      messages: { c1: [msg('m1', tISO(1))] },
       hasMore: { c1: false },
-      isLoading: { c1: true }, // a pagination is in flight
-      recentEvents: {},
+      isLoading: { c1: true },
     });
-    vi.mocked(client.apiGetMessages).mockResolvedValue([msg('m2', '2026-01-02'), msg('m1', '2026-01-01')]);
-
+    vi.mocked(client.apiGetMessages).mockResolvedValue(desc([msg('m1', tISO(1)), msg('m2', tISO(2))]));
     await useMessageStore.getState().fetchMessages('c1', undefined, true);
-
-    // The resync was NOT skipped by isLoading: the missed message is now present.
-    expect(useMessageStore.getState().messages.c1.map((m) => m.id)).toEqual(['m1', 'm2']);
+    expect(ids()).toEqual(['m1', 'm2']);
     expect(client.apiGetMessages).toHaveBeenCalled();
   });
 
-  it('reset clears recent-event tombstones', () => {
-    useMessageStore.setState({ recentEvents: { m1: { gen: 1, ts: Date.now(), kind: 'delete' } } });
-    useMessageStore.getState().reset();
-    expect(useMessageStore.getState().recentEvents).toEqual({});
+  // --- Matrix 1: initial A then resync B, both completion orders, B wins ----
+
+  it('resync (later base) wins when it completes AFTER the initial load', async () => {
+    const a = deferred<Message[]>();
+    vi.mocked(client.apiGetMessages)
+      .mockImplementationOnce(() => a.promise) // A: initial
+      .mockResolvedValueOnce(desc([msg('m1', tISO(1), 'B'), msg('m2', tISO(2))])); // B: resync
+    const aDone = useMessageStore.getState().fetchMessages('c1'); // seq 1
+    await useMessageStore.getState().fetchMessages('c1', undefined, true); // seq 2 applies [m1 B, m2]
+    a.resolve([msg('m1', tISO(1), 'A')]); // A settles later, stale
+    await aDone;
+    expect(ids()).toEqual(['m1', 'm2']);
+    expect(useMessageStore.getState().messages.c1[0].content).toBe('B');
   });
 
-  it('pagination does not resurrect a message deleted by realtime during the fetch', async () => {
-    // Current window loaded; scroll up to page in older messages.
+  it('resync (later base) wins when it completes BEFORE the stale initial load', async () => {
+    const a = deferred<Message[]>();
+    const b = deferred<Message[]>();
+    vi.mocked(client.apiGetMessages)
+      .mockImplementationOnce(() => a.promise) // A: initial (seq 1)
+      .mockImplementationOnce(() => b.promise); // B: resync (seq 2)
+    const aDone = useMessageStore.getState().fetchMessages('c1');
+    const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true);
+    b.resolve(desc([msg('m1', tISO(1), 'B'), msg('m2', tISO(2))])); // B settles first
+    await bDone;
+    a.resolve([msg('m1', tISO(1), 'A')]); // A settles later -> discarded (older base)
+    await aDone;
+    expect(ids()).toEqual(['m1', 'm2']);
+    expect(useMessageStore.getState().messages.c1[0].content).toBe('B');
+  });
+
+  // --- Matrix 2: reactions during a held fetch, loaded and absent ----------
+
+  function reactionUsers(id: string, emoji: string): string[] {
+    const m = (useMessageStore.getState().messages.c1 || []).find((x) => x.id === id);
+    return m?.reactions?.find((r) => r.emoji === emoji)?.users || [];
+  }
+
+  it('applies a reaction that lands during a resync on a LOADED message', async () => {
+    useMessageStore.setState({ messages: { c1: [msg('m1', tISO(1))] }, hasMore: { c1: false } });
+    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
+      useMessageStore.getState().addReaction('c1', 'm1', '👍', 'u2');
+      return [msg('m1', tISO(1))]; // stale copy, no reaction
+    });
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+    expect(reactionUsers('m1', '👍')).toEqual(['u2']);
+  });
+
+  it('applies a reaction for a message ABSENT at start once the fetch supplies the baseline', async () => {
+    useMessageStore.setState({ messages: { c1: [] }, hasMore: { c1: false } });
+    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
+      useMessageStore.getState().addReaction('c1', 'm9', '🎉', 'u2'); // m9 not loaded -> patch
+      return [msg('m9', tISO(9))]; // fetch supplies the baseline
+    });
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+    expect(reactionUsers('m9', '🎉')).toEqual(['u2']);
+  });
+
+  it('applies a reaction REMOVAL patch for an absent message onto the fetched baseline', async () => {
+    useMessageStore.setState({ messages: { c1: [] }, hasMore: { c1: false } });
+    const withReaction = { ...msg('m9', tISO(9)), reactions: [{ emoji: '👍', count: 1, users: ['u2'] }] } as Message;
+    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
+      useMessageStore.getState().removeReaction('c1', 'm9', '👍', 'u2'); // patch remove
+      return [withReaction];
+    });
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+    expect(reactionUsers('m9', '👍')).toEqual([]);
+  });
+
+  it('reaction add is idempotent (optimistic + realtime echo does not double-count)', () => {
+    useMessageStore.setState({ messages: { c1: [msg('m1', tISO(1))] } });
+    useMessageStore.getState().addReaction('c1', 'm1', '👍', 'u2');
+    useMessageStore.getState().addReaction('c1', 'm1', '👍', 'u2');
+    expect(reactionUsers('m1', '👍')).toEqual(['u2']);
+    expect(useMessageStore.getState().messages.c1[0].reactions?.[0].count).toBe(1);
+  });
+
+  // --- Matrix 3: empty / partial / full-overlap / full-no-overlap ----------
+
+  it('resync with an EMPTY response drops all cached messages and clears hasMore', async () => {
+    useMessageStore.setState({ messages: { c1: [msg('m1', tISO(1))] }, hasMore: { c1: true } });
+    vi.mocked(client.apiGetMessages).mockResolvedValue([]);
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+    expect(ids()).toEqual([]);
+    expect(useMessageStore.getState().hasMore.c1).toBe(false);
+  });
+
+  it('resync with a PARTIAL page applies a delete missed while disconnected', async () => {
+    useMessageStore.setState({ messages: { c1: [msg('m1', tISO(1)), msg('m2', tISO(2))] }, hasMore: { c1: true } });
+    vi.mocked(client.apiGetMessages).mockResolvedValue([msg('m2', tISO(2))]); // m1 deleted while offline
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+    expect(ids()).toEqual(['m2']);
+    expect(useMessageStore.getState().hasMore.c1).toBe(false);
+  });
+
+  it('resync with a FULL page that overlaps the cache keeps history below the window', async () => {
+    const latest = block('m', LIMIT, 10); // m0..m49 @ sec 10..59
     useMessageStore.setState({
-      messages: { c1: [msg('m5', '2026-01-05'), msg('m6', '2026-01-06')] },
+      messages: { c1: [msg('h0', tISO(0)), ...latest] }, // h0 is older scrolled-in history
       hasMore: { c1: true },
     });
-    // During the older-page fetch a realtime delete for m4 arrives; the page
-    // (fetched before the delete) still contains m4.
+    vi.mocked(client.apiGetMessages).mockResolvedValue(desc(latest)); // same latest 50 (overlap)
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+    const got = ids();
+    expect(got).toContain('h0'); // history preserved
+    expect(got.length).toBe(LIMIT + 1);
+    expect(useMessageStore.getState().hasMore.c1).toBe(true); // provenance preserved
+  });
+
+  it('resync with a FULL page and NO overlap drops the stale cache and sets hasMore', async () => {
+    useMessageStore.setState({ messages: { c1: block('old', LIMIT, 0) }, hasMore: { c1: false } });
+    vi.mocked(client.apiGetMessages).mockResolvedValue(desc(block('n', LIMIT, 100))); // 50 all-new
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+    const got = ids();
+    expect(got).not.toContain('old0'); // gap -> old segment dropped
+    expect(got).toContain('n0');
+    expect(got.length).toBe(LIMIT);
+    expect(useMessageStore.getState().hasMore.c1).toBe(true); // scroll can rebuild history
+  });
+
+  // --- Matrix 4: a post-start create must not manufacture false overlap ----
+
+  it('a realtime create during the fetch does not count as cache overlap', async () => {
+    useMessageStore.setState({ messages: { c1: [msg('old0', tISO(0))] }, hasMore: { c1: false } });
+    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
+      // n0 is in the fetched page; adding it now would look like overlap if overlap
+      // were read from settlement state instead of request-start ids.
+      useMessageStore.getState().addMessage('c1', block('n', LIMIT, 100)[0]);
+      return desc(block('n', LIMIT, 100));
+    });
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+    const got = ids();
+    expect(got).not.toContain('old0'); // no true overlap -> old segment dropped
+    expect(got.length).toBe(LIMIT);
+  });
+
+  // --- Matrix 5: pagination invalidated by a no-overlap base reset ----------
+
+  it('a pagination started before a gap reset does not reattach its stale segment', async () => {
+    useMessageStore.setState({ messages: { c1: block('old', LIMIT, 50) }, hasMore: { c1: true } });
+    const p = deferred<Message[]>();
+    vi.mocked(client.apiGetMessages)
+      .mockImplementationOnce(() => p.promise) // pagination (older page), held
+      .mockResolvedValueOnce(desc(block('n', LIMIT, 200))); // resync: full, no overlap -> gap
+
+    const pDone = useMessageStore.getState().fetchMessages('c1', 'old0'); // pagination starts (epoch 0)
+    await useMessageStore.getState().fetchMessages('c1', undefined, true); // gap reset -> epoch advances
+    p.resolve(desc(block('p', LIMIT, 0))); // pagination settles against the OLD window
+    await pDone;
+
+    const got = ids();
+    expect(got).not.toContain('p0'); // stale older segment not spliced back
+    expect(got).toContain('n0');
+    expect(got.length).toBe(LIMIT);
+  });
+
+  // --- Matrix 6: empty response preserves only legitimate post-start upserts
+
+  it('an empty response preserves a post-start create but drops pre-start cache', async () => {
+    useMessageStore.setState({ messages: { c1: [msg('m1', tISO(1))] }, hasMore: { c1: true } });
+    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
+      useMessageStore.getState().addMessage('c1', msg('m2', tISO(2))); // post-start create
+      return []; // empty latest window
+    });
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+    expect(ids()).toEqual(['m2']); // m1 (pre-start) dropped, m2 (post-start) kept
+  });
+
+  // --- Matrix 7: reset during an in-flight request blocks its commit -------
+
+  it('a reset during an in-flight resync prevents the response from committing', async () => {
+    useMessageStore.setState({ messages: { c1: [] }, hasMore: { c1: false } });
+    const b = deferred<Message[]>();
+    vi.mocked(client.apiGetMessages).mockImplementation(() => b.promise);
+    const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true);
+    useMessageStore.getState().reset(); // session epoch bumps
+    b.resolve(desc([msg('m1', tISO(1)), msg('m2', tISO(2))]));
+    await bDone;
+    expect(useMessageStore.getState().messages.c1 || []).toEqual([]);
+  });
+
+  // --- Reconcile fundamentals via real mutations ---------------------------
+
+  it('does not resurrect a message deleted by realtime during the fetch', async () => {
+    useMessageStore.setState({ messages: { c1: [msg('m1', tISO(1)), msg('m2', tISO(2))] }, hasMore: { c1: false } });
+    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
+      useMessageStore.getState().deleteMessage('c1', 'm2');
+      return desc([msg('m1', tISO(1)), msg('m2', tISO(2))]); // stale page still has m2
+    });
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+    expect(ids()).toEqual(['m1']);
+  });
+
+  it('pagination does not resurrect a realtime-deleted message', async () => {
+    useMessageStore.setState({
+      messages: { c1: [msg('m5', tISO(50)), msg('m6', tISO(51))] },
+      hasMore: { c1: true },
+    });
     vi.mocked(client.apiGetMessages).mockImplementation(async () => {
       useMessageStore.getState().deleteMessage('c1', 'm4');
-      return [msg('m4', '2026-01-04'), msg('m3', '2026-01-03')]; // DESC older page
+      return desc([msg('m3', tISO(30)), msg('m4', tISO(40))]); // older page containing m4
     });
-
-    await useMessageStore.getState().fetchMessages('c1', 'm5'); // before -> pagination
-    // m4 stays deleted; only the still-live older m3 is prepended.
-    expect(useMessageStore.getState().messages.c1.map((m) => m.id)).toEqual(['m3', 'm5', 'm6']);
+    await useMessageStore.getState().fetchMessages('c1', 'm5');
+    expect(ids()).toEqual(['m3', 'm5', 'm6']);
   });
 
-  it('a stale initial load does not clobber a newer resync result', async () => {
-    useMessageStore.setState({ messages: { c1: [] }, hasMore: { c1: false } });
-    let resolveA!: (v: Message[]) => void;
-    const aPending = new Promise<Message[]>((r) => {
-      resolveA = r;
-    });
-    vi.mocked(client.apiGetMessages)
-      .mockImplementationOnce(() => aPending) // A: initial load, started first, stale
-      .mockImplementationOnce(async () => [msg('m2', '2026-01-02'), msg('m1', '2026-01-01')]); // B: resync
-
-    const aDone = useMessageStore.getState().fetchMessages('c1'); // A starts (seq 1)
-    // B starts later (seq 2) and applies the fresh window while A is still pending.
-    await useMessageStore.getState().fetchMessages('c1', undefined, true);
-    expect(useMessageStore.getState().messages.c1.map((m) => m.id)).toEqual(['m1', 'm2']);
-
-    resolveA([msg('m1', '2026-01-01')]); // A settles late with a stale, smaller page
-    await aDone;
-    // A is discarded (started before the applied resync) -> resync result preserved.
-    expect(useMessageStore.getState().messages.c1.map((m) => m.id)).toEqual(['m1', 'm2']);
-  });
-
-  it('an initial load preserves a message created by realtime during its fetch', async () => {
-    useMessageStore.setState({ messages: { c1: [] }, hasMore: { c1: false } });
-    // A realtime create for m2 lands during the fetch; the HTTP page predates it.
-    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
-      useMessageStore.getState().addMessage('c1', msg('m2', '2026-01-02'));
-      return [msg('m1', '2026-01-01')];
-    });
-
-    await useMessageStore.getState().fetchMessages('c1');
-    // m2 survives the fresh-window replace because it was created during the fetch.
-    expect(useMessageStore.getState().messages.c1.map((m) => m.id)).toEqual(['m1', 'm2']);
-  });
-
-  it('does not prune an event a slow resync still needs', async () => {
+  it('does not prune a journal entry a slow resync still needs', async () => {
     vi.useFakeTimers();
     try {
       useMessageStore.setState({ messages: { c1: [] }, hasMore: { c1: false } });
-      let resolveB!: (v: Message[]) => void;
-      const bPending = new Promise<Message[]>((r) => {
-        resolveB = r;
-      });
-      vi.mocked(client.apiGetMessages).mockImplementationOnce(() => bPending);
-
-      const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true); // resync B active
-      // During B, a realtime update for the unloaded m9 is recorded.
-      useMessageStore.getState().updateMessage('c1', msg('m9', '2026-01-09', 'live'));
-      // Age past the 60s window, then fire an unrelated event to trigger pruning.
-      vi.advanceTimersByTime(61_000);
-      useMessageStore.getState().deleteMessage('c1', 'unrelated');
-
-      resolveB([msg('m9', '2026-01-09', 'stale')]); // B settles with the pre-update copy
+      const b = deferred<Message[]>();
+      vi.mocked(client.apiGetMessages).mockImplementation(() => b.promise);
+      const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true); // resync active
+      useMessageStore.getState().updateMessage('c1', msg('m9', tISO(9), 'live')); // journal upsert, ver > start
+      vi.advanceTimersByTime(61_000); // age past the 60s window
+      useMessageStore.getState().deleteMessage('c1', 'unrelated'); // triggers pruning
+      b.resolve([msg('m9', tISO(9), 'stale')]);
       await bDone;
-
-      // m9's update survived pruning (B was active) and was applied over the stale page.
       const list = useMessageStore.getState().messages.c1;
       expect(list.map((m) => m.id)).toEqual(['m9']);
-      expect(list[0].content).toBe('live');
+      expect(list[0].content).toBe('live'); // survived pruning -> applied over the stale page
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('reset clears the reconciliation journal', () => {
+    useMessageStore.setState({ journal: { m1: { ver: 1, ts: Date.now(), kind: 'delete' } } });
+    useMessageStore.getState().reset();
+    expect(useMessageStore.getState().journal).toEqual({});
   });
 });
