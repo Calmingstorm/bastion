@@ -17,7 +17,7 @@ function msg(id: string, createdAt: string, content = id): Message {
 
 describe('messageStore.fetchMessages', () => {
   beforeEach(() => {
-    useMessageStore.setState({ messages: {}, hasMore: {}, isLoading: {} });
+    useMessageStore.getState().reset();
     vi.mocked(client.apiGetMessages).mockReset();
   });
 
@@ -151,5 +151,86 @@ describe('messageStore.fetchMessages', () => {
     useMessageStore.setState({ recentEvents: { m1: { gen: 1, ts: Date.now(), kind: 'delete' } } });
     useMessageStore.getState().reset();
     expect(useMessageStore.getState().recentEvents).toEqual({});
+  });
+
+  it('pagination does not resurrect a message deleted by realtime during the fetch', async () => {
+    // Current window loaded; scroll up to page in older messages.
+    useMessageStore.setState({
+      messages: { c1: [msg('m5', '2026-01-05'), msg('m6', '2026-01-06')] },
+      hasMore: { c1: true },
+    });
+    // During the older-page fetch a realtime delete for m4 arrives; the page
+    // (fetched before the delete) still contains m4.
+    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
+      useMessageStore.getState().deleteMessage('c1', 'm4');
+      return [msg('m4', '2026-01-04'), msg('m3', '2026-01-03')]; // DESC older page
+    });
+
+    await useMessageStore.getState().fetchMessages('c1', 'm5'); // before -> pagination
+    // m4 stays deleted; only the still-live older m3 is prepended.
+    expect(useMessageStore.getState().messages.c1.map((m) => m.id)).toEqual(['m3', 'm5', 'm6']);
+  });
+
+  it('a stale initial load does not clobber a newer resync result', async () => {
+    useMessageStore.setState({ messages: { c1: [] }, hasMore: { c1: false } });
+    let resolveA!: (v: Message[]) => void;
+    const aPending = new Promise<Message[]>((r) => {
+      resolveA = r;
+    });
+    vi.mocked(client.apiGetMessages)
+      .mockImplementationOnce(() => aPending) // A: initial load, started first, stale
+      .mockImplementationOnce(async () => [msg('m2', '2026-01-02'), msg('m1', '2026-01-01')]); // B: resync
+
+    const aDone = useMessageStore.getState().fetchMessages('c1'); // A starts (seq 1)
+    // B starts later (seq 2) and applies the fresh window while A is still pending.
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+    expect(useMessageStore.getState().messages.c1.map((m) => m.id)).toEqual(['m1', 'm2']);
+
+    resolveA([msg('m1', '2026-01-01')]); // A settles late with a stale, smaller page
+    await aDone;
+    // A is discarded (started before the applied resync) -> resync result preserved.
+    expect(useMessageStore.getState().messages.c1.map((m) => m.id)).toEqual(['m1', 'm2']);
+  });
+
+  it('an initial load preserves a message created by realtime during its fetch', async () => {
+    useMessageStore.setState({ messages: { c1: [] }, hasMore: { c1: false } });
+    // A realtime create for m2 lands during the fetch; the HTTP page predates it.
+    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
+      useMessageStore.getState().addMessage('c1', msg('m2', '2026-01-02'));
+      return [msg('m1', '2026-01-01')];
+    });
+
+    await useMessageStore.getState().fetchMessages('c1');
+    // m2 survives the fresh-window replace because it was created during the fetch.
+    expect(useMessageStore.getState().messages.c1.map((m) => m.id)).toEqual(['m1', 'm2']);
+  });
+
+  it('does not prune an event a slow resync still needs', async () => {
+    vi.useFakeTimers();
+    try {
+      useMessageStore.setState({ messages: { c1: [] }, hasMore: { c1: false } });
+      let resolveB!: (v: Message[]) => void;
+      const bPending = new Promise<Message[]>((r) => {
+        resolveB = r;
+      });
+      vi.mocked(client.apiGetMessages).mockImplementationOnce(() => bPending);
+
+      const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true); // resync B active
+      // During B, a realtime update for the unloaded m9 is recorded.
+      useMessageStore.getState().updateMessage('c1', msg('m9', '2026-01-09', 'live'));
+      // Age past the 60s window, then fire an unrelated event to trigger pruning.
+      vi.advanceTimersByTime(61_000);
+      useMessageStore.getState().deleteMessage('c1', 'unrelated');
+
+      resolveB([msg('m9', '2026-01-09', 'stale')]); // B settles with the pre-update copy
+      await bDone;
+
+      // m9's update survived pruning (B was active) and was applied over the stale page.
+      const list = useMessageStore.getState().messages.c1;
+      expect(list.map((m) => m.id)).toEqual(['m9']);
+      expect(list[0].content).toBe('live');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
