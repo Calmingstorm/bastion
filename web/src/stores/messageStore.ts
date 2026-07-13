@@ -445,12 +445,17 @@ export const useMessageStore = create<MessageState>((set, get) => ({
           }
           const existingIds = new Set(existing.map((m) => m.id));
           const older = reconciledFetched.filter((m) => !existingIds.has(m.id));
+          // A full page that adds NOTHING new (every row already loaded) means the
+          // cursor -- the oldest loaded message's id -- did not advance, so the next
+          // "load older" would request the same page again forever. Stop instead of
+          // looping. Real remaining history always yields at least one new id.
+          const hasMore = fetched.length === MESSAGE_LIMIT && older.length > 0;
           // Pagination loads OLDER history; it does not refresh the latest window,
           // so it does NOT touch committedSeq or the load error -- a pagination
           // success must not suppress or clear a latest-window (base) failure.
           return {
             messages: { ...s.messages, [channelId]: [...older, ...existing] },
-            hasMore: { ...s.hasMore, [channelId]: fetched.length === MESSAGE_LIMIT },
+            hasMore: { ...s.hasMore, [channelId]: hasMore },
             isLoading: { ...s.isLoading, [channelId]: false },
           };
         }

@@ -994,4 +994,17 @@ describe('messageStore.fetchMessages', () => {
     await p;
     expect(ids()).toEqual(['m1']); // the old delete did not remove the new session's copy
   });
+
+  // --- Pagination loop guard (F34.3) --------------------------------------
+  it('a full older page of only duplicates stops pagination instead of looping', async () => {
+    const window = block('m', LIMIT, 1); // m0..m49 (ascending, m0 oldest)
+    useMessageStore.setState({ messages: { c1: window }, hasMore: { c1: true } });
+    // The server returns a full page that is entirely rows we already hold (e.g. a
+    // cursor that fails to advance). The oldest loaded id does not change, so paging
+    // again would request the same page forever.
+    vi.mocked(client.apiGetMessages).mockResolvedValue(desc(window));
+    await useMessageStore.getState().fetchMessages('c1', 'm0'); // load older, before the oldest
+    expect(useMessageStore.getState().hasMore.c1).toBe(false); // stuck cursor -> stop, do not loop
+    expect(ids().length).toBe(LIMIT); // nothing new prepended
+  });
 });

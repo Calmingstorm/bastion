@@ -152,4 +152,26 @@ describe('WebSocketClient connection generation', () => {
     expect(timers(client).heartbeatTimer).not.toBeNull(); // ws2's heartbeat survives
     expect(timers(client).reconnectTimer).toBeNull(); // no spurious reconnect
   });
+
+  it('reconnect backoff is jittered below the exponential ceiling', () => {
+    vi.useFakeTimers();
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const client = new WebSocketClient();
+      client.connect('t');
+      const ws1 = FakeWS.instances[0];
+      const before = FakeWS.instances.length;
+      // Network drop -> scheduleReconnect. attempts=0 -> ceiling = min(1000, 30000).
+      // Equal jitter with random=0 gives delay = ceiling/2 = 500ms, NOT the 1000ms
+      // ceiling a fleet would all reconnect on in lockstep.
+      ws1.onclose?.();
+      vi.advanceTimersByTime(499);
+      expect(FakeWS.instances.length).toBe(before); // has not reconnected yet
+      vi.advanceTimersByTime(1);
+      expect(FakeWS.instances.length).toBe(before + 1); // reconnected at 500, not 1000
+    } finally {
+      randomSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
 });
