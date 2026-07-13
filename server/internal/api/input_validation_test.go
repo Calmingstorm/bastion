@@ -79,11 +79,62 @@ func TestSendRejectsHostlessEmbedURL(t *testing.T) {
 	channelID := h.CreateChannel(owner, serverID, "general")
 	path := "/api/v1/channels/" + channelID + "/messages"
 
-	for _, bad := range []string{"https://", "http:", "https:javascript:alert(1)", `https:\evil.example`} {
+	for _, bad := range []string{"https://", "http:", "https:javascript:alert(1)", `https:\evil.example`, "https://:443", "http://:80/path"} {
 		body := map[string]any{"content": "x", "embeds": []map[string]any{{"title": "t", "url": bad}}}
 		if code := h.Request(http.MethodPost, path, owner.AccessToken, body, nil); code != http.StatusBadRequest {
 			t.Fatalf("hostless embed url %q: expected 400, got %d", bad, code)
 		}
+	}
+}
+
+// lastMessageEmbeds returns the embeds stored on the most recent message in a
+// channel (the persisted value, to check it was normalized).
+func lastMessageEmbeds(h *testutil.Harness, channelID string) []models.Embed {
+	h.T.Helper()
+	var raw []byte
+	if err := h.Pool.QueryRow(context.Background(),
+		`SELECT embeds FROM messages WHERE channel_id = $1 ORDER BY created_at DESC LIMIT 1`,
+		channelID,
+	).Scan(&raw); err != nil {
+		h.T.Fatalf("read embeds: %v", err)
+	}
+	var embeds []models.Embed
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &embeds); err != nil {
+			h.T.Fatalf("decode embeds: %v", err)
+		}
+	}
+	return embeds
+}
+
+// TestEmbedURLPersistsNormalized: a padded embed URL must be stored trimmed, so
+// validation and persistence agree (a padded value cannot be validated as safe
+// and then rendered with its whitespace).
+func TestEmbedURLPersistsNormalized(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	serverID := h.CreateServer(owner, "S")
+	channelID := h.CreateChannel(owner, serverID, "general")
+	path := "/api/v1/channels/" + channelID + "/messages"
+
+	body := map[string]any{"content": "x", "embeds": []map[string]any{{
+		"title": "t",
+		"url":   "  https://example.com/path  ",
+		"image": map[string]any{"url": "  https://example.com/i.png  "},
+	}}}
+	if code := h.Request(http.MethodPost, path, owner.AccessToken, body, nil); code != http.StatusCreated {
+		t.Fatalf("padded embed url: expected 201, got %d", code)
+	}
+
+	embeds := lastMessageEmbeds(h, channelID)
+	if len(embeds) == 0 {
+		t.Fatal("no embed stored")
+	}
+	if embeds[0].URL != "https://example.com/path" {
+		t.Fatalf("stored embed url = %q, want trimmed", embeds[0].URL)
+	}
+	if embeds[0].Image == nil || embeds[0].Image.URL != "https://example.com/i.png" {
+		t.Fatalf("stored image url not normalized: %+v", embeds[0].Image)
 	}
 }
 

@@ -49,7 +49,19 @@ func validateEmbeds(embeds []models.Embed) error {
 	if len(embeds) > 10 {
 		return fmt.Errorf("maximum 10 embeds per message")
 	}
-	for i, e := range embeds {
+	for i := range embeds {
+		e := &embeds[i]
+		// Normalize URL fields in place so the value that is validated is exactly
+		// the value that is persisted — a padded URL cannot pass validation and
+		// then be stored (and rendered) with its surrounding whitespace.
+		e.URL = strings.TrimSpace(e.URL)
+		if e.Image != nil {
+			e.Image.URL = strings.TrimSpace(e.Image.URL)
+		}
+		if e.Thumbnail != nil {
+			e.Thumbnail.URL = strings.TrimSpace(e.Thumbnail.URL)
+		}
+
 		total := len(e.Title) + len(e.Description)
 		if e.Footer != nil {
 			total += len(e.Footer.Text)
@@ -78,11 +90,10 @@ func validateEmbeds(embeds []models.Embed) error {
 	return nil
 }
 
-// isHTTPURL reports whether s parses as an http or https URL.
 // isHTTPURL reports whether s is a syntactically valid absolute http(s) URL with
-// a host. A bare scheme ("http:", "https://"), an opaque value
-// ("https:javascript:alert(1)"), or a hostless path is rejected — only a real
-// http(s) target passes.
+// a hostname. A bare scheme ("http:", "https://"), an opaque value
+// ("https:javascript:alert(1)"), a hostless path, or a port-only authority
+// ("https://:443") is rejected — only a real http(s) target passes.
 func isHTTPURL(s string) bool {
 	u, err := url.Parse(strings.TrimSpace(s))
 	if err != nil {
@@ -90,7 +101,7 @@ func isHTTPURL(s string) bool {
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "http", "https":
-		return u.Host != ""
+		return u.Hostname() != ""
 	default:
 		return false
 	}
