@@ -41,6 +41,21 @@ const apiClient = axios.create({
 // write the previous user's data back into a freshly-reset store.
 let sessionAbort = new AbortController();
 
+// Combine multiple abort signals into one that fires when any of them do.
+function anySignal(signals: AbortSignal[]): AbortSignal {
+  const AnyCtor = AbortSignal as typeof AbortSignal & { any?: (s: AbortSignal[]) => AbortSignal };
+  if (typeof AnyCtor.any === 'function') return AnyCtor.any(signals);
+  const controller = new AbortController();
+  for (const s of signals) {
+    if (s.aborted) {
+      controller.abort();
+      break;
+    }
+    s.addEventListener('abort', () => controller.abort(), { once: true });
+  }
+  return controller.signal;
+}
+
 // sessionEpoch bumps on every logout. The token-refresh call uses the bare
 // axios.post (not apiClient), so aborting apiClient requests cannot cancel it —
 // the refresh path compares the epoch captured when it started against the
@@ -91,10 +106,12 @@ apiClient.interceptors.request.use(
     if (token && config.headers) {
       config.headers.Authorization = `Bearer ${token}`;
     }
-    // Tie the request to the current session so logout can cancel it.
-    if (!config.signal) {
-      config.signal = sessionAbort.signal;
-    }
+    // Tie the request to the current session so logout can cancel it. When the
+    // caller supplies its own signal (e.g. a per-fetch abort), combine the two so
+    // BOTH the caller's abort and logout cancel the request.
+    config.signal = config.signal
+      ? anySignal([config.signal as AbortSignal, sessionAbort.signal])
+      : sessionAbort.signal;
     return config;
   },
   (error) => Promise.reject(error)

@@ -13,13 +13,13 @@ interface MessageState {
   maxStartedBaseSeq: Record<string, number>;
   windowEpoch: Record<string, number>;
   isLoading: Record<string, boolean>;
-  error: string | null;
-  // Fetch sequence that set the current error; a success clears the error only if
-  // it is at least as new, so an older success can't erase a newer failure.
-  errorSeq: number;
-  // Highest fetch sequence that has successfully committed; a failure publishes an
-  // error only if it is newer, so an older failure can't overwrite a newer success.
-  committedSeq: number;
+  // All keyed by channelId so a race (or an error) in one channel never gates or
+  // clears another's. errorSeq = the fetch sequence that set a channel's error (a
+  // success clears it only if at least as new); committedSeq = the highest
+  // successfully-committed sequence (a failure publishes only if newer).
+  error: Record<string, string | null>;
+  errorSeq: Record<string, number>;
+  committedSeq: Record<string, number>;
   replyingTo: Message | null;
   setReplyingTo: (msg: Message | null) => void;
   fetchMessages: (channelId: string, before?: string, merge?: boolean) => Promise<void>;
@@ -276,9 +276,9 @@ export const useMessageStore = create<MessageState>((set, get) => ({
   maxStartedBaseSeq: {},
   windowEpoch: {},
   isLoading: {},
-  error: null,
-  errorSeq: 0,
-  committedSeq: 0,
+  error: {},
+  errorSeq: {},
+  committedSeq: {},
   replyingTo: null,
 
   setReplyingTo: (msg: Message | null) => set({ replyingTo: msg }),
@@ -312,7 +312,13 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       ...(isBase
         ? { maxStartedBaseSeq: { ...s.maxStartedBaseSeq, [channelId]: Math.max(s.maxStartedBaseSeq[channelId] ?? 0, mySeq) } }
         : {}),
-      ...(merge ? {} : { isLoading: { ...s.isLoading, [channelId]: true }, error: null }),
+      ...(merge
+        ? {}
+        : {
+            isLoading: { ...s.isLoading, [channelId]: true },
+            error: { ...s.error, [channelId]: null },
+            errorSeq: { ...s.errorSeq, [channelId]: 0 },
+          }),
     }));
 
     // Backstop: a fetch that never settles must not pin protectFloor forever. After
@@ -347,16 +353,21 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         if (sessionEpoch !== startSession || abandoned) return {};
 
         const existing = s.messages[channelId] || [];
+        const existingById = new Map(existing.map((m) => [m.id, m]));
 
         const reconciledFetched: Message[] = [];
         for (const m of fetched) {
           const j = s.journal[m.id];
-          if (!j || j.ver <= startVer) {
-            reconciledFetched.push(m); // untouched by realtime -> fetched copy is authoritative
-            continue;
+          let out: Message | null = !j || j.ver <= startVer ? m : reconcile(j, m, startVer);
+          if (!out) continue; // deleted during the fetch
+          // The List omits attachments (F37); if the fetched copy has none but the
+          // loaded copy does, keep them -- a resync must not destroy attachments the
+          // client already holds from a realtime create.
+          const cur = existingById.get(out.id);
+          if (!out.attachments?.length && cur?.attachments?.length) {
+            out = { ...out, attachments: cur.attachments };
           }
-          const r = reconcile(j, m, startVer);
-          if (r) reconciledFetched.push(r);
+          reconciledFetched.push(out);
         }
 
         if (before) {
@@ -371,9 +382,11 @@ export const useMessageStore = create<MessageState>((set, get) => ({
             messages: { ...s.messages, [channelId]: [...older, ...existing] },
             hasMore: { ...s.hasMore, [channelId]: fetched.length === MESSAGE_LIMIT },
             isLoading: { ...s.isLoading, [channelId]: false },
-            committedSeq: Math.max(s.committedSeq, mySeq),
+            committedSeq: { ...s.committedSeq, [channelId]: Math.max(s.committedSeq[channelId] ?? 0, mySeq) },
             // Clear a raced request's error only if this success is at least as new.
-            ...(mySeq >= s.errorSeq ? { error: null, errorSeq: 0 } : {}),
+            ...(mySeq >= (s.errorSeq[channelId] ?? 0)
+              ? { error: { ...s.error, [channelId]: null }, errorSeq: { ...s.errorSeq, [channelId]: 0 } }
+              : {}),
           };
         }
 
@@ -430,9 +443,11 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         return {
           messages: { ...s.messages, [channelId]: sortMessages(Array.from(result.values())) },
           hasMore: { ...s.hasMore, [channelId]: newHasMore },
-          committedSeq: Math.max(s.committedSeq, mySeq),
+          committedSeq: { ...s.committedSeq, [channelId]: Math.max(s.committedSeq[channelId] ?? 0, mySeq) },
           // Clear a raced request's error only if this success is at least as new.
-          ...(mySeq >= s.errorSeq ? { error: null, errorSeq: 0 } : {}),
+          ...(mySeq >= (s.errorSeq[channelId] ?? 0)
+            ? { error: { ...s.error, [channelId]: null }, errorSeq: { ...s.errorSeq, [channelId]: 0 } }
+            : {}),
           ...(epochAdvanced
             ? { windowEpoch: { ...s.windowEpoch, [channelId]: (s.windowEpoch[channelId] ?? 0) + 1 } }
             : {}),
@@ -450,14 +465,16 @@ export const useMessageStore = create<MessageState>((set, get) => ({
           // one, a pagination whose window was replaced/gapped since it started, or
           // any request older than one that has already committed successfully.
           const superseded =
-            mySeq < s.committedSeq ||
+            mySeq < (s.committedSeq[channelId] ?? 0) ||
             (isBase
               ? mySeq < (s.maxStartedBaseSeq[channelId] ?? mySeq)
               : (s.windowEpoch[channelId] ?? 0) !== startEpoch);
           return {
             ...(merge ? {} : { isLoading: { ...s.isLoading, [channelId]: false } }),
             // Stamp the error with this fetch's sequence so an older success can't clear it.
-            ...(superseded ? {} : { error: message, errorSeq: mySeq }),
+            ...(superseded
+              ? {}
+              : { error: { ...s.error, [channelId]: message }, errorSeq: { ...s.errorSeq, [channelId]: mySeq } }),
           };
         });
       }
@@ -475,7 +492,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       get().updateMessage(channelId, updated);
     } catch (err: unknown) {
       const errMsg = extractErrorMessage(err, 'Failed to edit message.');
-      set({ error: errMsg });
+      set((s) => ({ error: { ...s.error, [channelId]: errMsg } }));
       throw new Error(errMsg);
     }
   },
@@ -486,7 +503,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       get().deleteMessage(channelId, messageId);
     } catch (err: unknown) {
       const errMsg = extractErrorMessage(err, 'Failed to delete message.');
-      set({ error: errMsg });
+      set((s) => ({ error: { ...s.error, [channelId]: errMsg } }));
       throw new Error(errMsg);
     }
   },
@@ -499,7 +516,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       eventBus.emit('bastion:message-sent');
     } catch (err: unknown) {
       const errMsg = extractErrorMessage(err, 'Failed to send message.');
-      set({ error: errMsg });
+      set((s) => ({ error: { ...s.error, [channelId]: errMsg } }));
       throw new Error(errMsg);
     }
   },
@@ -579,9 +596,9 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       maxStartedBaseSeq: {},
       windowEpoch: {},
       isLoading: {},
-      error: null,
-      errorSeq: 0,
-      committedSeq: 0,
+      error: {},
+      errorSeq: {},
+      committedSeq: {},
       replyingTo: null,
     });
   },

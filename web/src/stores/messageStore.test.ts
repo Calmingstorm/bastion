@@ -363,7 +363,7 @@ describe('messageStore.fetchMessages', () => {
     useMessageStore.getState().reset(); // new session
     a.reject(new Error('network')); // the old request fails after the reset
     await aDone;
-    expect(useMessageStore.getState().error).toBeNull(); // no stale error written
+    expect(useMessageStore.getState().error.c1).toBeFalsy(); // no stale error written
     expect(useMessageStore.getState().isLoading.c1).toBeFalsy();
   });
 
@@ -408,7 +408,7 @@ describe('messageStore.fetchMessages', () => {
     p.reject(new Error('network')); // the now-obsolete pagination fails
     await pDone;
 
-    expect(useMessageStore.getState().error).toBeNull(); // no stale error over the fresh state
+    expect(useMessageStore.getState().error.c1).toBeFalsy(); // no stale error over the fresh state
     expect(ids()).toContain('n0');
   });
 
@@ -528,14 +528,14 @@ describe('messageStore.fetchMessages', () => {
     const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true); // B (newer)
     b.reject(new Error('boom')); // B fails first -> writes error stamped seq 2
     await bDone;
-    expect(useMessageStore.getState().error).toBe('Failed to load messages.');
+    expect(useMessageStore.getState().error.c1).toBe('Failed to load messages.');
     p.resolve(desc(block('p', LIMIT, 0))); // A (older) succeeds afterward
     await pDone;
-    expect(useMessageStore.getState().error).toBe('Failed to load messages.'); // A did not clear B's newer error
+    expect(useMessageStore.getState().error.c1).toBe('Failed to load messages.'); // A did not clear B's newer error
   });
 
   it('an older pagination failure does not publish an error over a newer resync success', async () => {
-    useMessageStore.setState({ messages: { c1: block('old', LIMIT, 50) }, hasMore: { c1: true }, error: null });
+    useMessageStore.setState({ messages: { c1: block('old', LIMIT, 50) }, hasMore: { c1: true }, error: {} });
     const p = deferred<Message[]>();
     const b = deferred<Message[]>();
     vi.mocked(client.apiGetMessages)
@@ -545,10 +545,10 @@ describe('messageStore.fetchMessages', () => {
     const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true); // B (newer)
     b.resolve(desc(block('old', LIMIT, 50))); // full-overlap resync -> commits, epoch NOT advanced
     await bDone;
-    expect(useMessageStore.getState().error).toBeNull();
+    expect(useMessageStore.getState().error.c1).toBeFalsy();
     p.reject(new Error('boom')); // A (older) fails afterward
     await pDone;
-    expect(useMessageStore.getState().error).toBeNull(); // A's failure did not overwrite B's newer success
+    expect(useMessageStore.getState().error.c1).toBeFalsy(); // A's failure did not overwrite B's newer success
   });
 
   it('a reaction on an absent message does not resurrect it against an empty response', async () => {
@@ -586,6 +586,30 @@ describe('messageStore.fetchMessages', () => {
     }
   });
 
+  it('a resync does not destroy attachments the client already holds', async () => {
+    // Attachments arrive only via realtime create; here they live in the loaded copy.
+    const loaded = { ...msg('m1', tISO(1)), attachments: attach() } as Message;
+    useMessageStore.setState({ messages: { c1: [loaded] }, hasMore: { c1: false } });
+    // A later resync returns m1 without attachments (the List omits them).
+    vi.mocked(client.apiGetMessages).mockResolvedValue([msg('m1', tISO(1))]);
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+    expect(useMessageStore.getState().messages.c1[0].attachments?.length).toBe(1); // recovered, not dropped
+  });
+
+  it('a later success in another channel does not suppress an earlier failure', async () => {
+    const a = deferred<Message[]>();
+    vi.mocked(client.apiGetMessages)
+      .mockImplementationOnce(() => a.promise) // c1 (seq 1), will fail
+      .mockResolvedValueOnce([msg('x1', tISO(1))]); // c2 (seq 2), succeeds
+    const aDone = useMessageStore.getState().fetchMessages('c1'); // c1 starts (seq 1)
+    await useMessageStore.getState().fetchMessages('c2'); // c2 succeeds (seq 2) -> committedSeq.c2
+    a.reject(new Error('boom')); // c1 fails afterward
+    await aDone;
+    // Per-channel gating: c2's newer success does not silence c1's genuine failure.
+    expect(useMessageStore.getState().error.c1).toBe('Failed to load messages.');
+    expect(useMessageStore.getState().error.c2 ?? null).toBeFalsy();
+  });
+
   // --- A successful commit clears a stale error ----------------------------
 
   it('a successful resync clears a stale error from a failed pagination', async () => {
@@ -600,9 +624,9 @@ describe('messageStore.fetchMessages', () => {
     const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true); // resync starts, epoch still 0
     p.reject(new Error('network')); // pagination fails before the resync commits -> writes an error
     await pDone;
-    expect(useMessageStore.getState().error).toBe('Failed to load messages.');
+    expect(useMessageStore.getState().error.c1).toBe('Failed to load messages.');
     b.resolve(desc(block('n', LIMIT, 200))); // resync commits fresh state
     await bDone;
-    expect(useMessageStore.getState().error).toBeNull(); // the successful commit cleared it
+    expect(useMessageStore.getState().error.c1).toBeFalsy(); // the successful commit cleared it
   });
 });
