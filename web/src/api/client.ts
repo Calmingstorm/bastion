@@ -870,6 +870,16 @@ export async function apiDeleteWebhook(
   await apiClient.delete(`/servers/${serverId}/webhooks/${webhookId}`);
 }
 
+export async function apiRegenerateWebhookToken(
+  serverId: string,
+  webhookId: string
+): Promise<Webhook> {
+  const response = await apiClient.post<Webhook>(
+    `/servers/${serverId}/webhooks/${webhookId}/regenerate-token`
+  );
+  return response.data;
+}
+
 // ---- Bot API ----
 
 export async function apiGetBots(serverId: string): Promise<Bot[]> {

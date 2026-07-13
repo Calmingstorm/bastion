@@ -223,7 +223,10 @@ export interface Webhook {
   creatorId: string;
   name: string;
   avatarUrl?: string;
+  /** Plaintext token — present ONLY in the create/regenerate response. */
   token?: string;
+  /** Last 8 characters of the token, safe to display on list/get. */
+  tokenHint?: string;
   userId: string;
   createdAt: string;
   updatedAt: string;

@@ -209,6 +209,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 				r.Get("/{serverID}/webhooks/{webhookID}", webhookHandler.Get)
 				r.Patch("/{serverID}/webhooks/{webhookID}", webhookHandler.Update)
 				r.Delete("/{serverID}/webhooks/{webhookID}", webhookHandler.Delete)
+				r.Post("/{serverID}/webhooks/{webhookID}/regenerate-token", webhookHandler.RegenerateToken)
 
 				// Bots
 				r.Post("/{serverID}/bots", botHandler.Create)
@@ -303,9 +304,14 @@ func zerologMiddleware(next http.Handler) http.Handler {
 				event = log.Info()
 			}
 
+			// Log the matched route TEMPLATE, never the raw path: path-bound
+			// secrets (webhook and interaction tokens) live in the URL, so logging
+			// r.URL.Path would copy them into the application logs. Unmatched
+			// requests are logged as "unmatched" rather than their raw path, which
+			// could likewise contain a secret.
 			event.
 				Str("method", r.Method).
-				Str("path", r.URL.Path).
+				Str("route", routePattern(r)).
 				Int("status", status).
 				Int("bytes", ww.BytesWritten()).
 				Dur("duration", time.Since(start)).
@@ -316,6 +322,18 @@ func zerologMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(ww, r)
 	})
+}
+
+// routePattern returns the matched chi route template (e.g.
+// "/api/v1/webhooks/{webhookID}/{token}"), so logging never records the raw path
+// and its path-bound secrets. Unmatched requests return "unmatched".
+func routePattern(r *http.Request) string {
+	if rc := chi.RouteContext(r.Context()); rc != nil {
+		if p := rc.RoutePattern(); p != "" {
+			return p
+		}
+	}
+	return "unmatched"
 }
 
 // Helper functions used across all handlers

@@ -25,6 +25,7 @@ import {
   apiGetWebhooks,
   apiCreateWebhook,
   apiDeleteWebhook,
+  apiRegenerateWebhookToken,
   apiGetBots,
   apiCreateBot,
   apiDeleteBot,
@@ -878,7 +879,10 @@ function WebhooksTab({ serverId }: { serverId: string }) {
   const [newChannelId, setNewChannelId] = useState('');
   const [isCreating, setIsCreating] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
-  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  // The webhook whose plaintext token was just revealed (create/regenerate). The
+  // token is only available here, once — persisted rows only have a hint.
+  const [revealed, setRevealed] = useState<Webhook | null>(null);
 
   useEffect(() => {
     Promise.all([apiGetWebhooks(serverId), apiGetChannels(serverId)])
@@ -899,9 +903,21 @@ function WebhooksTab({ serverId }: { serverId: string }) {
       const wh = await apiCreateWebhook(serverId, { name, channelId: newChannelId });
       setWebhooks((prev) => [wh, ...prev]);
       setNewName('');
+      setRevealed(wh); // show the token URL once
+      setCopied(false);
     } catch { /* handled */ } finally {
       setIsCreating(false);
     }
+  };
+
+  const handleRegenerate = async (webhookId: string) => {
+    try {
+      const wh = await apiRegenerateWebhookToken(serverId, webhookId);
+      // Replace the row (updates the hint) and reveal the new token once.
+      setWebhooks((prev) => prev.map((w) => (w.id === wh.id ? wh : w)));
+      setRevealed(wh);
+      setCopied(false);
+    } catch { /* handled */ }
   };
 
   const handleDelete = async (webhookId: string) => {
@@ -912,12 +928,16 @@ function WebhooksTab({ serverId }: { serverId: string }) {
     setDeleteConfirm(null);
   };
 
-  const copyWebhookUrl = (webhook: Webhook) => {
-    const baseUrl = window.location.origin;
-    const url = `${baseUrl}/api/v1/webhooks/${webhook.id}/${webhook.token}`;
-    navigator.clipboard.writeText(url);
-    setCopiedId(webhook.id);
-    setTimeout(() => setCopiedId(null), 2000);
+  // Only valid for a just-revealed webhook, which still carries its plaintext
+  // token; persisted rows never have one.
+  const revealedUrl = revealed?.token
+    ? `${window.location.origin}/api/v1/webhooks/${revealed.id}/${revealed.token}`
+    : '';
+  const copyRevealedUrl = () => {
+    if (!revealedUrl) return;
+    navigator.clipboard.writeText(revealedUrl);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   if (isLoading) return <Spinner />;
@@ -950,6 +970,28 @@ function WebhooksTab({ serverId }: { serverId: string }) {
         </div>
       </div>
 
+      {/* One-time token reveal (create / regenerate) */}
+      {revealed?.token && (
+        <div className="rounded-md border border-[var(--accent)] bg-[var(--bg-secondary)] p-4">
+          <h3 className="mb-1 text-sm font-bold text-[var(--text-primary)]">Webhook URL for “{revealed.name}”</h3>
+          <p className="mb-3 text-xs text-[var(--text-muted)]">
+            Copy this now — it is shown only once and cannot be retrieved later. If you lose it, regenerate the token.
+          </p>
+          <div className="flex gap-2">
+            <input readOnly value={revealedUrl}
+              className="min-w-0 flex-1 rounded-[3px] bg-[var(--bg-tertiary)] px-3 py-2 font-mono text-xs text-[var(--text-primary)] outline-none" />
+            <button onClick={copyRevealedUrl}
+              className="shrink-0 rounded-[3px] bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--accent-hover)]">
+              {copied ? 'Copied!' : 'Copy URL'}
+            </button>
+            <button onClick={() => setRevealed(null)}
+              className="shrink-0 rounded-[3px] px-3 py-2 text-sm text-[var(--text-muted)] hover:text-[var(--text-primary)]">
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
       {webhooks.length === 0 ? (
         <p className="py-8 text-sm text-[var(--text-muted)]">No webhooks yet.</p>
       ) : (
@@ -958,12 +1000,15 @@ function WebhooksTab({ serverId }: { serverId: string }) {
             <div key={wh.id} className="flex items-center justify-between rounded bg-[var(--bg-secondary)] px-3 py-2">
               <div>
                 <span className="text-sm font-medium text-[var(--text-primary)]">{wh.name}</span>
-                <p className="text-xs text-[var(--text-muted)]">#{channelName(wh.channelId)} &middot; {new Date(wh.createdAt).toLocaleDateString()}</p>
+                <p className="text-xs text-[var(--text-muted)]">
+                  #{channelName(wh.channelId)} &middot; {new Date(wh.createdAt).toLocaleDateString()}
+                  {wh.tokenHint && <> &middot; <span className="font-mono">…{wh.tokenHint}</span></>}
+                </p>
               </div>
               <div className="flex gap-1">
-                <button onClick={() => copyWebhookUrl(wh)}
+                <button onClick={() => handleRegenerate(wh.id)}
                   className="rounded px-2 py-1 text-xs text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)] hover:text-[var(--text-primary)]">
-                  {copiedId === wh.id ? 'Copied!' : 'Copy URL'}
+                  Regenerate
                 </button>
                 {deleteConfirm === wh.id ? (
                   <div className="flex gap-1">

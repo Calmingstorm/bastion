@@ -179,7 +179,10 @@ paths:
     get:
       tags: [Webhooks]
       summary: Get webhook
-      description: Get a single webhook including its token. Requires `ManageServer` permission.
+      description: >
+        Get a single webhook. Returns `tokenHint` (the last 8 characters) but
+        never the token — the token is shown only once, at create/regenerate.
+        Requires `ManageServer` permission.
       operationId: getWebhook
       security:
         - BearerAuth: []
@@ -241,6 +244,30 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DeleteResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /servers/{serverID}/webhooks/{webhookID}/regenerate-token:
+    post:
+      tags: [Webhooks]
+      summary: Regenerate webhook token
+      description: >
+        Rotates the webhook's token. The old token stops working immediately and
+        the new plaintext token is returned **once** in the response. Requires
+        `ManageServer` permission.
+      operationId: regenerateWebhookToken
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/serverID'
+        - $ref: '#/components/parameters/webhookID'
+      responses:
+        '200':
+          description: Token regenerated (includes the new token, once)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Webhook'
         '404':
           $ref: '#/components/responses/NotFound'
 
@@ -1859,7 +1886,12 @@ components:
           nullable: true
         token:
           type: string
-          description: Only included on creation and single-get
+          description: >
+            The plaintext token. Returned ONLY once, in the create and
+            regenerate-token responses. Never returned by list or get.
+        tokenHint:
+          type: string
+          description: The last 8 characters of the token, for display on list/get.
         userId:
           type: string
           format: uuid

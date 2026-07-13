@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -204,5 +205,34 @@ func TestRequestLogRecordsClientAndPeerIP(t *testing.T) {
 	}
 	if !strings.Contains(out, `"peer_ip":"10.0.0.1"`) {
 		t.Fatalf("log missing peer_ip: %s", out)
+	}
+}
+
+// TestRequestLogUsesRoutePatternNotRawPath: the access log must record the route
+// template, not the raw path, so path-bound secrets (webhook / interaction
+// tokens) never land in the logs.
+func TestRequestLogUsesRoutePatternNotRawPath(t *testing.T) {
+	var buf bytes.Buffer
+	orig := log.Logger
+	log.Logger = zerolog.New(&buf)
+	t.Cleanup(func() { log.Logger = orig })
+
+	r := chi.NewRouter()
+	r.Use(clientIPMiddleware(nil))
+	r.Use(zerologMiddleware)
+	r.Post("/webhooks/{webhookID}/{token}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/abc123/whk_supersecret", nil)
+	req.RemoteAddr = "1.2.3.4:5000"
+	r.ServeHTTP(httptest.NewRecorder(), req)
+
+	out := buf.String()
+	if strings.Contains(out, "whk_supersecret") {
+		t.Fatalf("access log leaked the token: %s", out)
+	}
+	if !strings.Contains(out, `"route":"/webhooks/{webhookID}/{token}"`) {
+		t.Fatalf("access log missing route pattern: %s", out)
 	}
 }
