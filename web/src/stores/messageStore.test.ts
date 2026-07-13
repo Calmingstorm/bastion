@@ -104,7 +104,7 @@ describe('messageStore.fetchMessages', () => {
   });
 
   it('does not resurrect a message deleted during the fetch that was absent at start', async () => {
-    useMessageStore.setState({ messages: { c1: [] }, hasMore: { c1: false }, recentlyDeleted: {} });
+    useMessageStore.setState({ messages: { c1: [] }, hasMore: { c1: false }, recentEvents: {} });
     // A realtime delete for m9 arrives during the fetch; m9 was never loaded here,
     // but the older fetched page still contains it.
     vi.mocked(client.apiGetMessages).mockImplementation(async () => {
@@ -114,5 +114,42 @@ describe('messageStore.fetchMessages', () => {
 
     await useMessageStore.getState().fetchMessages('c1', undefined, true);
     expect(useMessageStore.getState().messages.c1).toEqual([]);
+  });
+
+  it('applies a realtime update during the fetch to a message absent at start', async () => {
+    useMessageStore.setState({ messages: { c1: [] }, hasMore: { c1: false }, recentEvents: {} });
+    // m9 is not loaded; a realtime update lands during the fetch, and the older
+    // fetched page carries the pre-update (stale) copy.
+    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
+      useMessageStore.getState().updateMessage('c1', msg('m9', '2026-01-09', 'live-edit'));
+      return [msg('m9', '2026-01-09', 'stale')];
+    });
+
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+    const list = useMessageStore.getState().messages.c1;
+    expect(list.map((m) => m.id)).toEqual(['m9']);
+    expect(list[0].content).toBe('live-edit'); // realtime update wins over the stale fetch
+  });
+
+  it('runs a merge resync even when a load is already in flight', async () => {
+    useMessageStore.setState({
+      messages: { c1: [msg('m1', '2026-01-01')] },
+      hasMore: { c1: false },
+      isLoading: { c1: true }, // a pagination is in flight
+      recentEvents: {},
+    });
+    vi.mocked(client.apiGetMessages).mockResolvedValue([msg('m2', '2026-01-02'), msg('m1', '2026-01-01')]);
+
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+
+    // The resync was NOT skipped by isLoading: the missed message is now present.
+    expect(useMessageStore.getState().messages.c1.map((m) => m.id)).toEqual(['m1', 'm2']);
+    expect(client.apiGetMessages).toHaveBeenCalled();
+  });
+
+  it('reset clears recent-event tombstones', () => {
+    useMessageStore.setState({ recentEvents: { m1: { gen: 1, ts: Date.now(), kind: 'delete' } } });
+    useMessageStore.getState().reset();
+    expect(useMessageStore.getState().recentEvents).toEqual({});
   });
 });

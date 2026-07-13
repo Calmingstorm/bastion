@@ -7,9 +7,9 @@ import { eventBus } from '../utils/eventBus';
 interface MessageState {
   messages: Record<string, Message[]>;
   hasMore: Record<string, boolean>;
-  // Internal: message ids recently deleted by a realtime event, keyed to a
-  // monotonic generation, used to reconcile reconnect resyncs.
-  recentlyDeleted: Record<string, number>;
+  // Internal: recent realtime deletes/updates (keyed by message id) used to
+  // reconcile reconnect resyncs against changes that raced the fetch.
+  recentEvents: Record<string, RecentEvent>;
   isLoading: Record<string, boolean>;
   error: string | null;
   replyingTo: Message | null;
@@ -28,28 +28,47 @@ interface MessageState {
 
 const MESSAGE_LIMIT = 50;
 
-// Deletion tombstones let a reconnect resync recognize a message deleted by a
-// realtime event during its in-flight fetch even when that message was never in
-// the local channel (so a stale HTTP page cannot resurrect it). deleteGen is a
-// monotonic clock; recentlyDeleted maps id -> the gen it was deleted at, bounded
-// so it cannot grow without limit.
-let deleteGen = 0;
-const TOMBSTONE_CAP = 500;
-function tombstone(current: Record<string, number>, id: string): Record<string, number> {
-  deleteGen += 1;
-  const next = { ...current, [id]: deleteGen };
-  const ids = Object.keys(next);
-  if (ids.length > TOMBSTONE_CAP) {
-    ids.sort((a, b) => next[a] - next[b]);
-    for (let i = 0; i < ids.length - TOMBSTONE_CAP; i++) delete next[ids[i]];
+// recentEvents lets a reconnect resync recognize realtime changes that landed
+// during its in-flight fetch even for messages never loaded locally, so a stale
+// HTTP page cannot resurrect a deleted message or hide an update. eventGen is a
+// monotonic clock ("during the fetch" = gen > the gen captured at request start).
+// The map is pruned by age and hard-capped, both keyed to eventGen order so a
+// burst of unrelated events cannot evict an entry from a still-pending resync.
+type RecentEvent =
+  | { gen: number; ts: number; kind: 'delete' }
+  | { gen: number; ts: number; kind: 'update'; message: Message };
+let eventGen = 0;
+const RECENT_MAX_AGE_MS = 60000;
+const RECENT_CAP = 5000;
+function recordEvent(
+  current: Record<string, RecentEvent>,
+  id: string,
+  kind: 'delete' | 'update',
+  message?: Message
+): Record<string, RecentEvent> {
+  eventGen += 1;
+  const now = nowMs();
+  const ev: RecentEvent =
+    kind === 'update'
+      ? { gen: eventGen, ts: now, kind: 'update', message: message as Message }
+      : { gen: eventGen, ts: now, kind: 'delete' };
+  const next: Record<string, RecentEvent> = { ...current, [id]: ev };
+  let entries = Object.entries(next).filter(([, e]) => now - e.ts <= RECENT_MAX_AGE_MS);
+  if (entries.length > RECENT_CAP) {
+    entries.sort((a, b) => a[1].gen - b[1].gen);
+    entries = entries.slice(entries.length - RECENT_CAP);
   }
-  return next;
+  return Object.fromEntries(entries);
+}
+// nowMs is wrapped so pruning is deterministic under fake timers if needed.
+function nowMs(): number {
+  return Date.now();
 }
 
 export const useMessageStore = create<MessageState>((set, get) => ({
   messages: {},
   hasMore: {},
-  recentlyDeleted: {},
+  recentEvents: {},
   isLoading: {},
   error: null,
   replyingTo: null,
@@ -59,8 +78,9 @@ export const useMessageStore = create<MessageState>((set, get) => ({
   fetchMessages: async (channelId: string, before?: string, merge?: boolean) => {
     const state = get();
 
-    // Prevent duplicate loading
-    if (state.isLoading[channelId]) return;
+    // A merge resync must run even if a pagination (or another load) is already
+    // in flight, so it is not gated by -- and does not touch -- isLoading.
+    if (!merge && state.isLoading[channelId]) return;
 
     // Snapshot the message OBJECTS present when the request begins. On a merge
     // resync this lets us reconcile the fetched page against realtime changes by
@@ -69,14 +89,16 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     const startSnap = merge
       ? new Map((state.messages[channelId] || []).map((m) => [m.id, m]))
       : null;
-    // Generation clock at request start: any id deleted after this (recentlyDeleted
-    // value > startGen) was removed by a realtime event during the fetch.
-    const startGen = deleteGen;
+    // Generation clock at request start: any realtime event with gen > startGen
+    // touched its message during the fetch.
+    const startGen = eventGen;
 
-    set((s) => ({
-      isLoading: { ...s.isLoading, [channelId]: true },
-      error: null,
-    }));
+    if (!merge) {
+      set((s) => ({
+        isLoading: { ...s.isLoading, [channelId]: true },
+        error: null,
+      }));
+    }
 
     try {
       const rawFetched = await apiGetMessages(channelId, before, MESSAGE_LIMIT);
@@ -117,17 +139,18 @@ export const useMessageStore = create<MessageState>((set, get) => ({
           const result = new Map<string, Message>();
           for (const m of fetched) {
             const cur = currentById.get(m.id);
-            // Deleted during the fetch -> stays deleted. Covers both a message
-            // that was present at start and is gone now, and one that was never
-            // loaded here but got a realtime delete (via the tombstone clock).
-            if (
-              (startSnap.has(m.id) && cur === undefined) ||
-              (s.recentlyDeleted[m.id] ?? -1) > startGen
-            ) {
+            const ev = s.recentEvents[m.id];
+            const touched = ev !== undefined && ev.gen > startGen;
+            // Deleted during the fetch -> stays deleted. Covers a message present
+            // at start and gone now, and one never loaded here that got a realtime
+            // delete during the fetch (via recentEvents).
+            if ((startSnap.has(m.id) && cur === undefined) || (touched && ev.kind === 'delete')) {
               continue;
             }
             if (cur !== undefined && cur !== startSnap.get(m.id)) {
-              result.set(m.id, cur); // changed during the fetch -> current wins
+              result.set(m.id, cur); // changed while loaded during the fetch -> current wins
+            } else if (touched && ev.kind === 'update') {
+              result.set(m.id, ev.message); // updated during the fetch (even if unloaded)
             } else {
               result.set(m.id, m); // unchanged since start (or new) -> fetched wins
             }
@@ -138,13 +161,13 @@ export const useMessageStore = create<MessageState>((set, get) => ({
           const merged = Array.from(result.values()).sort(
             (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
           );
+          // A merge resync does not own isLoading, so it leaves it untouched.
           return {
             messages: { ...s.messages, [channelId]: merged },
             hasMore: {
               ...s.hasMore,
               [channelId]: s.hasMore[channelId] ?? fetched.length === MESSAGE_LIMIT,
             },
-            isLoading: { ...s.isLoading, [channelId]: false },
           };
         }
 
@@ -164,7 +187,8 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     } catch (err: unknown) {
       const message = extractErrorMessage(err, 'Failed to load messages.');
       set((s) => ({
-        isLoading: { ...s.isLoading, [channelId]: false },
+        // A merge resync does not own isLoading, so leave it untouched on error.
+        isLoading: merge ? s.isLoading : { ...s.isLoading, [channelId]: false },
         error: message,
       }));
     }
@@ -226,14 +250,13 @@ export const useMessageStore = create<MessageState>((set, get) => ({
   updateMessage: (channelId: string, message: Message) => {
     set((state) => {
       const existing = state.messages[channelId];
-      if (!existing) return {};
+      // Always record the event (with content) -- even when the message is not
+      // loaded here -- so an in-flight resync applies the update over a stale page.
       return {
-        messages: {
-          ...state.messages,
-          [channelId]: existing.map((m) =>
-            m.id === message.id ? message : m
-          ),
-        },
+        recentEvents: recordEvent(state.recentEvents, message.id, 'update', message),
+        messages: existing
+          ? { ...state.messages, [channelId]: existing.map((m) => (m.id === message.id ? message : m)) }
+          : state.messages,
       };
     });
   },
@@ -241,10 +264,10 @@ export const useMessageStore = create<MessageState>((set, get) => ({
   deleteMessage: (channelId: string, messageId: string) => {
     set((state) => {
       const existing = state.messages[channelId];
-      // Always record the tombstone -- even if the message is not loaded here --
-      // so an in-flight resync cannot resurrect it from a stale page.
+      // Always record the event -- even if the message is not loaded here -- so
+      // an in-flight resync cannot resurrect it from a stale page.
       return {
-        recentlyDeleted: tombstone(state.recentlyDeleted, messageId),
+        recentEvents: recordEvent(state.recentEvents, messageId, 'delete'),
         messages: existing
           ? { ...state.messages, [channelId]: existing.filter((m) => m.id !== messageId) }
           : state.messages,
@@ -308,6 +331,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     set({
       messages: {},
       hasMore: {},
+      recentEvents: {},
       isLoading: {},
       error: null,
       replyingTo: null,
