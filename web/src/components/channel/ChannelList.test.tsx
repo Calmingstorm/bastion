@@ -1,14 +1,22 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { RefObject } from 'react';
 import type { Server } from '../../types';
 
 // Capture the shared delete-category dialog's props to prove ChannelList supplies
-// returnFocusRef pointing at the triggering category's button.
-let confirmProps: { returnFocusRef?: RefObject<HTMLElement | null> } | null = null;
+// returnFocusRef (the triggering category's button) AND a live isPending.
+let confirmProps: {
+  returnFocusRef?: RefObject<HTMLElement | null>;
+  isPending?: boolean;
+  onConfirm?: () => void;
+} | null = null;
 vi.mock('../ui/ConfirmDialog', () => ({
-  ConfirmDialog: (props: { returnFocusRef?: RefObject<HTMLElement | null> }) => {
+  ConfirmDialog: (props: {
+    returnFocusRef?: RefObject<HTMLElement | null>;
+    isPending?: boolean;
+    onConfirm?: () => void;
+  }) => {
     confirmProps = props;
     return null;
   },
@@ -18,7 +26,7 @@ vi.mock('../../api/client', () => ({
   apiGetCategories: vi.fn(async () => [{ id: 'cat1', name: 'General', position: 0 }]),
   apiCreateCategory: vi.fn(),
   apiUpdateCategory: vi.fn(),
-  apiDeleteCategory: vi.fn(async () => {}),
+  apiDeleteCategory: vi.fn(() => new Promise(() => {})), // hangs so the pending state is observable
   apiReorderChannels: vi.fn(),
 }));
 
@@ -52,5 +60,18 @@ describe('ChannelList category-delete focus-return wiring', () => {
 
     // The shared dialog must now target THIS category's persistent button.
     await waitFor(() => expect(confirmProps?.returnFocusRef?.current).toBe(categoryButton));
+  });
+
+  it('drives a live isPending: it goes true while the delete-category request is in flight', async () => {
+    const user = userEvent.setup();
+    render(<ChannelList />);
+    const categoryButton = await screen.findByRole('button', { name: /General/ });
+    fireEvent.contextMenu(categoryButton);
+    await user.click(await screen.findByText('Delete Category')); // opens the dialog
+    expect(confirmProps?.isPending).toBe(false);
+    await act(async () => {
+      confirmProps!.onConfirm!(); // start the (hanging) delete
+    });
+    expect(confirmProps?.isPending).toBe(true); // dialog is now locked
   });
 });

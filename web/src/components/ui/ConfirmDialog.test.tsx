@@ -314,6 +314,16 @@ describe('ConfirmDialog', () => {
     expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 
+  it('cannot be dismissed by a backdrop click while pending', async () => {
+    const user = userEvent.setup();
+    render(<Harness isPending />);
+    const overlay = document.querySelector('.z-40'); // the overlay; content is .z-50
+    expect(overlay).not.toBeNull();
+    await user.click(overlay as Element);
+    // The backdrop path (onInteractOutside) must also be locked while pending.
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+
   it('a dismissal attempt while pending is ignored, and a later successful deletion lands on the fallback', async () => {
     const user = userEvent.setup();
     render(<PendingDeleteHarness />);
