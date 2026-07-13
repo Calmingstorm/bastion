@@ -3,7 +3,6 @@ package realtime
 import (
 	"sync"
 
-	"github.com/coder/websocket"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
@@ -76,14 +75,14 @@ func (h *Hub) Run() {
 				select {
 				case client.send <- msg.event:
 				default:
-					client.dropCount++
+					dropped := client.dropCount.Add(1)
 					log.Warn().
 						Str("userID", client.userID.String()).
 						Str("eventType", msg.event.Type).
-						Int("dropCount", client.dropCount).
+						Int64("dropCount", dropped).
 						Msg("dropping event, client send buffer full")
-					if client.dropCount >= 10 {
-						client.conn.Close(websocket.StatusTryAgainLater, "too many dropped events")
+					if dropped >= 10 {
+						client.closeSlow()
 					}
 				}
 			}
@@ -208,14 +207,14 @@ func (h *Hub) BroadcastToUser(userID uuid.UUID, event Event) {
 		select {
 		case client.send <- event:
 		default:
-			client.dropCount++
+			dropped := client.dropCount.Add(1)
 			log.Warn().
 				Str("userID", client.userID.String()).
 				Str("eventType", event.Type).
-				Int("dropCount", client.dropCount).
+				Int64("dropCount", dropped).
 				Msg("dropping event, client send buffer full")
-			if client.dropCount >= 10 {
-				client.conn.Close(websocket.StatusTryAgainLater, "too many dropped events")
+			if dropped >= 10 {
+				client.closeSlow()
 			}
 		}
 	}

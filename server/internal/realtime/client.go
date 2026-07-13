@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -22,13 +23,36 @@ const (
 )
 
 type Client struct {
-	hub       *Hub
-	conn      *websocket.Conn
-	userID    uuid.UUID
-	send      chan Event
-	db        *pgxpool.Pool
-	rdb       *redis.Client
-	dropCount int
+	hub    *Hub
+	conn   *websocket.Conn
+	userID uuid.UUID
+	send   chan Event
+	db     *pgxpool.Pool
+	rdb    *redis.Client
+	// dropCount counts consecutive dropped events. It is written from the hub's
+	// broadcast goroutines (under a read lock, so concurrently) and reset from
+	// this client's write pump, so it must be accessed atomically.
+	dropCount atomic.Int64
+	// closing guards closeSlow so that a flood of dropped events past the
+	// threshold launches exactly one close worker, not one per drop.
+	closing atomic.Bool
+	// closeWorkers records how many close workers were launched (always 0 or 1).
+	closeWorkers atomic.Int64
+}
+
+// closeSlow closes the connection off the caller's goroutine. A WebSocket close
+// performs a handshake that can block for several seconds, which must never
+// happen on the hub's broadcast path or while holding its lock. It is
+// idempotent: only the first call launches a close worker, so repeated
+// threshold breaches cannot spawn an unbounded number of goroutines.
+func (c *Client) closeSlow() {
+	if c.closing.Swap(true) {
+		return
+	}
+	c.closeWorkers.Add(1)
+	go func() {
+		_ = c.conn.Close(websocket.StatusTryAgainLater, "too many dropped events")
+	}()
 }
 
 type incomingMessage struct {
@@ -233,7 +257,7 @@ func (c *Client) writePump(ctx context.Context, cancel context.CancelFunc) {
 				log.Debug().Err(err).Str("userID", c.userID.String()).Msg("websocket write error")
 				return
 			}
-			c.dropCount = 0
+			c.dropCount.Store(0)
 
 		case <-ticker.C:
 			pingCtx, pingCancel := context.WithTimeout(ctx, writeWait)
