@@ -968,4 +968,30 @@ describe('messageStore.fetchMessages', () => {
     await expect(p).rejects.toThrow();
     expect(useToastStore.getState().addToast).not.toHaveBeenCalled();
   });
+
+  // The success guards matter even when the new session reuses the same channel and
+  // message id (e.g. the same user logs back in and the channel reloads): an old
+  // edit or delete that resolves after the reset must not mutate the new copy.
+
+  it('an edit that resolves after logout does not mutate the new session same-id message', async () => {
+    const d = deferred<Message>();
+    vi.mocked(client.apiEditMessage).mockReturnValue(d.promise);
+    const p = useMessageStore.getState().editMessage('c1', 'm1', 'edited');
+    useMessageStore.getState().reset(); // logout bumps sessionEpoch
+    useMessageStore.setState({ messages: { c1: [msg('m1', tISO(1), 'NEW-SESSION')] } });
+    d.resolve(msg('m1', tISO(1), 'edited')); // the old edit finally resolves
+    await p;
+    expect(useMessageStore.getState().messages.c1[0].content).toBe('NEW-SESSION'); // not clobbered
+  });
+
+  it('a delete that resolves after logout does not remove the new session same-id message', async () => {
+    const d = deferred<void>();
+    vi.mocked(client.apiDeleteMessage).mockReturnValue(d.promise);
+    const p = useMessageStore.getState().requestDeleteMessage('c1', 'm1');
+    useMessageStore.getState().reset();
+    useMessageStore.setState({ messages: { c1: [msg('m1', tISO(1), 'NEW-SESSION')] } });
+    d.resolve();
+    await p;
+    expect(ids()).toEqual(['m1']); // the old delete did not remove the new session's copy
+  });
 });
