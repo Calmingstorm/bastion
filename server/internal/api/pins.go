@@ -222,6 +222,9 @@ func (h *PinHandler) List(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have access to this channel"))
 		return
 	}
+	if !requireChannelPermission(h.db, w, r, channelID, userID, permissions.ViewChannel) {
+		return
+	}
 
 	// Query pinned messages with author info, ordered by pin date DESC
 	rows, err := h.db.Query(r.Context(),

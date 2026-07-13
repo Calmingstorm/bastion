@@ -12,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
+
+	"github.com/Calmingstorm/bastion/server/internal/permissions"
 )
 
 const (
@@ -85,7 +87,7 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, userID uuid.UUID,
 	}
 
 	// Subscribe to all channels the user has access to
-	channelIDs, err := getUserChannelIDs(r.Context(), db, userID)
+	channelIDs, err := ViewableChannelIDs(r.Context(), db, userID)
 	if err != nil {
 		log.Error().Err(err).Str("userID", userID.String()).Msg("failed to get user channels")
 		conn.Close(websocket.StatusInternalError, "failed to load channels")
@@ -274,19 +276,33 @@ func (c *Client) writePump(ctx context.Context, cancel context.CancelFunc) {
 	}
 }
 
-func getUserChannelIDs(ctx context.Context, db *pgxpool.Pool, userID uuid.UUID) ([]uuid.UUID, error) {
+// ViewableChannelIDs returns the IDs of every channel the user may view: server
+// channels where they are the server owner or hold a role granting ViewChannel
+// or Administrator, plus every DM channel they belong to. This is the canonical
+// "what can this user see" query, used both to subscribe a WebSocket client and
+// to scope search results. It enforces server-level permissions only — Bastion's
+// per-channel override table is not yet wired.
+func ViewableChannelIDs(ctx context.Context, db *pgxpool.Pool, userID uuid.UUID) ([]uuid.UUID, error) {
+	viewBits := permissions.ViewChannel | permissions.Administrator
 	query := `
 		SELECT c.id
 		FROM channels c
-		INNER JOIN server_members sm ON sm.server_id = c.server_id
-		WHERE sm.user_id = $1
+		INNER JOIN server_members sm ON sm.server_id = c.server_id AND sm.user_id = $1
+		INNER JOIN servers s ON s.id = c.server_id
+		WHERE s.owner_id = $1
+		   OR (COALESCE((
+		        SELECT bit_or(r.permissions)
+		        FROM member_roles mr
+		        INNER JOIN roles r ON r.id = mr.role_id
+		        WHERE mr.server_id = c.server_id AND mr.user_id = $1
+		      ), 0) & $2) != 0
 		UNION
 		SELECT dm.channel_id
 		FROM dm_members dm
 		WHERE dm.user_id = $1
 	`
 
-	rows, err := db.Query(ctx, query, userID)
+	rows, err := db.Query(ctx, query, userID, viewBits)
 	if err != nil {
 		return nil, err
 	}

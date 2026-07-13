@@ -82,21 +82,25 @@ func (h *MessageHandler) checkChannelAccess(r *http.Request, channelID, userID u
 
 // requireChannelPermission enforces a server-level permission bit for a channel.
 // DM channels (which have no server) are governed by membership alone and always
-// pass. It assumes channel membership has already been verified. On denial it
-// writes a 403 and returns false.
-func (h *MessageHandler) requireChannelPermission(w http.ResponseWriter, r *http.Request, channelID, userID uuid.UUID, perm int64) bool {
+// pass. It assumes channel membership has already been verified, and fails closed
+// on any lookup error. On denial it writes a 4xx and returns false.
+//
+// Note: this enforces server-level permissions only. Bastion's per-channel
+// override table and permissions.ComputeChannel remain unwired, so genuinely
+// channel-specific restrictions are not yet enforceable here.
+func requireChannelPermission(db *pgxpool.Pool, w http.ResponseWriter, r *http.Request, channelID, userID uuid.UUID, perm int64) bool {
 	var serverID *uuid.UUID
-	if err := h.db.QueryRow(r.Context(),
+	if err := db.QueryRow(r.Context(),
 		`SELECT server_id FROM channels WHERE id = $1`, channelID,
 	).Scan(&serverID); err != nil {
-		// Channel lookup failed; let the prior access check stand rather than
-		// leak a different error here.
-		return true
+		// Fail closed: if we cannot resolve the channel, deny rather than allow.
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "channel not found"))
+		return false
 	}
 	if serverID == nil {
 		return true // DM channel: membership is the only gate
 	}
-	perms, err := getMemberPermissions(h.db, r, *serverID, userID)
+	perms, err := getMemberPermissions(db, r, *serverID, userID)
 	if err != nil {
 		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "not a member of this server"))
 		return false
@@ -120,7 +124,7 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have access to this channel"))
 		return
 	}
-	if !h.requireChannelPermission(w, r, channelID, userID, permissions.ViewChannel) {
+	if !requireChannelPermission(h.db, w, r, channelID, userID, permissions.ViewChannel) {
 		return
 	}
 
@@ -295,7 +299,7 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !h.requireChannelPermission(w, r, channelID, userID, permissions.SendMessages) {
+	if !requireChannelPermission(h.db, w, r, channelID, userID, permissions.SendMessages) {
 		return
 	}
 
@@ -680,6 +684,9 @@ func (h *MessageHandler) BulkImport(w http.ResponseWriter, r *http.Request) {
 
 	if !h.checkChannelAccess(r, channelID, userID) {
 		writeJSON(w, http.StatusForbidden, errorResponse("FORBIDDEN", "you do not have access to this channel"))
+		return
+	}
+	if !requireChannelPermission(h.db, w, r, channelID, userID, permissions.SendMessages) {
 		return
 	}
 
