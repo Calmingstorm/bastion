@@ -18,6 +18,7 @@ import { PERMISSIONS } from '../../utils/permissions';
 import { eventBus } from '../../utils/eventBus';
 import bastionLogo from '../../assets/bastion-logo.svg';
 import type { ChannelCategory } from '../../types';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
 
 const DM_VISIBLE_COUNT = 8;
 
@@ -73,7 +74,12 @@ export function UnifiedSidebar() {
   const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
   const [editCategoryName, setEditCategoryName] = useState('');
   const [deletingCategoryId, setDeletingCategoryId] = useState<string | null>(null);
+  const [isDeletingCategory, setIsDeletingCategory] = useState(false);
   const editCategoryRef = useRef<HTMLInputElement>(null);
+  // See ChannelList: restore focus to the deleting category's persistent context-menu
+  // trigger (the shared dialog captures the menu portal, which unmounts on close).
+  const categoryTriggerRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const pendingReturnFocusRef = useRef<HTMLElement | null>(null);
 
   // Fetch DMs on mount
   useEffect(() => { fetchDMs(); }, [fetchDMs]);
@@ -143,11 +149,13 @@ export function UnifiedSidebar() {
 
   const handleDeleteCategory = async () => {
     if (!deletingCategoryId || !expandedServerId) return;
+    setIsDeletingCategory(true); // locks the dialog so it can't be dismissed mid-request
     try {
       await apiDeleteCategory(expandedServerId, deletingCategoryId);
       fetchCategories();
       useServerStore.getState().selectServer(expandedServerId);
     } catch { /* silently fail */ }
+    setIsDeletingCategory(false);
     setDeletingCategoryId(null);
   };
 
@@ -610,6 +618,9 @@ export function UnifiedSidebar() {
                                 <ContextMenu.Root>
                                   <ContextMenu.Trigger asChild>
                                     <button
+                                      ref={(el) => {
+                                        categoryTriggerRefs.current[cat.id] = el;
+                                      }}
                                       onClick={() => toggleCategory(cat.id)}
                                       className="flex min-w-0 flex-1 items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"
                                     >
@@ -636,7 +647,10 @@ export function UnifiedSidebar() {
                                         </ContextMenu.Item>
                                         <ContextMenu.Separator className="my-1 h-px bg-[var(--border)]" />
                                         <ContextMenu.Item
-                                          onSelect={() => setDeletingCategoryId(cat.id)}
+                                          onSelect={() => {
+                                            pendingReturnFocusRef.current = categoryTriggerRefs.current[cat.id] ?? null;
+                                            setDeletingCategoryId(cat.id);
+                                          }}
                                           className="flex w-full cursor-default items-center rounded px-2.5 py-1.5 text-sm outline-none text-[var(--danger)] hover:bg-[var(--danger)] hover:text-white"
                                         >
                                           Delete Category
@@ -738,31 +752,17 @@ export function UnifiedSidebar() {
         />
       )}
 
-      {/* Delete category confirmation */}
-      {deletingCategoryId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
-          <div className="w-full max-w-sm rounded-md bg-[var(--bg-primary)] p-6 shadow-xl">
-            <h3 className="mb-2 text-lg font-bold text-[var(--text-primary)]">Delete Category</h3>
-            <p className="mb-4 text-sm text-[var(--text-secondary)]">
-              Are you sure you want to delete this category? Channels in this category will become uncategorized.
-            </p>
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setDeletingCategoryId(null)}
-                className="rounded-[3px] px-4 py-2 text-sm font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleDeleteCategory}
-                className="rounded-[3px] bg-[var(--danger)] px-4 py-2 text-sm font-medium text-white hover:opacity-90"
-              >
-                Delete
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <ConfirmDialog
+        open={!!deletingCategoryId}
+        onOpenChange={(open) => {
+          if (!open) setDeletingCategoryId(null);
+        }}
+        onConfirm={handleDeleteCategory}
+        title="Delete Category"
+        description="Are you sure you want to delete this category? Channels in this category will become uncategorized."
+        returnFocusRef={pendingReturnFocusRef}
+        isPending={isDeletingCategory}
+      />
     </div>
   );
 }

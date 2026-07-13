@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, type KeyboardEvent } from 'react';
 import * as ContextMenu from '@radix-ui/react-context-menu';
 import type { Channel, ChannelCategory } from '../../types';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useUnreadStore } from '../../stores/unreadStore';
 import { apiUpdateChannel, apiDeleteChannel } from '../../api/client';
 import { useServerStore } from '../../stores/serverStore';
@@ -20,7 +21,12 @@ export function ChannelItem({ channel, isSelected, onClick, canManage, serverId,
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(channel.name);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
   const editRef = useRef<HTMLInputElement>(null);
+  // The delete confirm is opened from the context menu; its portal holds focus when
+  // the dialog captures it, so we hand the dialog this persistent trigger to restore
+  // focus to on Escape/Cancel (on delete the channel unmounts -> app fallback).
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (isEditing && editRef.current) {
@@ -44,10 +50,12 @@ export function ChannelItem({ channel, isSelected, onClick, canManage, serverId,
 
   const handleDelete = async () => {
     if (!serverId) return;
+    setIsDeleting(true); // locks the dialog so it can't be dismissed mid-request
     try {
       await apiDeleteChannel(serverId, channel.id);
       useServerStore.getState().removeChannel(channel.id);
     } catch { /* handled */ }
+    setIsDeleting(false);
     setShowDeleteConfirm(false);
   };
 
@@ -90,6 +98,7 @@ export function ChannelItem({ channel, isSelected, onClick, canManage, serverId,
 
   const channelButton = (
     <button
+      ref={triggerRef}
       onClick={onClick}
       className={`group flex w-full items-center gap-1.5 rounded-[4px] px-2 py-1.5 text-left transition-colors ${
         isSelected
@@ -131,31 +140,19 @@ export function ChannelItem({ channel, isSelected, onClick, canManage, serverId,
     return (
       <>
         {channelButton}
-        {/* Delete confirmation */}
-        {showDeleteConfirm && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
-            <div className="w-full max-w-sm rounded-md bg-[var(--bg-primary)] p-6 shadow-xl">
-              <h3 className="mb-2 text-lg font-bold text-[var(--text-primary)]">Delete Channel</h3>
-              <p className="mb-4 text-sm text-[var(--text-secondary)]">
-                Are you sure you want to delete <strong>#{channel.name}</strong>? This cannot be undone.
-              </p>
-              <div className="flex justify-end gap-2">
-                <button
-                  onClick={() => setShowDeleteConfirm(false)}
-                  className="rounded-[3px] px-4 py-2 text-sm font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleDelete}
-                  className="rounded-[3px] bg-[var(--danger)] px-4 py-2 text-sm font-medium text-white hover:opacity-90"
-                >
-                  Delete
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
+        <ConfirmDialog
+          open={showDeleteConfirm}
+          onOpenChange={setShowDeleteConfirm}
+          onConfirm={handleDelete}
+          returnFocusRef={triggerRef}
+          isPending={isDeleting}
+          title="Delete Channel"
+          description={
+            <>
+              Are you sure you want to delete <strong>#{channel.name}</strong>? This cannot be undone.
+            </>
+          }
+        />
       </>
     );
   }
@@ -222,31 +219,19 @@ export function ChannelItem({ channel, isSelected, onClick, canManage, serverId,
         </ContextMenu.Portal>
       </ContextMenu.Root>
 
-      {/* Delete confirmation */}
-      {showDeleteConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
-          <div className="w-full max-w-sm rounded-md bg-[var(--bg-primary)] p-6 shadow-xl">
-            <h3 className="mb-2 text-lg font-bold text-[var(--text-primary)]">Delete Channel</h3>
-            <p className="mb-4 text-sm text-[var(--text-secondary)]">
-              Are you sure you want to delete <strong>#{channel.name}</strong>? This cannot be undone.
-            </p>
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setShowDeleteConfirm(false)}
-                className="rounded-[3px] px-4 py-2 text-sm font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleDelete}
-                className="rounded-[3px] bg-[var(--danger)] px-4 py-2 text-sm font-medium text-white hover:opacity-90"
-              >
-                Delete
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <ConfirmDialog
+        open={showDeleteConfirm}
+        onOpenChange={setShowDeleteConfirm}
+        onConfirm={handleDelete}
+        returnFocusRef={triggerRef}
+        isPending={isDeleting}
+        title="Delete Channel"
+        description={
+          <>
+            Are you sure you want to delete <strong>#{channel.name}</strong>? This cannot be undone.
+          </>
+        }
+      />
     </>
   );
 }
