@@ -170,6 +170,10 @@ func handleBotAuth(w http.ResponseWriter, r *http.Request, next http.Handler, to
 		return
 	}
 
+	if AfterFastPathMissForTest != nil {
+		AfterFastPathMissForTest()
+	}
+
 	// Transitional slow path: only legacy rows (never healed) whose stored hint
 	// equals this token's suffix. The partial index on token_hint keeps this to
 	// the tiny collision bucket -- normally one row -- instead of the table.
@@ -205,7 +209,25 @@ func handleBotAuth(w http.ResponseWriter, r *http.Request, next http.Handler, to
 		return
 	}
 
-	// Unknown hint (or no legacy rows left): no candidate, no Argon2, no oracle.
+	// A concurrent request may have healed the target between our fast-path miss
+	// and the legacy query, moving its token_lookup off NULL so it no longer
+	// appears in the still-NULL bucket -- even when that bucket is non-empty with
+	// an unrelated bot that shares the same hint. Re-check the fast path
+	// unconditionally, before spending any Argon2, so a healed valid token is
+	// never rejected.
+	err = db.QueryRow(r.Context(),
+		`SELECT user_id FROM bots WHERE token_lookup = $1`, digest).Scan(&botUserID)
+	if err == nil {
+		authenticateBot(w, r, next, botUserID)
+		return
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		log.Error().Err(err).Msg("bot auth fast-path recheck failed")
+		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	// Genuinely unknown token with no legacy candidate: reject without Argon2.
 	if len(candidates) == 0 {
 		http.Error(w, `{"error":"invalid bot token"}`, http.StatusUnauthorized)
 		return

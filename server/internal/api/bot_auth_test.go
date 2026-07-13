@@ -358,6 +358,69 @@ func TestBotAuthConcurrentHealingIsSafe(t *testing.T) {
 	}
 }
 
+// TestBotAuthHealRaceRechecksFastPath: if a concurrent request heals this bot
+// between the fast-path miss and the legacy candidate query, the legacy query
+// sees no candidate (token_lookup is no longer NULL). A valid token must still
+// authenticate via the fast-path re-check rather than being spuriously 401'd.
+func TestBotAuthHealRaceRechecksFastPath(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	serverID := h.CreateServer(owner, "S")
+	botID, _, token := createBotFull(t, h, owner, serverID)
+	makeLegacy(t, h, botID)
+
+	// Simulate the concurrent heal landing exactly in the race window.
+	var once sync.Once
+	auth.AfterFastPathMissForTest = func() {
+		once.Do(func() {
+			if _, err := h.Pool.Exec(context.Background(),
+				`UPDATE bots SET token_lookup = $1 WHERE id = $2`, auth.BotTokenDigest(token), botID); err != nil {
+				t.Errorf("simulate heal: %v", err)
+			}
+		})
+	}
+	t.Cleanup(func() { auth.AfterFastPathMissForTest = nil })
+
+	if code := authAsBot(h, token); code != http.StatusOK {
+		t.Fatalf("valid token healed mid-auth must still authenticate, got %d", code)
+	}
+}
+
+// TestBotAuthHealRaceRechecksWithHintCollision: the fast-path re-check must run
+// even when the legacy bucket is NON-empty. If the healed target shares its
+// 8-char hint with an unrelated legacy bot, the legacy query returns that
+// unrelated bot; the re-check must still authenticate the healed target rather
+// than 401 after a fruitless Argon2 compare -- and do so before any Argon2.
+func TestBotAuthHealRaceRechecksWithHintCollision(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	serverID := h.CreateServer(owner, "S")
+	const suffix = "deadbeef"
+	targetTok := mkBotToken("1111111111111111111111111111111111111111", suffix)
+	otherTok := mkBotToken("2222222222222222222222222222222222222222", suffix)
+	targetID, _ := seedLegacyBotWithToken(t, h, owner, serverID, targetTok)
+	seedLegacyBotWithToken(t, h, owner, serverID, otherTok) // unrelated, same hint
+
+	var once sync.Once
+	auth.AfterFastPathMissForTest = func() {
+		once.Do(func() {
+			if _, err := h.Pool.Exec(context.Background(),
+				`UPDATE bots SET token_lookup = $1 WHERE id = $2`, auth.BotTokenDigest(targetTok), targetID); err != nil {
+				t.Errorf("simulate heal: %v", err)
+			}
+		})
+	}
+	t.Cleanup(func() { auth.AfterFastPathMissForTest = nil })
+
+	calls := countArgon2(t)
+	if code := authAsBot(h, targetTok); code != http.StatusOK {
+		t.Fatalf("healed target sharing a hint must authenticate, got %d", code)
+	}
+	if n := atomic.LoadInt32(calls); n != 0 {
+		t.Fatalf("the re-check must authenticate before any Argon2, got %d comparisons", n)
+	}
+}
+
 // TestBotAuthDatabaseErrorReturns500: a query error must surface as 500, never be
 // silently converted into an invalid-token 401.
 func TestBotAuthDatabaseErrorReturns500(t *testing.T) {

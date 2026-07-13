@@ -38,6 +38,12 @@ func BotTokenDigest(token string) []byte {
 // signal, independent of wall-clock timing).
 var CompareBotToken = argon2id.ComparePasswordAndHash
 
+// AfterFastPathMissForTest, when non-nil, is invoked between the fast-path miss
+// and the legacy candidate query in handleBotAuth. Tests use it to
+// deterministically interleave a concurrent heal (which would otherwise be a
+// rare race); it is nil in production.
+var AfterFastPathMissForTest func()
+
 // DefaultLegacyArgon2Budget bounds concurrent 64 MB Argon2 verifications on the
 // legacy path so a flood of hint-matching tokens cannot exhaust memory. Kept
 // small on purpose: saturation fails fast rather than queueing allocations.
