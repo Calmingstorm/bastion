@@ -35,6 +35,7 @@ interface MessageState {
 }
 
 const MESSAGE_LIMIT = 50;
+const LOAD_ERROR = 'Failed to load messages.';
 
 // --- Reconnect reconciliation model --------------------------------------------
 //
@@ -334,25 +335,30 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     const protectionTimer = setTimeout(() => {
       abandoned = true;
       controller.abort();
-      let stillCurrent = false;
       set((s) => {
         if (sessionEpoch !== startSession) return {};
-        stillCurrent = true;
         const next = { ...s.activeFetches };
         delete next[mySeq];
+        // An abandoned initial load surfaces the base error (unless superseded by
+        // newer base activity) so the channel shows a retry affordance instead of
+        // staying falsely empty -- a later reconnect resync clears it on success.
+        // We do NOT retry: a spurious newer base fetch would discard a healthy
+        // in-flight resync, and could loop after the user leaves the channel. A
+        // pagination just releases loading (retried on scroll); a resync's existing
+        // messages remain.
+        const surfaceError =
+          isBase &&
+          !merge &&
+          mySeq >= (s.committedSeq[channelId] ?? 0) &&
+          mySeq >= (s.errorSeq[channelId] ?? 0);
         return {
           activeFetches: next,
           ...(merge ? {} : { isLoading: { ...s.isLoading, [channelId]: false } }),
+          ...(surfaceError
+            ? { error: { ...s.error, [channelId]: LOAD_ERROR }, errorSeq: { ...s.errorSeq, [channelId]: mySeq } }
+            : {}),
         };
       });
-      // An initial load has no other trigger to reload -- the component effect runs
-      // once per channel -- so a stuck one we abandon must retry itself rather than
-      // leave the channel falsely empty. (isLoading was just cleared, so the retry
-      // is not gated out.) A pagination retries on the next scroll; a resync is a
-      // background refresh whose existing messages remain.
-      if (stillCurrent && isBase && !merge) {
-        void get().fetchMessages(channelId);
-      }
     }, FETCH_PROTECTION_TIMEOUT_MS);
 
     try {
@@ -466,27 +472,25 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         };
       });
     } catch (err: unknown) {
-      const message = extractErrorMessage(err, 'Failed to load messages.');
+      const message = extractErrorMessage(err, LOAD_ERROR);
       // A request begun before a reset, or abandoned by the protection timeout,
       // must not write into the (new/fresh) session.
       if (sessionEpoch === startSession && !abandoned) {
         set((s) => {
-          // Obsolete requests clear their own loading but must not surface a stale
-          // error over the fresh state: a base fetch superseded by a later-started
-          // one, a pagination whose window was replaced/gapped since it started, or
-          // any request older than one that has already committed successfully.
+          // The error field is the LATEST-WINDOW load status, owned only by base
+          // fetches (initial load / resync); a pagination loads older history and
+          // never sets or clears it. A base failure is superseded only by newer base
+          // activity: a newer base success, a newer base error, or a later-started
+          // base fetch. committedSeq/errorSeq/maxStartedBaseSeq are all base-scoped.
           const superseded =
             mySeq < (s.committedSeq[channelId] ?? 0) ||
             mySeq < (s.errorSeq[channelId] ?? 0) ||
-            (isBase
-              ? mySeq < (s.maxStartedBaseSeq[channelId] ?? mySeq)
-              : (s.windowEpoch[channelId] ?? 0) !== startEpoch);
+            mySeq < (s.maxStartedBaseSeq[channelId] ?? mySeq);
           return {
             ...(merge ? {} : { isLoading: { ...s.isLoading, [channelId]: false } }),
-            // Stamp the error with this fetch's sequence so an older success can't clear it.
-            ...(superseded
-              ? {}
-              : { error: { ...s.error, [channelId]: message }, errorSeq: { ...s.errorSeq, [channelId]: mySeq } }),
+            ...(isBase && !superseded
+              ? { error: { ...s.error, [channelId]: message }, errorSeq: { ...s.errorSeq, [channelId]: mySeq } }
+              : {}),
           };
         });
       }

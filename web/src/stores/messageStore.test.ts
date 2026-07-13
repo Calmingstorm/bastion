@@ -500,7 +500,7 @@ describe('messageStore.fetchMessages', () => {
     }
   });
 
-  it('an abandoned initial load retries so the channel is not left falsely empty', async () => {
+  it('an abandoned initial load surfaces an error rather than retrying or staying empty', async () => {
     vi.useFakeTimers();
     try {
       let calls = 0;
@@ -508,13 +508,33 @@ describe('messageStore.fetchMessages', () => {
         calls += 1;
         return new Promise(() => {}); // hangs
       });
-      useMessageStore.setState({ messages: {}, isLoading: {} });
+      useMessageStore.setState({ messages: {}, isLoading: {}, error: {}, errorSeq: {}, committedSeq: {} });
       void useMessageStore.getState().fetchMessages('c1'); // initial load, hangs
       expect(calls).toBe(1);
-      expect(useMessageStore.getState().isLoading.c1).toBe(true);
-      vi.advanceTimersByTime(120_001); // abandon -> retry (no other trigger reloads an initial load)
-      expect(calls).toBe(2); // retried instead of leaving the channel falsely empty
-      expect(useMessageStore.getState().isLoading.c1).toBe(true); // loading reflects the retry
+      vi.advanceTimersByTime(120_001); // abandon
+      expect(calls).toBe(1); // NOT retried -- a spurious newer base fetch would discard a healthy resync
+      expect(useMessageStore.getState().isLoading.c1).toBe(false); // loading released
+      // The channel shows an error (a retry affordance) instead of a false "empty".
+      expect(useMessageStore.getState().error.c1).toBe('Failed to load messages.');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a reconnect resync clears the error left by an abandoned initial load', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(client.apiGetMessages).mockImplementationOnce(() => new Promise(() => {})); // initial load hangs
+      useMessageStore.setState({ messages: {}, isLoading: {}, error: {}, errorSeq: {}, committedSeq: {} });
+      void useMessageStore.getState().fetchMessages('c1');
+      vi.advanceTimersByTime(120_001); // abandon -> error surfaced
+      expect(useMessageStore.getState().error.c1).toBe('Failed to load messages.');
+      vi.useRealTimers();
+      // A later reconnect resync succeeds and clears the stale error.
+      vi.mocked(client.apiGetMessages).mockResolvedValueOnce([msg('m1', tISO(1))]);
+      await useMessageStore.getState().fetchMessages('c1', undefined, true);
+      expect(useMessageStore.getState().error.c1).toBeFalsy();
+      expect(ids()).toEqual(['m1']);
     } finally {
       vi.useRealTimers();
     }
@@ -669,21 +689,21 @@ describe('messageStore.fetchMessages', () => {
 
   // --- A successful commit clears a stale error ----------------------------
 
-  it('a successful resync clears a stale error from a failed pagination', async () => {
-    useMessageStore.setState({ messages: { c1: block('old', LIMIT, 50) }, hasMore: { c1: true } });
-    const p = deferred<Message[]>();
-    const b = deferred<Message[]>();
-    vi.mocked(client.apiGetMessages)
-      .mockImplementationOnce(() => p.promise) // pagination
-      .mockImplementationOnce(() => b.promise); // resync (starts before the pagination fails)
-
-    const pDone = useMessageStore.getState().fetchMessages('c1', 'old0'); // pagination (epoch 0)
-    const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true); // resync starts, epoch still 0
-    p.reject(new Error('network')); // pagination fails before the resync commits -> writes an error
-    await pDone;
+  it('a successful resync clears a stale error from a failed base load', async () => {
+    useMessageStore.setState({ messages: { c1: [] }, hasMore: { c1: false }, error: {}, errorSeq: {}, committedSeq: {} });
+    vi.mocked(client.apiGetMessages).mockRejectedValueOnce(new Error('network')); // initial (base) load fails
+    await useMessageStore.getState().fetchMessages('c1');
     expect(useMessageStore.getState().error.c1).toBe('Failed to load messages.');
-    b.resolve(desc(block('n', LIMIT, 200))); // resync commits fresh state
-    await bDone;
-    expect(useMessageStore.getState().error.c1).toBeFalsy(); // the successful commit cleared it
+    vi.mocked(client.apiGetMessages).mockResolvedValueOnce([msg('m1', tISO(1))]); // resync succeeds
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+    expect(useMessageStore.getState().error.c1).toBeFalsy(); // the successful base commit cleared it
+  });
+
+  it('a pagination failure does not set the latest-window error', async () => {
+    useMessageStore.setState({ messages: { c1: block('m', LIMIT, 100) }, hasMore: { c1: true }, error: {} });
+    vi.mocked(client.apiGetMessages).mockRejectedValueOnce(new Error('network'));
+    await useMessageStore.getState().fetchMessages('c1', 'm0'); // pagination fails
+    // Pagination loads older history; its failure is not a latest-window error.
+    expect(useMessageStore.getState().error.c1 ?? null).toBeFalsy();
   });
 });

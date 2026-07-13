@@ -85,6 +85,9 @@ export function MessageList({ onToggleMembers, onToggleSidebar }: MessageListPro
   const channelIsLoading = useMessageStore(
     (s) => (activeChannelId ? s.isLoading[activeChannelId] ?? false : false)
   );
+  const channelError = useMessageStore(
+    (s) => (activeChannelId ? s.error[activeChannelId] ?? null : null)
+  );
 
   const { containerRef, scrollToBottomPersistent } = useAutoScroll([
     channelMessages.length,
@@ -426,8 +429,22 @@ export function MessageList({ onToggleMembers, onToggleSidebar }: MessageListPro
           );
         })}
 
+        {/* Error state: a latest-window load failed (e.g. abandoned after timing
+            out). Show a retry rather than a misleading "no messages" empty state. */}
+        {channelMessages.length === 0 && !channelIsLoading && channelError && activeChannelId && (
+          <div className="flex flex-col items-center justify-center gap-3 py-12">
+            <p className="text-sm text-[var(--text-muted)]">{channelError}</p>
+            <button
+              onClick={() => void fetchMessages(activeChannelId)}
+              className="rounded-[3px] bg-[var(--accent)] px-4 py-1.5 text-sm font-medium text-white transition-colors hover:opacity-90"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
         {/* Empty state */}
-        {channelMessages.length === 0 && !channelIsLoading && (
+        {channelMessages.length === 0 && !channelIsLoading && !channelError && (
           <div className="flex items-center justify-center py-12">
             <p className="text-sm text-[var(--text-muted)]">
               {isDM
