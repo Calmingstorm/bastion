@@ -237,36 +237,37 @@ type AuditLogEntry struct {
 
 // Audit log action types
 const (
-	AuditRoleCreate         = "ROLE_CREATE"
-	AuditRoleUpdate         = "ROLE_UPDATE"
-	AuditRoleDelete         = "ROLE_DELETE"
-	AuditChannelCreate      = "CHANNEL_CREATE"
-	AuditChannelUpdate      = "CHANNEL_UPDATE"
-	AuditChannelDelete      = "CHANNEL_DELETE"
-	AuditCategoryCreate     = "CATEGORY_CREATE"
-	AuditCategoryUpdate     = "CATEGORY_UPDATE"
-	AuditCategoryDelete     = "CATEGORY_DELETE"
-	AuditMemberKick         = "MEMBER_KICK"
-	AuditMemberBan          = "MEMBER_BAN"
-	AuditMemberUnban        = "MEMBER_UNBAN"
-	AuditMemberTimeout      = "MEMBER_TIMEOUT"
-	AuditMemberRoleUpdate   = "MEMBER_ROLE_UPDATE"
-	AuditServerUpdate       = "SERVER_UPDATE"
-	AuditServerDelete       = "SERVER_DELETE"
-	AuditInviteCreate       = "INVITE_CREATE"
-	AuditInviteDelete       = "INVITE_DELETE"
-	AuditMessageDelete      = "MESSAGE_DELETE"
-	AuditMemberLeave        = "MEMBER_LEAVE"
-	AuditMessagePin         = "MESSAGE_PIN"
-	AuditMessageUnpin       = "MESSAGE_UNPIN"
-	AuditNicknameUpdate     = "NICKNAME_UPDATE"
-	AuditWebhookCreate      = "WEBHOOK_CREATE"
-	AuditWebhookUpdate      = "WEBHOOK_UPDATE"
-	AuditWebhookDelete      = "WEBHOOK_DELETE"
-	AuditBotCreate          = "BOT_CREATE"
-	AuditBotUpdate          = "BOT_UPDATE"
-	AuditBotDelete          = "BOT_DELETE"
-	AuditBotTokenRegenerate = "BOT_TOKEN_REGENERATE"
+	AuditRoleCreate             = "ROLE_CREATE"
+	AuditRoleUpdate             = "ROLE_UPDATE"
+	AuditRoleDelete             = "ROLE_DELETE"
+	AuditChannelCreate          = "CHANNEL_CREATE"
+	AuditChannelUpdate          = "CHANNEL_UPDATE"
+	AuditChannelDelete          = "CHANNEL_DELETE"
+	AuditCategoryCreate         = "CATEGORY_CREATE"
+	AuditCategoryUpdate         = "CATEGORY_UPDATE"
+	AuditCategoryDelete         = "CATEGORY_DELETE"
+	AuditMemberKick             = "MEMBER_KICK"
+	AuditMemberBan              = "MEMBER_BAN"
+	AuditMemberUnban            = "MEMBER_UNBAN"
+	AuditMemberTimeout          = "MEMBER_TIMEOUT"
+	AuditMemberRoleUpdate       = "MEMBER_ROLE_UPDATE"
+	AuditServerUpdate           = "SERVER_UPDATE"
+	AuditServerDelete           = "SERVER_DELETE"
+	AuditInviteCreate           = "INVITE_CREATE"
+	AuditInviteDelete           = "INVITE_DELETE"
+	AuditMessageDelete          = "MESSAGE_DELETE"
+	AuditMemberLeave            = "MEMBER_LEAVE"
+	AuditMessagePin             = "MESSAGE_PIN"
+	AuditMessageUnpin           = "MESSAGE_UNPIN"
+	AuditNicknameUpdate         = "NICKNAME_UPDATE"
+	AuditWebhookCreate          = "WEBHOOK_CREATE"
+	AuditWebhookUpdate          = "WEBHOOK_UPDATE"
+	AuditWebhookDelete          = "WEBHOOK_DELETE"
+	AuditWebhookTokenRegenerate = "WEBHOOK_TOKEN_REGENERATE"
+	AuditBotCreate              = "BOT_CREATE"
+	AuditBotUpdate              = "BOT_UPDATE"
+	AuditBotDelete              = "BOT_DELETE"
+	AuditBotTokenRegenerate     = "BOT_TOKEN_REGENERATE"
 )
 
 type Webhook struct {
@@ -276,7 +277,10 @@ type Webhook struct {
 	CreatorID uuid.UUID `json:"creatorId"`
 	Name      string    `json:"name"`
 	AvatarURL *string   `json:"avatarUrl,omitempty"`
-	Token     string    `json:"token,omitempty"`
+	// Token is the plaintext token, returned ONLY once on create/regenerate.
+	Token string `json:"token,omitempty"`
+	// TokenHint is the last characters of the token, safe to show on list/get.
+	TokenHint string    `json:"tokenHint,omitempty"`
 	UserID    uuid.UUID `json:"userId"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`

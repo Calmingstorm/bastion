@@ -1,12 +1,15 @@
 package api
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
 
@@ -15,6 +18,20 @@ import (
 	"github.com/Calmingstorm/bastion/server/internal/permissions"
 	"github.com/Calmingstorm/bastion/server/internal/realtime"
 )
+
+// hashWebhookToken returns the SHA-256 digest of a webhook token (stored raw as
+// BYTEA) and its display hint (the last 8 characters). The token is a 192-bit
+// random secret, so a plain SHA-256 is sufficient and keeps the public execute
+// path cheap. The plaintext token is returned to the caller only once.
+func hashWebhookToken(token string) (hash []byte, hint string) {
+	sum := sha256.Sum256([]byte(token))
+	if len(token) >= 8 {
+		hint = token[len(token)-8:]
+	} else {
+		hint = token
+	}
+	return sum[:], hint
+}
 
 type WebhookHandler struct {
 	db  *pgxpool.Pool
@@ -100,20 +117,24 @@ func (h *WebhookHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tokenHash, tokenHint := hashWebhookToken(token)
+
 	var webhook models.Webhook
 	err = h.db.QueryRow(r.Context(),
-		`INSERT INTO webhooks (server_id, channel_id, creator_id, name, token, user_id)
-		 VALUES ($1, $2, $3, $4, $5, $6)
-		 RETURNING id, server_id, channel_id, creator_id, name, avatar_url, token, user_id, created_at, updated_at`,
-		serverID, channelID, userID, req.Name, token, webhookUserID,
+		`INSERT INTO webhooks (server_id, channel_id, creator_id, name, token_hash, token_hint, user_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 RETURNING id, server_id, channel_id, creator_id, name, avatar_url, token_hint, user_id, created_at, updated_at`,
+		serverID, channelID, userID, req.Name, tokenHash, tokenHint, webhookUserID,
 	).Scan(&webhook.ID, &webhook.ServerID, &webhook.ChannelID, &webhook.CreatorID,
-		&webhook.Name, &webhook.AvatarURL, &webhook.Token, &webhook.UserID,
+		&webhook.Name, &webhook.AvatarURL, &webhook.TokenHint, &webhook.UserID,
 		&webhook.CreatedAt, &webhook.UpdatedAt)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create webhook")
 		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
+	// The plaintext token is returned exactly once, here.
+	webhook.Token = token
 
 	writeAuditLog(h.db, r.Context(), serverID, userID, models.AuditWebhookCreate, "webhook", webhook.ID, map[string]string{"name": req.Name}, nil)
 
@@ -134,7 +155,7 @@ func (h *WebhookHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := h.db.Query(r.Context(),
-		`SELECT id, server_id, channel_id, creator_id, name, avatar_url, user_id, created_at, updated_at
+		`SELECT id, server_id, channel_id, creator_id, name, avatar_url, token_hint, user_id, created_at, updated_at
 		 FROM webhooks WHERE server_id = $1 ORDER BY created_at DESC`, serverID,
 	)
 	if err != nil {
@@ -147,13 +168,13 @@ func (h *WebhookHandler) List(w http.ResponseWriter, r *http.Request) {
 	webhooks := make([]models.Webhook, 0)
 	for rows.Next() {
 		var wh models.Webhook
+		// Only the hint is exposed; the plaintext token is never returned here.
 		if err := rows.Scan(&wh.ID, &wh.ServerID, &wh.ChannelID, &wh.CreatorID,
-			&wh.Name, &wh.AvatarURL, &wh.UserID, &wh.CreatedAt, &wh.UpdatedAt); err != nil {
+			&wh.Name, &wh.AvatarURL, &wh.TokenHint, &wh.UserID, &wh.CreatedAt, &wh.UpdatedAt); err != nil {
 			log.Error().Err(err).Msg("failed to scan webhook")
 			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
-		// Don't expose token in list
 		webhooks = append(webhooks, wh)
 	}
 
@@ -180,10 +201,10 @@ func (h *WebhookHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 	var wh models.Webhook
 	err = h.db.QueryRow(r.Context(),
-		`SELECT id, server_id, channel_id, creator_id, name, avatar_url, token, user_id, created_at, updated_at
+		`SELECT id, server_id, channel_id, creator_id, name, avatar_url, token_hint, user_id, created_at, updated_at
 		 FROM webhooks WHERE id = $1 AND server_id = $2`, webhookID, serverID,
 	).Scan(&wh.ID, &wh.ServerID, &wh.ChannelID, &wh.CreatorID,
-		&wh.Name, &wh.AvatarURL, &wh.Token, &wh.UserID, &wh.CreatedAt, &wh.UpdatedAt)
+		&wh.Name, &wh.AvatarURL, &wh.TokenHint, &wh.UserID, &wh.CreatedAt, &wh.UpdatedAt)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "webhook not found"))
 		return
@@ -323,6 +344,60 @@ func (h *WebhookHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
+// RegenerateToken handles POST /api/v1/servers/{serverID}/webhooks/{webhookID}/regenerate-token
+// It rotates the token: the old token stops working immediately and the new
+// plaintext token is returned exactly once.
+func (h *WebhookHandler) RegenerateToken(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromContext(r.Context())
+	serverID, err := parseUUID(chi.URLParam(r, "serverID"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid server ID"))
+		return
+	}
+	webhookID, err := parseUUID(chi.URLParam(r, "webhookID"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid webhook ID"))
+		return
+	}
+
+	if _, ok := requirePermission(h.db, w, r, serverID, userID, permissions.ManageServer); !ok {
+		return
+	}
+
+	token, err := generateWebhookToken()
+	if err != nil {
+		log.Error().Err(err).Msg("failed to generate webhook token")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+	tokenHash, tokenHint := hashWebhookToken(token)
+
+	var webhook models.Webhook
+	err = h.db.QueryRow(r.Context(),
+		`UPDATE webhooks SET token_hash = $1, token_hint = $2, updated_at = NOW()
+		 WHERE id = $3 AND server_id = $4
+		 RETURNING id, server_id, channel_id, creator_id, name, avatar_url, token_hint, user_id, created_at, updated_at`,
+		tokenHash, tokenHint, webhookID, serverID,
+	).Scan(&webhook.ID, &webhook.ServerID, &webhook.ChannelID, &webhook.CreatorID,
+		&webhook.Name, &webhook.AvatarURL, &webhook.TokenHint, &webhook.UserID,
+		&webhook.CreatedAt, &webhook.UpdatedAt)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "webhook not found"))
+			return
+		}
+		log.Error().Err(err).Msg("failed to regenerate webhook token")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+	// The new plaintext token is returned exactly once, here.
+	webhook.Token = token
+
+	writeAuditLog(h.db, r.Context(), serverID, userID, models.AuditWebhookTokenRegenerate, "webhook", webhook.ID, nil, nil)
+
+	writeJSON(w, http.StatusOK, webhook)
+}
+
 // Execute handles POST /api/v1/webhooks/{webhookID}/{token} (public, no auth required)
 func (h *WebhookHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	webhookID, err := parseUUID(chi.URLParam(r, "webhookID"))
@@ -336,18 +411,22 @@ func (h *WebhookHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Look up webhook by ID and validate token
+	// Look up the webhook by ID, then verify the token against its stored SHA-256
+	// digest in constant time. Verification is done in Go (not a SQL equality on
+	// token_hash), since SQL equality is not a documented constant-time primitive.
 	var wh models.Webhook
+	var storedHash []byte
 	err = h.db.QueryRow(r.Context(),
-		`SELECT id, server_id, channel_id, name, avatar_url, token, user_id
+		`SELECT id, server_id, channel_id, name, avatar_url, token_hash, user_id
 		 FROM webhooks WHERE id = $1`, webhookID,
-	).Scan(&wh.ID, &wh.ServerID, &wh.ChannelID, &wh.Name, &wh.AvatarURL, &wh.Token, &wh.UserID)
+	).Scan(&wh.ID, &wh.ServerID, &wh.ChannelID, &wh.Name, &wh.AvatarURL, &storedHash, &wh.UserID)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "webhook not found"))
 		return
 	}
 
-	if wh.Token != token {
+	presented := sha256.Sum256([]byte(token))
+	if len(storedHash) != sha256.Size || subtle.ConstantTimeCompare(storedHash, presented[:]) != 1 {
 		writeJSON(w, http.StatusUnauthorized, errorResponse("UNAUTHORIZED", "invalid token"))
 		return
 	}

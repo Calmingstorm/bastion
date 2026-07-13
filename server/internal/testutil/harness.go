@@ -48,6 +48,43 @@ const TestJWTSecret = "test-jwt-secret-not-for-production-0123456789"
 
 var dbSeq atomic.Int64
 
+// NewMigrationDB creates a fresh, UN-migrated throwaway database and returns its
+// postgres:// DSN, so a test can apply migrations incrementally (e.g. to verify a
+// specific migration's backfill). The database is dropped at test cleanup. The
+// test is skipped when TEST_DATABASE_URL is unset.
+func NewMigrationDB(t *testing.T) string {
+	t.Helper()
+	baseURL := os.Getenv("TEST_DATABASE_URL")
+	if baseURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		t.Fatalf("parse TEST_DATABASE_URL: %v", err)
+	}
+	pw, _ := u.User.Password()
+	baseDB := config.DBConfig{
+		Host: u.Hostname(), Port: u.Port(), User: u.User.Username(), Password: pw, Name: "postgres",
+	}
+	ctx := context.Background()
+	admin, err := pgxpool.New(ctx, baseDB.DSN())
+	if err != nil {
+		t.Fatalf("connect to admin database: %v", err)
+	}
+	dbName := fmt.Sprintf("bastion_migtest_%d_%d", os.Getpid(), dbSeq.Add(1))
+	if _, err := admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{dbName}.Sanitize()); err != nil {
+		admin.Close()
+		t.Fatalf("create migration test database: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupDatabase(admin, dbName, t)
+		admin.Close()
+	})
+	testDB := baseDB
+	testDB.Name = dbName
+	return testDB.DSN()
+}
+
 // Harness is a running Bastion API backed by a throwaway database and Redis DB.
 type Harness struct {
 	T      *testing.T
