@@ -41,9 +41,17 @@ const apiClient = axios.create({
 // write the previous user's data back into a freshly-reset store.
 let sessionAbort = new AbortController();
 
-// abortInFlightRequests cancels every request currently in flight and starts a
-// fresh session signal for subsequent requests. Called on logout.
+// sessionEpoch bumps on every logout. The token-refresh call uses the bare
+// axios.post (not apiClient), so aborting apiClient requests cannot cancel it —
+// the refresh path compares the epoch captured when it started against the
+// current one and refuses to write tokens if a logout happened in between.
+let sessionEpoch = 0;
+
+// abortInFlightRequests cancels every request currently in flight, invalidates
+// any pending token refresh, and starts a fresh session signal for subsequent
+// requests. Called on logout.
 export function abortInFlightRequests(): void {
+  sessionEpoch += 1;
   sessionAbort.abort();
   sessionAbort = new AbortController();
 }
@@ -136,6 +144,9 @@ apiClient.interceptors.response.use(
 
       (originalRequest as InternalAxiosRequestConfig & { _retry?: boolean })._retry = true;
       isRefreshing = true;
+      // Capture the session at the moment refresh begins; if a logout bumps the
+      // epoch before the refresh resolves, the result must be discarded.
+      const epochAtRefresh = sessionEpoch;
 
       const refreshToken = getRefreshToken();
       if (!refreshToken) {
@@ -154,6 +165,13 @@ apiClient.interceptors.response.use(
           `${apiBaseURL}/auth/refresh`,
           { refreshToken }
         );
+        // A logout during the in-flight refresh must remain authoritative: do
+        // not write the new tokens back, update the socket, or resume queued
+        // requests — that would resurrect the dead session.
+        if (epochAtRefresh !== sessionEpoch) {
+          processQueue(new Error('session ended'), null);
+          return Promise.reject(error);
+        }
         const { accessToken } = response.data;
         setTokens(accessToken, refreshToken);
         wsClient.updateToken(accessToken);

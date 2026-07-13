@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { AxiosAdapter, AxiosResponse } from 'axios';
-import { render } from '@testing-library/react';
+import { render, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import apiClient, { clearTokens } from './client';
 import { AuthFailureBridge } from '../components/AuthFailureBridge';
@@ -38,7 +38,11 @@ describe('session invalidation', () => {
     });
     useAuthStore.setState({ isAuthenticated: true, user: { id: 'u1' } as never });
 
-    await expect(apiClient.get('/anything')).rejects.toBeTruthy();
+    // The failure handler (logout + navigate) updates React state, so run the
+    // triggering request inside act to keep the test warning-free.
+    await act(async () => {
+      await expect(apiClient.get('/anything')).rejects.toBeTruthy();
+    });
 
     expect(useAuthStore.getState().isAuthenticated).toBe(false);
     expect(useAuthStore.getState().user).toBeNull();

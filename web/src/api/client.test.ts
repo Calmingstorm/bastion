@@ -4,9 +4,11 @@ import axios from 'axios';
 import apiClient, {
   setTokens,
   clearTokens,
+  getAccessToken,
   getRefreshToken,
   setAuthFailureHandler,
 } from './client';
+import { useAuthStore } from '../stores/authStore';
 
 // An adapter that always rejects with a 401, so the response interceptor's
 // token-refresh path runs for every request.
@@ -70,5 +72,30 @@ describe('apiClient auth interceptor', () => {
 
     expect(getRefreshToken()).toBeNull();
     expect(onFailure).toHaveBeenCalledTimes(1);
+  });
+
+  // A refresh runs on the bare axios.post, outside the request-abort boundary.
+  // If it resolves after logout, the session-epoch guard must discard it so the
+  // dead session is not resurrected.
+  it('does not resurrect the session when a refresh resolves after logout', async () => {
+    setTokens('access-1', 'refresh-1');
+    let resolveRefresh: (value: unknown) => void = () => {};
+    const heldRefresh = new Promise((r) => {
+      resolveRefresh = r;
+    });
+    const post = vi.spyOn(axios, 'post').mockReturnValue(heldRefresh as never);
+
+    const req = apiClient.get('/anything');
+    await vi.waitFor(() => expect(post).toHaveBeenCalled());
+
+    // Log out while the refresh is held.
+    useAuthStore.getState().logout();
+
+    // The refresh now succeeds, but it belongs to the ended session.
+    resolveRefresh({ data: { accessToken: 'new-access' } });
+
+    await expect(req).rejects.toBeTruthy();
+    expect(getRefreshToken()).toBeNull();
+    expect(getAccessToken()).toBeNull();
   });
 });
