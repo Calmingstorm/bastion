@@ -102,4 +102,17 @@ describe('messageStore.fetchMessages', () => {
     await useMessageStore.getState().fetchMessages('c1', undefined, true);
     expect(useMessageStore.getState().messages.c1).toEqual([]);
   });
+
+  it('does not resurrect a message deleted during the fetch that was absent at start', async () => {
+    useMessageStore.setState({ messages: { c1: [] }, hasMore: { c1: false }, recentlyDeleted: {} });
+    // A realtime delete for m9 arrives during the fetch; m9 was never loaded here,
+    // but the older fetched page still contains it.
+    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
+      useMessageStore.getState().deleteMessage('c1', 'm9');
+      return [msg('m9', '2026-01-09')];
+    });
+
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+    expect(useMessageStore.getState().messages.c1).toEqual([]);
+  });
 });

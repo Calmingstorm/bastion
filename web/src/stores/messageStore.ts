@@ -7,6 +7,9 @@ import { eventBus } from '../utils/eventBus';
 interface MessageState {
   messages: Record<string, Message[]>;
   hasMore: Record<string, boolean>;
+  // Internal: message ids recently deleted by a realtime event, keyed to a
+  // monotonic generation, used to reconcile reconnect resyncs.
+  recentlyDeleted: Record<string, number>;
   isLoading: Record<string, boolean>;
   error: string | null;
   replyingTo: Message | null;
@@ -25,9 +28,28 @@ interface MessageState {
 
 const MESSAGE_LIMIT = 50;
 
+// Deletion tombstones let a reconnect resync recognize a message deleted by a
+// realtime event during its in-flight fetch even when that message was never in
+// the local channel (so a stale HTTP page cannot resurrect it). deleteGen is a
+// monotonic clock; recentlyDeleted maps id -> the gen it was deleted at, bounded
+// so it cannot grow without limit.
+let deleteGen = 0;
+const TOMBSTONE_CAP = 500;
+function tombstone(current: Record<string, number>, id: string): Record<string, number> {
+  deleteGen += 1;
+  const next = { ...current, [id]: deleteGen };
+  const ids = Object.keys(next);
+  if (ids.length > TOMBSTONE_CAP) {
+    ids.sort((a, b) => next[a] - next[b]);
+    for (let i = 0; i < ids.length - TOMBSTONE_CAP; i++) delete next[ids[i]];
+  }
+  return next;
+}
+
 export const useMessageStore = create<MessageState>((set, get) => ({
   messages: {},
   hasMore: {},
+  recentlyDeleted: {},
   isLoading: {},
   error: null,
   replyingTo: null,
@@ -47,6 +69,9 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     const startSnap = merge
       ? new Map((state.messages[channelId] || []).map((m) => [m.id, m]))
       : null;
+    // Generation clock at request start: any id deleted after this (recentlyDeleted
+    // value > startGen) was removed by a realtime event during the fetch.
+    const startGen = deleteGen;
 
     set((s) => ({
       isLoading: { ...s.isLoading, [channelId]: true },
@@ -92,8 +117,14 @@ export const useMessageStore = create<MessageState>((set, get) => ({
           const result = new Map<string, Message>();
           for (const m of fetched) {
             const cur = currentById.get(m.id);
-            if (startSnap.has(m.id) && cur === undefined) {
-              continue; // deleted during the fetch -> stays deleted
+            // Deleted during the fetch -> stays deleted. Covers both a message
+            // that was present at start and is gone now, and one that was never
+            // loaded here but got a realtime delete (via the tombstone clock).
+            if (
+              (startSnap.has(m.id) && cur === undefined) ||
+              (s.recentlyDeleted[m.id] ?? -1) > startGen
+            ) {
+              continue;
             }
             if (cur !== undefined && cur !== startSnap.get(m.id)) {
               result.set(m.id, cur); // changed during the fetch -> current wins
@@ -210,12 +241,13 @@ export const useMessageStore = create<MessageState>((set, get) => ({
   deleteMessage: (channelId: string, messageId: string) => {
     set((state) => {
       const existing = state.messages[channelId];
-      if (!existing) return {};
+      // Always record the tombstone -- even if the message is not loaded here --
+      // so an in-flight resync cannot resurrect it from a stale page.
       return {
-        messages: {
-          ...state.messages,
-          [channelId]: existing.filter((m) => m.id !== messageId),
-        },
+        recentlyDeleted: tombstone(state.recentlyDeleted, messageId),
+        messages: existing
+          ? { ...state.messages, [channelId]: existing.filter((m) => m.id !== messageId) }
+          : state.messages,
       };
     });
   },
