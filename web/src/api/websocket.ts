@@ -124,10 +124,16 @@ export class WebSocketClient {
       clearTimeout(this.reconnectTimer);
     }
 
-    const delay = Math.min(
+    const ceiling = Math.min(
       1000 * Math.pow(2, this.reconnectAttempts),
       this.maxReconnectDelay
     );
+    // Equal jitter: half the exponential backoff plus a random point in the other
+    // half -> a delay in [ceiling/2, ceiling]. A single server restart drops the
+    // whole fleet at once; without jitter every client would reconnect on the same
+    // tick and stampede the server. This keeps a real minimum backoff while
+    // spreading the herd.
+    const delay = ceiling / 2 + Math.random() * (ceiling / 2);
     this.reconnectAttempts++;
 
     this.reconnectTimer = setTimeout(() => {

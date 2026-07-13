@@ -152,4 +152,35 @@ describe('WebSocketClient connection generation', () => {
     expect(timers(client).heartbeatTimer).not.toBeNull(); // ws2's heartbeat survives
     expect(timers(client).reconnectTimer).toBeNull(); // no spurious reconnect
   });
+
+  it('randomizes reconnect backoff within the equal-jitter window (distinct delays per seed)', () => {
+    vi.useFakeTimers();
+    const randomSpy = vi.spyOn(Math, 'random');
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    try {
+      // Capture the reconnect delay scheduled for a given Math.random() value. At
+      // attempt 0 the ceiling is min(1000, 30000) = 1000; equal jitter =>
+      // ceiling/2 + random * ceiling/2, i.e. 500 at random 0 and 1000 at random 1.
+      const delayFor = (r: number): number => {
+        randomSpy.mockReturnValue(r);
+        const client = new WebSocketClient();
+        client.connect('t');
+        setTimeoutSpy.mockClear();
+        FakeWS.instances[FakeWS.instances.length - 1].onclose?.(); // -> scheduleReconnect
+        const call = setTimeoutSpy.mock.calls.find((c) => typeof c[1] === 'number');
+        return call![1] as number;
+      };
+      const d0 = delayFor(0);
+      const d1 = delayFor(1);
+      expect(d0).toBe(500);
+      expect(d1).toBe(1000);
+      // The random term must actually move the delay -- a constant ceiling/2 would
+      // synchronize the whole fleet and fail this.
+      expect(d0).not.toBe(d1);
+    } finally {
+      randomSpy.mockRestore();
+      setTimeoutSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
 });

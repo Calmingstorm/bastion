@@ -445,12 +445,24 @@ export const useMessageStore = create<MessageState>((set, get) => ({
           }
           const existingIds = new Set(existing.map((m) => m.id));
           const older = reconciledFetched.filter((m) => !existingIds.has(m.id));
+          // "Stuck cursor" (loop) vs "end of history" is judged on RAW page novelty
+          // relative to REQUEST START -- not post-reconcile survivors, and not the
+          // settlement cache. The cursor is the oldest loaded id at request time; a
+          // full page whose rows were ALL already loaded THEN never advances it, so
+          // paging again would refetch it forever -> stop. A full page of ids that
+          // were NOT loaded at start means real progress, even if realtime deleted
+          // them all mid-fetch (older history still exists). Using startIds (not the
+          // settlement existingIds) also avoids a realtime delete during the request
+          // making an all-duplicate page look novel. `older` keeps using existingIds
+          // to decide what to actually prepend.
+          const rawAdvancedCursor = fetched.some((m) => !startIds.has(m.id));
+          const hasMore = fetched.length === MESSAGE_LIMIT && rawAdvancedCursor;
           // Pagination loads OLDER history; it does not refresh the latest window,
           // so it does NOT touch committedSeq or the load error -- a pagination
           // success must not suppress or clear a latest-window (base) failure.
           return {
             messages: { ...s.messages, [channelId]: [...older, ...existing] },
-            hasMore: { ...s.hasMore, [channelId]: fetched.length === MESSAGE_LIMIT },
+            hasMore: { ...s.hasMore, [channelId]: hasMore },
             isLoading: { ...s.isLoading, [channelId]: false },
           };
         }
