@@ -14,6 +14,9 @@ interface MessageState {
   windowEpoch: Record<string, number>;
   isLoading: Record<string, boolean>;
   error: string | null;
+  // Fetch sequence that set the current error; a success clears the error only if
+  // it is at least as new, so an older success can't erase a newer failure.
+  errorSeq: number;
   replyingTo: Message | null;
   setReplyingTo: (msg: Message | null) => void;
   fetchMessages: (channelId: string, before?: string, merge?: boolean) => Promise<void>;
@@ -76,15 +79,12 @@ let fetchSeq = 0;
 let sessionEpoch = 0;
 const RECENT_MAX_AGE_MS = 60000;
 const RECENT_CAP = 5000;
-// Hard cap on reaction patches per message id. Patches only bridge the race window
-// between a fetch response being generated and the client applying it, so a
-// generous cap always covers the real need; it bounds memory even while a fetch
-// holds protectFloor low under reaction churn.
-const MAX_PATCHES_PER_ENTRY = 500;
-// A fetch that never settles (no request timeout on the client) would pin
-// protectFloor forever; after this long we drop its journal protection so pruning
-// can proceed. Set well beyond RECENT_MAX_AGE_MS so it only releases genuinely
-// stuck fetches -- a real fetch resolves in a few seconds.
+// A fetch that never settles (the client sets no request timeout) would pin
+// protectFloor forever and let its stale response commit arbitrarily late. After
+// this long we ABANDON it: it can no longer commit, and its journal protection is
+// dropped so pruning proceeds. Set well beyond RECENT_MAX_AGE_MS so it only fires
+// for genuinely stuck fetches -- a real fetch resolves in a few seconds. This
+// bounds one entry's live patch list by lifetime rather than truncating it.
 const FETCH_PROTECTION_TIMEOUT_MS = 120000;
 
 // nowMs is wrapped so pruning is deterministic under fake timers in tests.
@@ -128,13 +128,16 @@ function mergeEditFields(base: Message, update: Message): Message {
 // Returns null if the message was deleted after start (and not recreated).
 function reconcile(entry: JournalEntry, fetched: Message, startVer: number): Message | null {
   if (entry.deletedVer > startVer && entry.deletedVer > entry.contentVer) return null;
-  // A realtime content op newer than the fetch supersedes it: a full create
-  // replaces the whole message (it is complete); a partial edit overrides only its
-  // content-bearing fields, keeping reactions/reply/attachments from the fetched
-  // baseline. Then layer on realtime reaction patches recorded after fetch start.
+  // A realtime content op newer than the fetch supersedes it. A full baseline
+  // (descends from a create) is authoritative for content AND attachments/reply,
+  // but its reactions may be stale, so reactions come from the fetched copy. A
+  // partial-edit-only baseline overrides just its content-bearing fields onto the
+  // fetched copy. Either way, layer on realtime reaction patches after fetch start.
   let content = fetched;
   if (entry.contentVer > startVer && entry.content) {
-    content = entry.fullContent ? entry.content : mergeEditFields(fetched, entry.content);
+    content = entry.fullContent
+      ? { ...entry.content, reactions: fetched.reactions }
+      : mergeEditFields(fetched, entry.content);
   }
   for (const p of entry.reactions) {
     if (p.ver > startVer) content = applyReaction(content, p.emoji, p.userId, p.op);
@@ -147,13 +150,14 @@ function protectFloorOf(activeFetches: Record<number, number>): number {
   return vers.length ? Math.min(...vers) : Infinity;
 }
 
-// Keep only reaction patches an in-flight fetch could still replay (ver >
-// protectFloor -- older ones are already in every active fetch's baseline), then
-// hard-cap the survivors so churn while a fetch is held cannot grow the list
-// without bound.
+// Keep only reaction patches an in-flight fetch could still replay: a patch with
+// ver <= protectFloor is older than every active fetch's start, so it is already
+// in their fetched baselines. This is lossless -- an active fetch's required
+// evidence is never truncated; growth is bounded by fetch lifetime (a stuck fetch
+// is abandoned, see FETCH_PROTECTION_TIMEOUT_MS), and with no active fetch
+// protectFloor is Infinity so the list collapses entirely.
 function boundPatches(patches: ReactionPatch[], protectFloor: number): ReactionPatch[] {
-  const kept = patches.filter((p) => p.ver > protectFloor);
-  return kept.length > MAX_PATCHES_PER_ENTRY ? kept.slice(kept.length - MAX_PATCHES_PER_ENTRY) : kept;
+  return patches.filter((p) => p.ver > protectFloor);
 }
 
 // Prune journal entries by age and size, but never one an active fetch may still
@@ -183,19 +187,23 @@ function recordUpsert(
   id: string,
   message: Message,
   protectFloor: number,
-  full: boolean
+  isCreate: boolean
 ): Record<string, JournalEntry> {
   journalVer += 1;
   const prev = journal[id];
   // A content op sets a new baseline but PRESERVES accumulated reaction patches
   // (a content edit must not drop a reaction) and clears any prior tombstone.
-  // `full` marks a create (whole message) vs an edit (content-bearing fields only).
+  // A create is a full message. An edit is partial (content-bearing fields only):
+  // merge it onto the prior baseline so a create's attachments/reply survive, and
+  // keep the baseline's fullness (full iff it still descends from a create).
+  const content = isCreate ? message : prev?.content ? mergeEditFields(prev.content, message) : message;
+  const fullContent = isCreate ? true : prev?.content ? prev.fullContent : false;
   const next: JournalEntry = {
     ver: journalVer,
     ts: nowMs(),
     contentVer: journalVer,
-    content: message,
-    fullContent: full,
+    content,
+    fullContent,
     deletedVer: 0,
     reactions: boundPatches(prev?.reactions || [], protectFloor),
   };
@@ -270,6 +278,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
   windowEpoch: {},
   isLoading: {},
   error: null,
+  errorSeq: 0,
   replyingTo: null,
 
   setReplyingTo: (msg: Message | null) => set({ replyingTo: msg }),
@@ -306,10 +315,14 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       ...(merge ? {} : { isLoading: { ...s.isLoading, [channelId]: true }, error: null }),
     }));
 
-    // Backstop: a fetch that never settles must not pin protectFloor forever, so
-    // drop its journal protection after a bounded lifetime (it self-heals on the
-    // next resync if it later commits against a compacted journal).
-    const protectionTimer = setTimeout(deregister, FETCH_PROTECTION_TIMEOUT_MS);
+    // Backstop: a fetch that never settles must not pin protectFloor forever. After
+    // a bounded lifetime we ABANDON it -- it may no longer commit (so a very late
+    // stale response can't erase newer state) and its journal protection is dropped.
+    let abandoned = false;
+    const protectionTimer = setTimeout(() => {
+      abandoned = true;
+      deregister();
+    }, FETCH_PROTECTION_TIMEOUT_MS);
 
     try {
       const rawFetched = await apiGetMessages(channelId, before, MESSAGE_LIMIT);
@@ -317,8 +330,9 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       fetched.reverse(); // API returns DESC (newest first) -> ASC
 
       set((s) => {
-        // A reset() during the fetch invalidates this response entirely.
-        if (sessionEpoch !== startSession) return {};
+        // A reset() during the fetch, or abandonment by the protection timeout,
+        // invalidates this response entirely.
+        if (sessionEpoch !== startSession || abandoned) return {};
 
         const existing = s.messages[channelId] || [];
 
@@ -345,7 +359,8 @@ export const useMessageStore = create<MessageState>((set, get) => ({
             messages: { ...s.messages, [channelId]: [...older, ...existing] },
             hasMore: { ...s.hasMore, [channelId]: fetched.length === MESSAGE_LIMIT },
             isLoading: { ...s.isLoading, [channelId]: false },
-            error: null, // a successful commit clears any stale error from a raced request
+            // Clear a raced request's error only if this success is at least as new.
+            ...(mySeq >= s.errorSeq ? { error: null, errorSeq: 0 } : {}),
           };
         }
 
@@ -398,7 +413,8 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         return {
           messages: { ...s.messages, [channelId]: sortMessages(Array.from(result.values())) },
           hasMore: { ...s.hasMore, [channelId]: newHasMore },
-          error: null, // a successful commit clears any stale error from a raced request
+          // Clear a raced request's error only if this success is at least as new.
+          ...(mySeq >= s.errorSeq ? { error: null, errorSeq: 0 } : {}),
           ...(epochAdvanced
             ? { windowEpoch: { ...s.windowEpoch, [channelId]: (s.windowEpoch[channelId] ?? 0) + 1 } }
             : {}),
@@ -407,8 +423,9 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       });
     } catch (err: unknown) {
       const message = extractErrorMessage(err, 'Failed to load messages.');
-      // A request begun before a reset must not write into the new session.
-      if (sessionEpoch === startSession) {
+      // A request begun before a reset, or abandoned by the protection timeout,
+      // must not write into the (new/fresh) session.
+      if (sessionEpoch === startSession && !abandoned) {
         set((s) => {
           // Obsolete requests clear their own loading but must not surface a stale
           // error over the fresh state: a base fetch superseded by a later-started
@@ -418,7 +435,8 @@ export const useMessageStore = create<MessageState>((set, get) => ({
             : (s.windowEpoch[channelId] ?? 0) !== startEpoch;
           return {
             ...(merge ? {} : { isLoading: { ...s.isLoading, [channelId]: false } }),
-            ...(superseded ? {} : { error: message }),
+            // Stamp the error with this fetch's sequence so an older success can't clear it.
+            ...(superseded ? {} : { error: message, errorSeq: mySeq }),
           };
         });
       }
@@ -541,6 +559,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       windowEpoch: {},
       isLoading: {},
       error: null,
+      errorSeq: 0,
       replyingTo: null,
     });
   },

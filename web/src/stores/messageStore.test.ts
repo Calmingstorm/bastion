@@ -421,15 +421,16 @@ describe('messageStore.fetchMessages', () => {
     expect(patches).toBeLessThanOrEqual(1); // compacted -- not one-per-reaction
   });
 
-  it('reaction patches stay bounded even while a fetch holds the protection floor', async () => {
+  it('keeps every reaction applied while a fetch is held (no truncation)', async () => {
     useMessageStore.setState({ messages: { c1: [msg('m1', tISO(1))] }, hasMore: { c1: false } });
     const b = deferred<Message[]>();
     vi.mocked(client.apiGetMessages).mockImplementation(() => b.promise);
-    const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true); // held -> pins protectFloor low
-    for (let i = 0; i < 2000; i++) useMessageStore.getState().addReaction('c1', 'm1', '👍', `u${i}`);
-    expect((useMessageStore.getState().journal['m1']?.reactions.length ?? 0)).toBeLessThanOrEqual(500); // hard cap
-    b.resolve([msg('m1', tISO(1))]);
+    const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true); // held -> pins protectFloor
+    for (let i = 0; i < 600; i++) useMessageStore.getState().addReaction('c1', 'm1', '👍', `u${i}`);
+    b.resolve([msg('m1', tISO(1))]); // stale baseline, no reactions
     await bDone;
+    // All 600 patches are an active fetch's required evidence -- none truncated.
+    expect(useMessageStore.getState().messages.c1[0].reactions?.find((r) => r.emoji === '👍')?.count).toBe(600);
   });
 
   // --- Full creates reconcile whole, not as partial edits ------------------
@@ -451,6 +452,62 @@ describe('messageStore.fetchMessages', () => {
     const m = useMessageStore.getState().messages.c1.find((x) => x.id === 'm9')!;
     expect(m.attachments?.length).toBe(1); // not merged away as if it were a partial edit
     expect(m.replyTo?.id).toBe('r1');
+  });
+
+  it('a full create THEN a partial edit during a resync keeps attachments and reply', async () => {
+    useMessageStore.setState({ messages: { c1: [] }, hasMore: { c1: false } });
+    const fullCreate = {
+      ...msg('m9', tISO(9), 'hi'),
+      attachments: [
+        { id: 'a1', messageId: 'm9', filename: 'f.png', storedName: 's', contentType: 'image/png', size: 1, url: '/u', createdAt: tISO(9) },
+      ],
+      replyTo: { id: 'r1', content: 'parent', author: { id: 'u3' } },
+    } as Message;
+    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
+      useMessageStore.getState().addMessage('c1', fullCreate); // full create
+      useMessageStore.getState().updateMessage('c1', msg('m9', tISO(9), 'edited')); // partial edit AFTER the create
+      return [msg('m9', tISO(9), 'hi')]; // fetched copy lacks attachments/replyTo
+    });
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+    const m = useMessageStore.getState().messages.c1.find((x) => x.id === 'm9')!;
+    expect(m.content).toBe('edited'); // edit applied
+    expect(m.attachments?.length).toBe(1); // create's attachments survive the later edit
+    expect(m.replyTo?.id).toBe('r1');
+  });
+
+  it('a fetch abandoned by the protection timeout cannot erase later realtime state', async () => {
+    vi.useFakeTimers();
+    try {
+      useMessageStore.setState({ messages: { c1: [msg('m1', tISO(1))] }, hasMore: { c1: false } });
+      const b = deferred<Message[]>();
+      vi.mocked(client.apiGetMessages).mockImplementation(() => b.promise);
+      const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true); // held resync
+      vi.advanceTimersByTime(120_001); // protection timeout fires -> fetch abandoned + deregistered
+      useMessageStore.getState().addReaction('c1', 'm1', '👍', 'u2'); // reaction arrives AFTER abandonment
+      b.resolve([msg('m1', tISO(1))]); // the stale response finally arrives (no reaction)
+      await bDone;
+      // The abandoned response did not commit, so it did not erase the realtime reaction.
+      expect(reactionUsers('m1', '👍')).toEqual(['u2']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('an older pagination success does not clear a newer resync failure', async () => {
+    useMessageStore.setState({ messages: { c1: block('old', LIMIT, 50) }, hasMore: { c1: true } });
+    const p = deferred<Message[]>();
+    const b = deferred<Message[]>();
+    vi.mocked(client.apiGetMessages)
+      .mockImplementationOnce(() => p.promise) // pagination A (seq 1)
+      .mockImplementationOnce(() => b.promise); // resync B (seq 2)
+    const pDone = useMessageStore.getState().fetchMessages('c1', 'old0'); // A
+    const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true); // B (newer)
+    b.reject(new Error('boom')); // B fails first -> writes error stamped seq 2
+    await bDone;
+    expect(useMessageStore.getState().error).toBe('Failed to load messages.');
+    p.resolve(desc(block('p', LIMIT, 0))); // A (older) succeeds afterward
+    await pDone;
+    expect(useMessageStore.getState().error).toBe('Failed to load messages.'); // A did not clear B's newer error
   });
 
   // --- A successful commit clears a stale error ----------------------------
