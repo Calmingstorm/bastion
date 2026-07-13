@@ -7,6 +7,10 @@ import (
 	"time"
 )
 
+// DefaultJWTSecret is the fallback signing secret. Running with it is insecure
+// because anyone can forge access tokens; SecurityWarnings flags it.
+const DefaultJWTSecret = "change-me-in-production"
+
 type Config struct {
 	Host        string
 	Port        string
@@ -89,7 +93,7 @@ func Load() *Config {
 			Password: getEnvMulti("bastion", "BASTION_DB_PASSWORD", "DB_PASSWORD"),
 		},
 		JWT: JWTConfig{
-			Secret:     getEnvMulti("change-me-in-production", "BASTION_JWT_SECRET", "JWT_SECRET"),
+			Secret:     getEnvMulti(DefaultJWTSecret, "BASTION_JWT_SECRET", "JWT_SECRET"),
 			AccessTTL:  parseDuration(getEnvMulti("15m", "BASTION_JWT_ACCESS_TTL", "JWT_ACCESS_TTL")),
 			RefreshTTL: parseDuration(getEnvMulti("168h", "BASTION_JWT_REFRESH_TTL", "JWT_REFRESH_TTL")),
 		},
@@ -118,6 +122,18 @@ func Load() *Config {
 		TenorAPIKey: getEnvMulti("", "BASTION_TENOR_API_KEY"),
 		GiphyAPIKey: getEnvMulti("", "BASTION_GIPHY_API_KEY"),
 	}
+}
+
+// SecurityWarnings returns human-readable warnings about insecure configuration
+// that should be surfaced at startup (e.g. running with the default JWT secret).
+func (c *Config) SecurityWarnings() []string {
+	var warnings []string
+	if c.JWT.Secret == DefaultJWTSecret {
+		warnings = append(warnings, "JWT secret is the built-in default; set BASTION_JWT_SECRET to a random value — anyone can forge tokens otherwise")
+	} else if len(c.JWT.Secret) < 32 {
+		warnings = append(warnings, "JWT secret is shorter than 32 bytes; use a longer random value")
+	}
+	return warnings
 }
 
 func getEnvMulti(fallback string, keys ...string) string {
