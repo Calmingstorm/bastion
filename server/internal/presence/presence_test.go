@@ -2,6 +2,7 @@ package presence_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -51,5 +52,45 @@ func TestGetPresenceBatch(t *testing.T) {
 	}
 	if got[offline] != "offline" {
 		t.Fatalf("unset user should be offline, got %q", got[offline])
+	}
+}
+
+// TestHeartbeatMissPathDoesNotClobberConcurrentStatus: on the miss path (key
+// absent), a status written between the EXPIRE and the SET must survive -- the
+// SET NX must not overwrite it back to online.
+func TestHeartbeatMissPathDoesNotClobberConcurrentStatus(t *testing.T) {
+	h := testutil.New(t)
+	svc := presence.NewService(h.RDB)
+	ctx := context.Background()
+	uid := uuid.New()
+
+	var once sync.Once
+	presence.AfterHeartbeatExpireForTest = func() {
+		once.Do(func() { svc.SetStatus(ctx, uid, "away") })
+	}
+	t.Cleanup(func() { presence.AfterHeartbeatExpireForTest = nil })
+
+	svc.Heartbeat(ctx, uid) // key missing -> seam sets away -> SET NX must no-op
+	if got := svc.GetPresence(ctx, uid); got != "away" {
+		t.Fatalf("heartbeat miss path must not clobber a concurrently-set status, got %q", got)
+	}
+}
+
+// TestGetPresenceBatchToleratesNonString: a non-string value from MGET must
+// decode to "offline" rather than panic on a type assertion.
+func TestGetPresenceBatchToleratesNonString(t *testing.T) {
+	h := testutil.New(t)
+	svc := presence.NewService(h.RDB)
+	ctx := context.Background()
+	uid := uuid.New()
+
+	presence.MGetForTest = func(ctx context.Context, keys []string) ([]interface{}, error) {
+		return []interface{}{int64(42)}, nil
+	}
+	t.Cleanup(func() { presence.MGetForTest = nil })
+
+	got := svc.GetPresenceBatch(ctx, []uuid.UUID{uid})
+	if got[uid] != "offline" {
+		t.Fatalf("a non-string presence value must decode to offline, got %q", got[uid])
 	}
 }

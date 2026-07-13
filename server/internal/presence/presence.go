@@ -39,14 +39,26 @@ func (s *Service) SetStatus(ctx context.Context, userID uuid.UUID, status string
 func (s *Service) Heartbeat(ctx context.Context, userID uuid.UUID) {
 	key := keyPrefix + userID.String()
 	// EXPIRE atomically refreshes the TTL and reports whether the key existed.
-	// Only when it did not (returns false) do we set the default online status --
-	// avoiding the check-then-act race where the key expires between a separate
-	// EXISTS and EXPIRE and the heartbeat is silently lost.
+	// When it did not, set the default online status with SET NX so a status set
+	// concurrently (between the EXPIRE and here) is not clobbered back to online.
 	refreshed, err := s.rdb.Expire(ctx, key, presenceTTL).Result()
-	if err == nil && !refreshed {
-		s.rdb.Set(ctx, key, "online", presenceTTL)
+	if err != nil || refreshed {
+		return
 	}
+	if AfterHeartbeatExpireForTest != nil {
+		AfterHeartbeatExpireForTest()
+	}
+	s.rdb.SetNX(ctx, key, "online", presenceTTL)
 }
+
+// AfterHeartbeatExpireForTest, when non-nil, runs on the Heartbeat miss path
+// between the EXPIRE and the SET NX, so tests can deterministically interleave a
+// concurrent status write. Nil in production.
+var AfterHeartbeatExpireForTest func()
+
+// MGetForTest, when non-nil, replaces the MGET in GetPresenceBatch, so tests can
+// force a non-string value into the decode path. Nil in production.
+var MGetForTest func(ctx context.Context, keys []string) ([]interface{}, error)
 
 func (s *Service) SetOffline(ctx context.Context, userID uuid.UUID) {
 	key := keyPrefix + userID.String()
@@ -72,7 +84,13 @@ func (s *Service) GetPresenceBatch(ctx context.Context, userIDs []uuid.UUID) map
 		keys[i] = keyPrefix + id.String()
 	}
 
-	vals, err := s.rdb.MGet(ctx, keys...).Result()
+	mget := func(ctx context.Context, keys []string) ([]interface{}, error) {
+		return s.rdb.MGet(ctx, keys...).Result()
+	}
+	if MGetForTest != nil {
+		mget = MGetForTest
+	}
+	vals, err := mget(ctx, keys)
 	if err != nil {
 		return nil
 	}
