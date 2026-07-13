@@ -2,6 +2,7 @@ import { useEffect, useState, Component } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { BrowserRouter, HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from './stores/authStore';
+import { AuthFailureBridge } from './components/AuthFailureBridge';
 import { isTauri, isDesktopReady, isMobileReady, getPlatform } from './platform';
 import { LoginPage } from './pages/LoginPage';
 import { RegisterPage } from './pages/RegisterPage';
@@ -111,6 +112,7 @@ export default function App() {
   return (
     <ErrorBoundary>
       <Router>
+        <AuthFailureBridge />
         <Routes>
           <Route path="/setup" element={<ServerSetupPage />} />
           <Route path="/login" element={<LoginPage />} />

@@ -6,9 +6,11 @@ import {
   apiGetMe,
   setTokens as persistTokens,
   clearTokens,
+  abortInFlightRequests,
 } from '../api/client';
 import { extractErrorMessage } from '../utils/errors';
 import { storage } from '../utils/storage';
+import { resetAllStores } from './resetAll';
 
 interface AuthState {
   user: User | null;
@@ -80,6 +82,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   logout: () => {
+    // Cancel in-flight requests first, so a response already underway cannot
+    // resolve after the reset and repopulate a store with the old user's data.
+    abortInFlightRequests();
     clearTokens();
     set({
       user: null,
@@ -88,6 +93,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       isAuthenticated: false,
       error: null,
     });
+    // Clear every other per-user store so the next user on this session does not
+    // inherit the previous user's cached data.
+    resetAllStores();
   },
 
   setTokens: (access: string, refresh: string) => {

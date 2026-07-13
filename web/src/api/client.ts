@@ -35,6 +35,27 @@ const apiClient = axios.create({
   },
 });
 
+// A per-session AbortController whose signal is attached to every request.
+// Logout aborts it, cancelling all in-flight requests at once — otherwise a
+// response already underway when the user logs out could resolve afterward and
+// write the previous user's data back into a freshly-reset store.
+let sessionAbort = new AbortController();
+
+// sessionEpoch bumps on every logout. The token-refresh call uses the bare
+// axios.post (not apiClient), so aborting apiClient requests cannot cancel it —
+// the refresh path compares the epoch captured when it started against the
+// current one and refuses to write tokens if a logout happened in between.
+let sessionEpoch = 0;
+
+// abortInFlightRequests cancels every request currently in flight, invalidates
+// any pending token refresh, and starts a fresh session signal for subsequent
+// requests. Called on logout.
+export function abortInFlightRequests(): void {
+  sessionEpoch += 1;
+  sessionAbort.abort();
+  sessionAbort = new AbortController();
+}
+
 function getAccessToken(): string | null {
   return storage.getItem('accessToken');
 }
@@ -69,6 +90,10 @@ apiClient.interceptors.request.use(
     const token = getAccessToken();
     if (token && config.headers) {
       config.headers.Authorization = `Bearer ${token}`;
+    }
+    // Tie the request to the current session so logout can cancel it.
+    if (!config.signal) {
+      config.signal = sessionAbort.signal;
     }
     return config;
   },
@@ -119,9 +144,17 @@ apiClient.interceptors.response.use(
 
       (originalRequest as InternalAxiosRequestConfig & { _retry?: boolean })._retry = true;
       isRefreshing = true;
+      // Capture the session at the moment refresh begins; if a logout bumps the
+      // epoch before the refresh resolves, the result must be discarded.
+      const epochAtRefresh = sessionEpoch;
 
       const refreshToken = getRefreshToken();
       if (!refreshToken) {
+        // Drain any queued requests and clear the refreshing flag, otherwise a
+        // concurrent 401 that queued behind this one waits forever and every
+        // later request skips refresh (isRefreshing stuck true).
+        processQueue(error, null);
+        isRefreshing = false;
         clearTokens();
         onAuthFailure();
         return Promise.reject(error);
@@ -132,6 +165,13 @@ apiClient.interceptors.response.use(
           `${apiBaseURL}/auth/refresh`,
           { refreshToken }
         );
+        // A logout during the in-flight refresh must remain authoritative: do
+        // not write the new tokens back, update the socket, or resume queued
+        // requests — that would resurrect the dead session.
+        if (epochAtRefresh !== sessionEpoch) {
+          processQueue(new Error('session ended'), null);
+          return Promise.reject(error);
+        }
         const { accessToken } = response.data;
         setTokens(accessToken, refreshToken);
         wsClient.updateToken(accessToken);
@@ -143,8 +183,14 @@ apiClient.interceptors.response.use(
         return apiClient(originalRequest);
       } catch (refreshError) {
         processQueue(refreshError, null);
-        clearTokens();
-        onAuthFailure();
+        // Only end the session when the refresh token itself is rejected. A
+        // transient failure (network drop, 5xx) must not force a logout — leave
+        // the tokens in place so the next request can retry.
+        const status = (refreshError as AxiosError)?.response?.status;
+        if (status === 401 || status === 403) {
+          clearTokens();
+          onAuthFailure();
+        }
         return Promise.reject(refreshError);
       } finally {
         isRefreshing = false;
