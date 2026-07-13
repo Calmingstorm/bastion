@@ -32,7 +32,7 @@ import {
   apiRegenerateBotToken,
 } from '../../api/client';
 import { useServerStore } from '../../stores/serverStore';
-import { resolveMediaUrl } from '../../platform';
+import { resolveMediaUrl, getPlatform } from '../../platform';
 import { PERMISSIONS } from '../../utils/permissions';
 import type { Role, ServerBan, AuditLogEntry, MemberWithUser, Channel, Webhook, Bot } from '../../types';
 
@@ -828,7 +828,7 @@ function AuditTab({ serverId }: { serverId: string }) {
     MEMBER_KICK: 'Kicked member', MEMBER_BAN: 'Banned member', MEMBER_UNBAN: 'Unbanned member', MEMBER_TIMEOUT: 'Timed out member',
     SERVER_UPDATE: 'Updated server', CHANNEL_CREATE: 'Created channel', CHANNEL_UPDATE: 'Updated channel', CHANNEL_DELETE: 'Deleted channel',
     MESSAGE_DELETE: 'Deleted message',
-    WEBHOOK_CREATE: 'Created webhook', WEBHOOK_UPDATE: 'Updated webhook', WEBHOOK_DELETE: 'Deleted webhook',
+    WEBHOOK_CREATE: 'Created webhook', WEBHOOK_UPDATE: 'Updated webhook', WEBHOOK_DELETE: 'Deleted webhook', WEBHOOK_TOKEN_REGENERATE: 'Regenerated webhook token',
     BOT_CREATE: 'Created bot', BOT_UPDATE: 'Updated bot', BOT_DELETE: 'Deleted bot', BOT_TOKEN_REGENERATE: 'Regenerated bot token',
   };
 
@@ -879,6 +879,8 @@ function WebhooksTab({ serverId }: { serverId: string }) {
   const [newChannelId, setNewChannelId] = useState('');
   const [isCreating, setIsCreating] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  const [regenConfirm, setRegenConfirm] = useState<string | null>(null);
+  const [regeneratingId, setRegeneratingId] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   // The webhook whose plaintext token was just revealed (create/regenerate). The
   // token is only available here, once — persisted rows only have a hint.
@@ -901,7 +903,11 @@ function WebhooksTab({ serverId }: { serverId: string }) {
     setIsCreating(true);
     try {
       const wh = await apiCreateWebhook(serverId, { name, channelId: newChannelId });
-      setWebhooks((prev) => [wh, ...prev]);
+      // Keep the plaintext token only in `revealed`; the persistent list row must
+      // never hold it, or a dismissed token would linger in memory.
+      const { token: _t, ...listRow } = wh;
+      void _t;
+      setWebhooks((prev) => [listRow, ...prev]);
       setNewName('');
       setRevealed(wh); // show the token URL once
       setCopied(false);
@@ -911,13 +917,20 @@ function WebhooksTab({ serverId }: { serverId: string }) {
   };
 
   const handleRegenerate = async (webhookId: string) => {
+    setRegenConfirm(null);
+    if (regeneratingId) return; // guard against double-clicks racing rotations
+    setRegeneratingId(webhookId);
     try {
       const wh = await apiRegenerateWebhookToken(serverId, webhookId);
+      const { token: _t, ...listRow } = wh;
+      void _t;
       // Replace the row (updates the hint) and reveal the new token once.
-      setWebhooks((prev) => prev.map((w) => (w.id === wh.id ? wh : w)));
+      setWebhooks((prev) => prev.map((w) => (w.id === wh.id ? listRow : w)));
       setRevealed(wh);
       setCopied(false);
-    } catch { /* handled */ }
+    } catch { /* handled */ } finally {
+      setRegeneratingId(null);
+    }
   };
 
   const handleDelete = async (webhookId: string) => {
@@ -929,9 +942,10 @@ function WebhooksTab({ serverId }: { serverId: string }) {
   };
 
   // Only valid for a just-revealed webhook, which still carries its plaintext
-  // token; persisted rows never have one.
+  // token; persisted rows never have one. Use the configured server origin, not
+  // the webview origin (which is wrong on desktop/mobile).
   const revealedUrl = revealed?.token
-    ? `${window.location.origin}/api/v1/webhooks/${revealed.id}/${revealed.token}`
+    ? `${getPlatform().getOrigin()}/api/v1/webhooks/${revealed.id}/${revealed.token}`
     : '';
   const copyRevealedUrl = () => {
     if (!revealedUrl) return;
@@ -1006,10 +1020,21 @@ function WebhooksTab({ serverId }: { serverId: string }) {
                 </p>
               </div>
               <div className="flex gap-1">
-                <button onClick={() => handleRegenerate(wh.id)}
-                  className="rounded px-2 py-1 text-xs text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)] hover:text-[var(--text-primary)]">
-                  Regenerate
-                </button>
+                {regenConfirm === wh.id ? (
+                  <div className="flex gap-1">
+                    <button onClick={() => handleRegenerate(wh.id)} disabled={regeneratingId === wh.id}
+                      className="rounded px-2 py-1 text-xs font-medium text-[var(--danger)] hover:bg-[var(--danger)]/10 disabled:opacity-50">
+                      {regeneratingId === wh.id ? 'Rotating…' : 'Confirm rotate'}
+                    </button>
+                    <button onClick={() => setRegenConfirm(null)}
+                      className="rounded px-2 py-1 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)]">Cancel</button>
+                  </div>
+                ) : (
+                  <button onClick={() => setRegenConfirm(wh.id)} disabled={regeneratingId !== null}
+                    className="rounded px-2 py-1 text-xs text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-input)] hover:text-[var(--text-primary)] disabled:opacity-50">
+                    Regenerate
+                  </button>
+                )}
                 {deleteConfirm === wh.id ? (
                   <div className="flex gap-1">
                     <button onClick={() => handleDelete(wh.id)}

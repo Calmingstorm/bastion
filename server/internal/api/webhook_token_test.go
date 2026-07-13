@@ -123,25 +123,5 @@ func TestWebhookRegenerateToken(t *testing.T) {
 	}
 }
 
-// TestWebhookMigrationDigestMatchesGoVerification: a token hashed by pgcrypto's
-// digest() (as the migration backfill does) verifies through the Go execute path,
-// proving a preexisting plaintext webhook keeps working after migration.
-func TestWebhookMigrationDigestMatchesGoVerification(t *testing.T) {
-	h := testutil.New(t)
-	owner := h.Register("owner")
-	serverID := h.CreateServer(owner, "S")
-	channelID := h.CreateChannel(owner, serverID, "general")
-	id, _, _ := newWebhook(h, owner, serverID, channelID)
-
-	// Rewrite the stored hash using pgcrypto digest() exactly as the migration
-	// backfill does, then execute with the plaintext token.
-	pgToken := "whk_00112233445566778899aabbccddeeff00112233"
-	if _, err := h.Pool.Exec(context.Background(),
-		`UPDATE webhooks SET token_hash = digest($1, 'sha256'), token_hint = RIGHT($1, 8) WHERE id = $2`,
-		pgToken, id); err != nil {
-		t.Fatalf("backfill via digest(): %v", err)
-	}
-	if code := execWebhook(h, id, pgToken); code != http.StatusOK && code != http.StatusCreated {
-		t.Fatalf("pgcrypto-hashed token should verify: got %d", code)
-	}
-}
+// The real migration backfill (010 plaintext -> 011 hash, and the down rotation)
+// is covered by TestMigration011HashesExistingPlaintextWebhook.
