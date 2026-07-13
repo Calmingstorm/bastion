@@ -1,9 +1,15 @@
 package realtime
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/coder/websocket"
 	"github.com/google/uuid"
 )
 
@@ -62,4 +68,52 @@ func TestDropCountConcurrentAccessRaceFree(t *testing.T) {
 		client.dropCount.Store(0)
 	}()
 	wg.Wait()
+}
+
+// TestCloseSlowIdempotentUnderFlood floods a client far past the drop threshold
+// against a real WebSocket whose peer never completes the close handshake. Only
+// one close worker may be launched, and broadcasting must stay prompt.
+func TestCloseSlowIdempotentUnderFlood(t *testing.T) {
+	serverConnCh := make(chan *websocket.Conn, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		serverConnCh <- c
+		<-r.Context().Done() // hold the connection open; never ack a close
+	}))
+	defer srv.Close()
+
+	dialCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	clientConn, resp, err := websocket.Dial(dialCtx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	defer func() { _ = clientConn.CloseNow() }()
+
+	serverConn := <-serverConnCh
+
+	hub := NewHub()
+	userID := uuid.New()
+	// Unbuffered send with no reader => every broadcast is dropped.
+	client := &Client{userID: userID, conn: serverConn, send: make(chan Event)}
+	hub.RegisterUser(client)
+
+	start := time.Now()
+	for i := 0; i < 500; i++ {
+		hub.BroadcastToUser(userID, Event{Type: "X"})
+	}
+	elapsed := time.Since(start)
+
+	if got := client.closeWorkers.Load(); got != 1 {
+		t.Fatalf("expected exactly 1 close worker under flood, got %d", got)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("broadcasting stalled under flood: 500 broadcasts took %v", elapsed)
+	}
 }
