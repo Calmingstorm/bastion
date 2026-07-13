@@ -7,11 +7,6 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-type subscription struct {
-	channelID uuid.UUID
-	client    *Client
-}
-
 type broadcastMessage struct {
 	channelID uuid.UUID
 	event     Event
@@ -24,50 +19,26 @@ type Hub struct {
 	users map[uuid.UUID]map[*Client]struct{}
 	mu    sync.RWMutex
 
-	registerCh   chan subscription
-	unregisterCh chan subscription
-	broadcastCh  chan broadcastMessage
-	stopCh       chan struct{}
+	broadcastCh chan broadcastMessage
+	stopCh      chan struct{}
 }
 
 func NewHub() *Hub {
 	return &Hub{
-		channels:     make(map[uuid.UUID]map[*Client]struct{}),
-		users:        make(map[uuid.UUID]map[*Client]struct{}),
-		registerCh:   make(chan subscription, 256),
-		unregisterCh: make(chan subscription, 256),
-		broadcastCh:  make(chan broadcastMessage, 256),
-		stopCh:       make(chan struct{}),
+		channels:    make(map[uuid.UUID]map[*Client]struct{}),
+		users:       make(map[uuid.UUID]map[*Client]struct{}),
+		broadcastCh: make(chan broadcastMessage, 256),
+		stopCh:      make(chan struct{}),
 	}
 }
 
+// Run drains the broadcast queue. Subscription changes are NOT queued: every
+// subscribe/unsubscribe mutates the maps synchronously under the lock (see the
+// methods below), so there is a single ordering model and a queued command can
+// never be applied after a later synchronous change and resurrect stale access.
 func (h *Hub) Run() {
 	for {
 		select {
-		case sub := <-h.registerCh:
-			h.mu.Lock()
-			clients, ok := h.channels[sub.channelID]
-			if !ok {
-				clients = make(map[*Client]struct{})
-				h.channels[sub.channelID] = clients
-			}
-			clients[sub.client] = struct{}{}
-			h.mu.Unlock()
-			log.Debug().
-				Str("channelID", sub.channelID.String()).
-				Str("userID", sub.client.userID.String()).
-				Msg("client subscribed to channel")
-
-		case sub := <-h.unregisterCh:
-			h.mu.Lock()
-			if clients, ok := h.channels[sub.channelID]; ok {
-				delete(clients, sub.client)
-				if len(clients) == 0 {
-					delete(h.channels, sub.channelID)
-				}
-			}
-			h.mu.Unlock()
-
 		case msg := <-h.broadcastCh:
 			h.mu.RLock()
 			clients := h.channels[msg.channelID]
@@ -98,12 +69,29 @@ func (h *Hub) Stop() {
 	close(h.stopCh)
 }
 
+// Subscribe adds a client to a channel synchronously, in effect the instant it
+// returns.
 func (h *Hub) Subscribe(channelID uuid.UUID, client *Client) {
-	h.registerCh <- subscription{channelID: channelID, client: client}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	set, ok := h.channels[channelID]
+	if !ok {
+		set = make(map[*Client]struct{})
+		h.channels[channelID] = set
+	}
+	set[client] = struct{}{}
 }
 
+// Unsubscribe removes a client from a channel synchronously.
 func (h *Hub) Unsubscribe(channelID uuid.UUID, client *Client) {
-	h.unregisterCh <- subscription{channelID: channelID, client: client}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if set, ok := h.channels[channelID]; ok {
+		delete(set, client)
+		if len(set) == 0 {
+			delete(h.channels, channelID)
+		}
+	}
 }
 
 func (h *Hub) BroadcastToChannel(channelID uuid.UUID, event Event) {
@@ -139,6 +127,30 @@ func (h *Hub) RegisterUser(client *Client) {
 	clients[client] = struct{}{}
 }
 
+// RegisterAndSubscribe registers a newly connected client and subscribes it to
+// the given channels in a single locked section. Doing both atomically means a
+// concurrent revocation can only observe the client as fully connected or not at
+// all — it can never slip between "registered" and "subscribed" and miss the
+// client, which would otherwise let a stale subscription survive.
+func (h *Hub) RegisterAndSubscribe(client *Client, channelIDs []uuid.UUID) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	users, ok := h.users[client.userID]
+	if !ok {
+		users = make(map[*Client]struct{})
+		h.users[client.userID] = users
+	}
+	users[client] = struct{}{}
+	for _, channelID := range channelIDs {
+		set, ok := h.channels[channelID]
+		if !ok {
+			set = make(map[*Client]struct{})
+			h.channels[channelID] = set
+		}
+		set[client] = struct{}{}
+	}
+}
+
 // GetClientChannels returns all channel IDs a client is currently subscribed to.
 func (h *Hub) GetClientChannels(client *Client) []uuid.UUID {
 	h.mu.RLock()
@@ -152,52 +164,10 @@ func (h *Hub) GetClientChannels(client *Client) []uuid.UUID {
 	return ids
 }
 
-// SubscribeUser subscribes all connected clients of a user to a channel.
+// SubscribeUser subscribes all of a user's connected clients to a channel
+// synchronously (under the hub lock), so the subscription is in effect the
+// instant the call returns.
 func (h *Hub) SubscribeUser(userID, channelID uuid.UUID) {
-	h.mu.RLock()
-	clients, ok := h.users[userID]
-	if !ok {
-		h.mu.RUnlock()
-		return
-	}
-	// Collect clients under read lock
-	clientList := make([]*Client, 0, len(clients))
-	for c := range clients {
-		clientList = append(clientList, c)
-	}
-	h.mu.RUnlock()
-
-	// Subscribe each client (goes through the channel-based register flow)
-	for _, c := range clientList {
-		h.Subscribe(channelID, c)
-	}
-}
-
-// UnsubscribeUser unsubscribes all connected clients of a user from a channel.
-func (h *Hub) UnsubscribeUser(userID, channelID uuid.UUID) {
-	h.mu.RLock()
-	clients, ok := h.users[userID]
-	if !ok {
-		h.mu.RUnlock()
-		return
-	}
-	clientList := make([]*Client, 0, len(clients))
-	for c := range clients {
-		clientList = append(clientList, c)
-	}
-	h.mu.RUnlock()
-
-	for _, c := range clientList {
-		h.Unsubscribe(channelID, c)
-	}
-}
-
-// SubscribeUserSync subscribes all of a user's clients to a channel synchronously
-// (directly under the hub lock, not via the async register queue), so the
-// subscription is in effect the instant the call returns. Used by reconciliation
-// on the mutation path where an ordering window would otherwise let an event slip
-// through before the change applied.
-func (h *Hub) SubscribeUserSync(userID, channelID uuid.UUID) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	clients, ok := h.users[userID]
@@ -214,10 +184,10 @@ func (h *Hub) SubscribeUserSync(userID, channelID uuid.UUID) {
 	}
 }
 
-// UnsubscribeUserSync unsubscribes all of a user's clients from a channel
-// synchronously (directly under the hub lock), so no broadcast issued after this
-// call returns can still reach the user on that channel.
-func (h *Hub) UnsubscribeUserSync(userID, channelID uuid.UUID) {
+// UnsubscribeUser unsubscribes all of a user's connected clients from a channel
+// synchronously, so no broadcast issued after this returns can still reach the
+// user on that channel.
+func (h *Hub) UnsubscribeUser(userID, channelID uuid.UUID) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	clients, ok := h.users[userID]

@@ -94,12 +94,10 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, userID uuid.UUID,
 		return
 	}
 
-	for _, chID := range channelIDs {
-		hub.Subscribe(chID, client)
-	}
-
-	// Register this client for user-targeted events
-	hub.RegisterUser(client)
+	// Register the user and subscribe to their viewable channels in one locked
+	// section, so a concurrent revocation cannot observe the client as registered
+	// but not yet subscribed (or vice versa) and leave a stale subscription.
+	hub.RegisterAndSubscribe(client, channelIDs)
 
 	log.Info().
 		Str("userID", userID.String()).

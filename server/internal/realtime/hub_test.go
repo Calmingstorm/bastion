@@ -19,6 +19,88 @@ func newDroppingClient(userID uuid.UUID) *Client {
 	return &Client{userID: userID, send: make(chan Event)}
 }
 
+// channelHas reports whether a client is currently subscribed to a channel.
+func channelHas(h *Hub, channelID uuid.UUID, client *Client) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	set, ok := h.channels[channelID]
+	if !ok {
+		return false
+	}
+	_, ok = set[client]
+	return ok
+}
+
+// TestSubscriptionMutationsAreSynchronous pins the ordering fix: subscribe and
+// unsubscribe take effect immediately under the hub lock, with no async queue, so
+// a revocation cannot be undone by a subscribe that drains from the hub loop
+// afterward. Previously a Subscribe queued before a revocation could be applied
+// by Hub.Run after a synchronous revocation returned, resurrecting access.
+func TestSubscriptionMutationsAreSynchronous(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	userID := uuid.New()
+	channelID := uuid.New()
+	client := newDroppingClient(userID)
+
+	// Connect: register + subscribe atomically, visible immediately.
+	hub.RegisterAndSubscribe(client, []uuid.UUID{channelID})
+	if !channelHas(hub, channelID, client) {
+		t.Fatal("client should be subscribed immediately after RegisterAndSubscribe")
+	}
+
+	// Revoke: unsubscribe synchronously, visible immediately.
+	hub.UnsubscribeUser(userID, channelID)
+	if channelHas(hub, channelID, client) {
+		t.Fatal("client should be unsubscribed immediately after UnsubscribeUser")
+	}
+
+	// Let the hub loop spin: there is no queued command, so nothing can
+	// resurrect the revoked subscription.
+	time.Sleep(50 * time.Millisecond)
+	if channelHas(hub, channelID, client) {
+		t.Fatal("revoked subscription was resurrected by the hub loop")
+	}
+}
+
+// TestConcurrentSubscribeRevokeNoResurrection hammers connect and revoke on the
+// same channel concurrently. Whichever wins the lock last decides the state, but
+// a revocation observed after a completed connect must leave the client off — no
+// partially-applied connect can survive it. Runs clean under -race.
+func TestConcurrentSubscribeRevokeNoResurrection(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	userID := uuid.New()
+	channelID := uuid.New()
+
+	for i := 0; i < 200; i++ {
+		client := newDroppingClient(userID)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			hub.RegisterAndSubscribe(client, []uuid.UUID{channelID})
+		}()
+		go func() {
+			defer wg.Done()
+			hub.UnsubscribeUser(userID, channelID)
+		}()
+		wg.Wait()
+
+		// A final revocation must always win: after both settle, revoke once more
+		// and the client must be gone and stay gone.
+		hub.UnsubscribeUser(userID, channelID)
+		if channelHas(hub, channelID, client) {
+			t.Fatalf("iteration %d: client survived a final revocation", i)
+		}
+		hub.UnsubscribeAll(client)
+	}
+}
+
 // TestBroadcastToUserDropAccounting checks that drops are counted and that the
 // write pump's reset is observed. BroadcastToUser is synchronous, so this is
 // deterministic and needs neither the hub goroutine nor a live connection.
