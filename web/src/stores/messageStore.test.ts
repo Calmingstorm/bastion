@@ -6,7 +6,7 @@ vi.mock('../api/client', () => ({
   apiSendMessage: vi.fn(),
   apiEditMessage: vi.fn(),
   apiDeleteMessage: vi.fn(),
-  linkAbortToSession: vi.fn(() => () => {}),
+  linkAbortToSession: vi.fn(() => vi.fn()), // returns a fresh unlink spy per call
 }));
 
 import { useMessageStore } from './messageStore';
@@ -699,11 +699,60 @@ describe('messageStore.fetchMessages', () => {
     expect(useMessageStore.getState().error.c1).toBeFalsy(); // the successful base commit cleared it
   });
 
+  it('unlinks the session listener when a fetch settles', async () => {
+    vi.mocked(client.apiGetMessages).mockResolvedValue([msg('m1', tISO(1))]);
+    await useMessageStore.getState().fetchMessages('c1');
+    // fetchMessages must unlink the session listener in its finally so nothing
+    // lingers on the session signal after the request completes.
+    const results = vi.mocked(client.linkAbortToSession).mock.results;
+    const unlink = results[results.length - 1]?.value as ReturnType<typeof vi.fn>;
+    expect(unlink).toHaveBeenCalledTimes(1);
+  });
+
   it('a pagination failure does not set the latest-window error', async () => {
     useMessageStore.setState({ messages: { c1: block('m', LIMIT, 100) }, hasMore: { c1: true }, error: {} });
     vi.mocked(client.apiGetMessages).mockRejectedValueOnce(new Error('network'));
     await useMessageStore.getState().fetchMessages('c1', 'm0'); // pagination fails
     // Pagination loads older history; its failure is not a latest-window error.
+    expect(useMessageStore.getState().error.c1 ?? null).toBeFalsy();
+  });
+
+  it('an abandoned initial load does not surface a retry that would discard a healthy resync', async () => {
+    vi.useFakeTimers();
+    try {
+      useMessageStore.setState({
+        messages: { c1: [] },
+        isLoading: {},
+        error: {},
+        errorSeq: {},
+        committedSeq: {},
+        maxStartedBaseSeq: {},
+      });
+      const a = deferred<Message[]>();
+      const b = deferred<Message[]>();
+      vi.mocked(client.apiGetMessages)
+        .mockImplementationOnce(() => a.promise) // initial A (hangs)
+        .mockImplementationOnce(() => b.promise); // resync B (newer, healthy)
+      void useMessageStore.getState().fetchMessages('c1'); // A, protection timer @120000
+      vi.advanceTimersByTime(1000);
+      const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true); // B, timer @121000
+      vi.advanceTimersByTime(119_001); // A abandons at t=120001; B still in flight
+      // A must NOT surface a Retry -- clicking it would start a newer base fetch and
+      // discard B's healthy response.
+      expect(useMessageStore.getState().error.c1 ?? null).toBeFalsy();
+      b.resolve([msg('m1', tISO(1))]); // B resolves with fresh data
+      await bDone;
+      expect(ids()).toEqual(['m1']); // B was not discarded
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a send failure does not set the latest-window error', async () => {
+    useMessageStore.setState({ messages: { c1: [msg('m1', tISO(1))] }, error: {} });
+    vi.mocked(client.apiSendMessage).mockRejectedValue(new Error('boom'));
+    await expect(useMessageStore.getState().sendMessage('c1', 'hi')).rejects.toThrow();
+    // A send failure surfaces via the throw, not the base-load error field.
     expect(useMessageStore.getState().error.c1 ?? null).toBeFalsy();
   });
 });

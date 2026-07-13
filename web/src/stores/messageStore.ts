@@ -339,18 +339,19 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         if (sessionEpoch !== startSession) return {};
         const next = { ...s.activeFetches };
         delete next[mySeq];
-        // An abandoned initial load surfaces the base error (unless superseded by
-        // newer base activity) so the channel shows a retry affordance instead of
-        // staying falsely empty -- a later reconnect resync clears it on success.
-        // We do NOT retry: a spurious newer base fetch would discard a healthy
-        // in-flight resync, and could loop after the user leaves the channel. A
-        // pagination just releases loading (retried on scroll); a resync's existing
-        // messages remain.
+        // Surface the base-load error (a Retry affordance) instead of staying
+        // falsely empty -- but ONLY when no newer base fetch is still in flight and
+        // the channel has nothing to fall back to. That way the Retry a user can
+        // click never coexists with a healthy in-flight resync (whose fresh
+        // response clicking Retry would discard), and it never loops. We never
+        // auto-retry. A pagination just releases loading; a resync that still has
+        // messages keeps them.
         const surfaceError =
           isBase &&
-          !merge &&
+          mySeq >= (s.maxStartedBaseSeq[channelId] ?? mySeq) && // still the newest-started base -> none in flight
           mySeq >= (s.committedSeq[channelId] ?? 0) &&
-          mySeq >= (s.errorSeq[channelId] ?? 0);
+          mySeq >= (s.errorSeq[channelId] ?? 0) &&
+          (s.messages[channelId]?.length ?? 0) === 0; // nothing loaded to fall back to
         return {
           activeFetches: next,
           ...(merge ? {} : { isLoading: { ...s.isLoading, [channelId]: false } }),
@@ -510,7 +511,8 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       get().updateMessage(channelId, updated);
     } catch (err: unknown) {
       const errMsg = extractErrorMessage(err, 'Failed to edit message.');
-      set((s) => ({ error: { ...s.error, [channelId]: errMsg } }));
+      // error[channelId] is the latest-window LOAD status (base-owned); a mutation
+      // failure surfaces via the thrown error the caller handles, not that field.
       throw new Error(errMsg);
     }
   },
@@ -521,7 +523,8 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       get().deleteMessage(channelId, messageId);
     } catch (err: unknown) {
       const errMsg = extractErrorMessage(err, 'Failed to delete message.');
-      set((s) => ({ error: { ...s.error, [channelId]: errMsg } }));
+      // error[channelId] is the latest-window LOAD status (base-owned); a mutation
+      // failure surfaces via the thrown error the caller handles, not that field.
       throw new Error(errMsg);
     }
   },
@@ -534,7 +537,8 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       eventBus.emit('bastion:message-sent');
     } catch (err: unknown) {
       const errMsg = extractErrorMessage(err, 'Failed to send message.');
-      set((s) => ({ error: { ...s.error, [channelId]: errMsg } }));
+      // error[channelId] is the latest-window LOAD status (base-owned); a mutation
+      // failure surfaces via the thrown error the caller handles, not that field.
       throw new Error(errMsg);
     }
   },

@@ -6,6 +6,7 @@ import { useUnreadStore } from '../../stores/unreadStore';
 import { useAutoScroll } from '../../hooks/useAutoScroll';
 import { MessageItem, DateSeparator } from './MessageItem';
 import { TypingIndicator } from './TypingIndicator';
+import { MessageLoadError } from './MessageLoadError';
 import { SearchDialog } from '../search/SearchDialog';
 import { PinnedMessages } from './PinnedMessages';
 import { eventBus } from '../../utils/eventBus';
@@ -432,15 +433,7 @@ export function MessageList({ onToggleMembers, onToggleSidebar }: MessageListPro
         {/* Error state: a latest-window load failed (e.g. abandoned after timing
             out). Show a retry rather than a misleading "no messages" empty state. */}
         {channelMessages.length === 0 && !channelIsLoading && channelError && activeChannelId && (
-          <div className="flex flex-col items-center justify-center gap-3 py-12">
-            <p className="text-sm text-[var(--text-muted)]">{channelError}</p>
-            <button
-              onClick={() => void fetchMessages(activeChannelId)}
-              className="rounded-[3px] bg-[var(--accent)] px-4 py-1.5 text-sm font-medium text-white transition-colors hover:opacity-90"
-            >
-              Retry
-            </button>
-          </div>
+          <MessageLoadError error={channelError} onRetry={() => void fetchMessages(activeChannelId)} />
         )}
 
         {/* Empty state */}
