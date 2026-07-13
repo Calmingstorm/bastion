@@ -82,6 +82,11 @@ Edit `.env` and set at minimum:
 - `DB_PASSWORD` — a strong random password
 - `JWT_SECRET` — a long random string (e.g. `openssl rand -base64 48`)
 - `BASTION_DOMAIN` — your domain or `http://localhost` for local use
+- `BASTION_TRUSTED_PROXIES` — the reverse-proxy source network(s) whose
+  `X-Forwarded-For` may be trusted for rate limiting. The provided
+  `docker-compose.yml` pins the `bastion` subnet, so the default
+  `172.28.0.0/16` is correct for that stack. Leave it empty if you expose the
+  server directly without a proxy.
 
 Then update `Caddyfile` (copy from `Caddyfile.example`) and replace `YOUR_DOMAIN` with your domain.
 

@@ -29,7 +29,10 @@ func main() {
 		Logger()
 
 	// Load configuration
-	cfg := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatal().Err(err).Msg("invalid configuration")
+	}
 	log.Info().
 		Str("host", cfg.Host).
 		Str("port", cfg.Port).

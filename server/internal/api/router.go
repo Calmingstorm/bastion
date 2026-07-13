@@ -10,7 +10,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
-	"github.com/go-chi/httprate"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
@@ -37,7 +36,9 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 		MaxAge:           300,
 	}))
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	// Resolve the client IP from the trusted-proxy chain into the request context
+	// (does NOT rewrite RemoteAddr). Must run before rate limiting and logging.
+	r.Use(clientIPMiddleware(cfg.Security.TrustedProxies))
 	r.Use(zerologMiddleware)
 	r.Use(middleware.Recoverer)
 
@@ -97,7 +98,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 
 		// Public auth routes with rate limiting
 		r.Group(func(r chi.Router) {
-			r.Use(httprate.LimitByIP(5, time.Minute))
+			r.Use(LimitByClientIP(5, time.Minute))
 			r.Route("/auth", func(r chi.Router) {
 				r.Post("/register", authHandler.Register)
 				r.Post("/login", authHandler.Login)
@@ -112,13 +113,13 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config, hub *realtime.Hub, rdb *red
 
 		// Public webhook execution (rate-limited per webhook)
 		r.Group(func(r chi.Router) {
-			r.Use(httprate.LimitByIP(30, time.Minute))
+			r.Use(LimitByClientIP(30, time.Minute))
 			r.Post("/webhooks/{webhookID}/{token}", webhookHandler.Execute)
 		})
 
 		// Interaction callback (authenticated by token in URL, not JWT)
 		r.Group(func(r chi.Router) {
-			r.Use(httprate.LimitByIP(30, time.Minute))
+			r.Use(LimitByClientIP(30, time.Minute))
 			r.Post("/interactions/{token}/callback", interactionHandler.Callback)
 		})
 
@@ -308,7 +309,8 @@ func zerologMiddleware(next http.Handler) http.Handler {
 				Int("status", status).
 				Int("bytes", ww.BytesWritten()).
 				Dur("duration", time.Since(start)).
-				Str("ip", r.RemoteAddr).
+				Str("client_ip", ClientIP(r).String()).
+				Str("peer_ip", peerAddr(r).String()).
 				Msg("request")
 		}()
 

@@ -65,7 +65,9 @@ type Harness struct {
 
 // New builds a fresh harness or skips the test if the required services are
 // absent. The harness is torn down automatically via t.Cleanup.
-func New(t *testing.T) *Harness {
+// New starts a harness. Optional configure hooks mutate the config before the
+// router is built (e.g. to set Security.TrustedProxies).
+func New(t *testing.T, configure ...func(*config.Config)) *Harness {
 	t.Helper()
 
 	baseURL := os.Getenv("TEST_DATABASE_URL")
@@ -117,6 +119,9 @@ func New(t *testing.T) *Harness {
 			BaseURL:     "/api/uploads",
 		},
 		Domain: "http://127.0.0.1",
+	}
+	for _, fn := range configure {
+		fn(cfg)
 	}
 
 	pool, err := database.New(cfg)
