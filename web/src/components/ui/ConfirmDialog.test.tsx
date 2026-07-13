@@ -34,6 +34,31 @@ function Harness({
   );
 }
 
+// A harness whose confirm action REMOVES the opener (as a real deletion does) and
+// that renders the app focus landmark, so we can prove the deletion fallback.
+function FallbackHarness() {
+  const [open, setOpen] = useState(false);
+  const [deleted, setDeleted] = useState(false);
+  return (
+    <>
+      <div data-focus-fallback tabIndex={-1}>
+        app
+      </div>
+      {!deleted && <button onClick={() => setOpen(true)}>trigger</button>}
+      <ConfirmDialog
+        open={open}
+        onOpenChange={setOpen}
+        onConfirm={() => {
+          setDeleted(true); // the confirmed deletion removes the launching control
+          setOpen(false);
+        }}
+        title="Delete Channel"
+        description="Are you sure you want to delete this? This cannot be undone."
+      />
+    </>
+  );
+}
+
 describe('ConfirmDialog', () => {
   it('exposes accessible dialog semantics and content when open', () => {
     render(<Harness />);
@@ -87,5 +112,52 @@ describe('ConfirmDialog', () => {
     render(<Harness isPending pendingLabel="Deleting..." />);
     const confirm = screen.getByRole('button', { name: 'Deleting...' });
     expect(confirm).toBeDisabled();
+  });
+
+  // Focus restoration: a controlled Radix dialog with no Trigger would drop focus to
+  // <body> on close; these prove focus returns to the element that opened it.
+  it('restores focus to the opener after Escape', async () => {
+    const user = userEvent.setup();
+    render(<Harness startOpen={false} />);
+    const trigger = screen.getByRole('button', { name: 'trigger' });
+    await user.click(trigger);
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('restores focus to the opener after Cancel', async () => {
+    const user = userEvent.setup();
+    render(<Harness startOpen={false} />);
+    const trigger = screen.getByRole('button', { name: 'trigger' });
+    await user.click(trigger);
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('restores focus to the opener after a backdrop dismiss', async () => {
+    const user = userEvent.setup();
+    render(<Harness startOpen={false} />);
+    const trigger = screen.getByRole('button', { name: 'trigger' });
+    await user.click(trigger);
+    // The overlay is the only .z-40 element (the content is .z-50); clicking it is an
+    // interaction outside the content, which Radix treats as a dismiss.
+    const overlay = document.querySelector('.z-40');
+    expect(overlay).not.toBeNull();
+    await user.click(overlay as Element);
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('focuses the app fallback landmark when a confirmed deletion removes the opener', async () => {
+    const user = userEvent.setup();
+    render(<FallbackHarness />);
+    await user.click(screen.getByRole('button', { name: 'trigger' }));
+    await user.click(screen.getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    // The opener is gone; focus must land on the app landmark, never <body>.
+    expect(document.activeElement).toBe(document.querySelector('[data-focus-fallback]'));
   });
 });
