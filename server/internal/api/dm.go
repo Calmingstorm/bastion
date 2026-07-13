@@ -101,7 +101,7 @@ func (h *DMHandler) CreateOrGet(w http.ResponseWriter, r *http.Request) {
 	// so a repeated or self recipient does not trip the dm_members primary key
 	// and 500 the request.
 	seen := map[uuid.UUID]bool{userID: true}
-	added := 0
+	recipients := make([]uuid.UUID, 0, len(req.RecipientIDs))
 	for _, rid := range req.RecipientIDs {
 		recipientID, err := parseUUID(rid)
 		if err != nil {
@@ -121,9 +121,9 @@ func (h *DMHandler) CreateOrGet(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
-		added++
+		recipients = append(recipients, recipientID)
 	}
-	if added == 0 {
+	if len(recipients) == 0 {
 		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "a DM needs at least one other member"))
 		return
 	}
@@ -140,20 +140,17 @@ func (h *DMHandler) CreateOrGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Subscribe all participants to the new DM channel via WebSocket
-	chUUID, err := uuid.Parse(channelID)
-	if err == nil {
+	// Subscribe all participants and notify each recipient. Iterate the canonical
+	// de-duplicated recipient list so a repeated or self recipient does not get a
+	// duplicate DM_CREATE (and the creator never fans out to itself).
+	if chUUID, perr := uuid.Parse(channelID); perr == nil {
 		h.hub.SubscribeUser(userID, chUUID)
-		for _, rid := range req.RecipientIDs {
-			recipientUUID, err := uuid.Parse(rid)
-			if err == nil {
-				h.hub.SubscribeUser(recipientUUID, chUUID)
-				// Notify recipient so they can add the DM to their list
-				h.hub.BroadcastToUser(recipientUUID, realtime.Event{
-					Type: realtime.EventDMCreate,
-					Data: h.getDMChannel(r, channelID, recipientUUID),
-				})
-			}
+		for _, recipientID := range recipients {
+			h.hub.SubscribeUser(recipientID, chUUID)
+			h.hub.BroadcastToUser(recipientID, realtime.Event{
+				Type: realtime.EventDMCreate,
+				Data: h.getDMChannel(r, channelID, recipientID),
+			})
 		}
 	}
 

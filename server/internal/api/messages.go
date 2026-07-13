@@ -23,6 +23,11 @@ import (
 	"github.com/Calmingstorm/bastion/server/internal/realtime"
 )
 
+// BeforeEditUpdateForTest, when non-nil, runs between a message-edit's author
+// check and its UPDATE ... RETURNING. Tests use it to delete the row in that
+// window (the row-vanished-mid-edit race); it is nil in production.
+var BeforeEditUpdateForTest func()
+
 var mentionRegex = regexp.MustCompile(`@([a-zA-Z0-9_-]+)`)
 
 type MessageHandler struct {
@@ -611,6 +616,10 @@ func (h *MessageHandler) Edit(w http.ResponseWriter, r *http.Request) {
 	var editEmbedsJSON []byte
 	if len(req.Embeds) > 0 {
 		editEmbedsJSON, _ = json.Marshal(req.Embeds)
+	}
+
+	if BeforeEditUpdateForTest != nil {
+		BeforeEditUpdateForTest()
 	}
 
 	var msg models.Message

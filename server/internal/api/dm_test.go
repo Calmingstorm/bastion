@@ -194,6 +194,33 @@ func TestDMGroupDedupesRecipients(t *testing.T) {
 	}
 }
 
+// TestDMGroupFanOutDeduped: the DM_CREATE fan-out uses the canonical recipient
+// list, so a repeated recipient gets exactly one event and the creator (listed
+// as a recipient) gets none.
+func TestDMGroupFanOutDeduped(t *testing.T) {
+	h := testutil.New(t)
+	a := h.Register("alice")
+	b := h.Register("bob")
+	c := h.Register("carol")
+
+	aWS := h.DialWS(a)
+	bWS := h.DialWS(b)
+
+	var ch struct {
+		ID string `json:"id"`
+	}
+	if code := h.Request(http.MethodPost, "/api/v1/dm", a.AccessToken,
+		map[string]any{"recipientIds": []string{b.ID, b.ID, a.ID, c.ID}}, &ch); code != http.StatusCreated {
+		t.Fatalf("group create: expected 201, got %d", code)
+	}
+	if n := bWS.CountEvents("DM_CREATE", 700*time.Millisecond); n != 1 {
+		t.Fatalf("bob (listed twice) should get exactly one DM_CREATE, got %d", n)
+	}
+	if n := aWS.CountEvents("DM_CREATE", 400*time.Millisecond); n != 0 {
+		t.Fatalf("the creator (listed as a recipient) must get no DM_CREATE, got %d", n)
+	}
+}
+
 // TestDMSelfRejected: a DM to yourself is rejected rather than 500-ing on the key
 // constraint.
 func TestDMSelfRejected(t *testing.T) {
