@@ -358,6 +358,34 @@ func TestBotAuthConcurrentHealingIsSafe(t *testing.T) {
 	}
 }
 
+// TestBotAuthHealRaceRechecksFastPath: if a concurrent request heals this bot
+// between the fast-path miss and the legacy candidate query, the legacy query
+// sees no candidate (token_lookup is no longer NULL). A valid token must still
+// authenticate via the fast-path re-check rather than being spuriously 401'd.
+func TestBotAuthHealRaceRechecksFastPath(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	serverID := h.CreateServer(owner, "S")
+	botID, _, token := createBotFull(t, h, owner, serverID)
+	makeLegacy(t, h, botID)
+
+	// Simulate the concurrent heal landing exactly in the race window.
+	var once sync.Once
+	auth.AfterFastPathMissForTest = func() {
+		once.Do(func() {
+			if _, err := h.Pool.Exec(context.Background(),
+				`UPDATE bots SET token_lookup = $1 WHERE id = $2`, auth.BotTokenDigest(token), botID); err != nil {
+				t.Errorf("simulate heal: %v", err)
+			}
+		})
+	}
+	t.Cleanup(func() { auth.AfterFastPathMissForTest = nil })
+
+	if code := authAsBot(h, token); code != http.StatusOK {
+		t.Fatalf("valid token healed mid-auth must still authenticate, got %d", code)
+	}
+}
+
 // TestBotAuthDatabaseErrorReturns500: a query error must surface as 500, never be
 // silently converted into an invalid-token 401.
 func TestBotAuthDatabaseErrorReturns500(t *testing.T) {
