@@ -3,6 +3,7 @@ import type { Message } from '../types';
 import { apiGetMessages, apiSendMessage, apiEditMessage, apiDeleteMessage, linkAbortToSession } from '../api/client';
 import { extractErrorMessage } from '../utils/errors';
 import { eventBus } from '../utils/eventBus';
+import { useToastStore } from './toastStore';
 
 interface MessageState {
   messages: Record<string, Message[]>;
@@ -313,11 +314,13 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       ...(isBase
         ? { maxStartedBaseSeq: { ...s.maxStartedBaseSeq, [channelId]: Math.max(s.maxStartedBaseSeq[channelId] ?? 0, mySeq) } }
         : {}),
-      // Both non-merge loads own isLoading, but only an initial load establishes
-      // the latest window, so only it may optimistically clear that window's error.
-      // A pagination (older history) must leave an existing latest-window error be.
+      // A non-merge load owns isLoading. Any BASE fetch (initial load OR resync)
+      // refreshes the latest window, so it optimistically clears that window's error
+      // at start -- this hides a stale Retry the moment a reconnect resync begins,
+      // so the user can't click it and discard the resync. A pagination (older
+      // history) must leave an existing latest-window error be.
       ...(merge ? {} : { isLoading: { ...s.isLoading, [channelId]: true } }),
-      ...(isBase && !merge
+      ...(isBase
         ? { error: { ...s.error, [channelId]: null }, errorSeq: { ...s.errorSeq, [channelId]: 0 } }
         : {}),
     }));
@@ -511,8 +514,10 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       get().updateMessage(channelId, updated);
     } catch (err: unknown) {
       const errMsg = extractErrorMessage(err, 'Failed to edit message.');
-      // error[channelId] is the latest-window LOAD status (base-owned); a mutation
-      // failure surfaces via the thrown error the caller handles, not that field.
+      // error[channelId] is the latest-window LOAD status (base-owned). A mutation
+      // failure surfaces to the user as a toast (and via the thrown error for the
+      // caller's control flow) -- never silently, and never as a load error.
+      useToastStore.getState().addToast(errMsg);
       throw new Error(errMsg);
     }
   },
@@ -523,8 +528,10 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       get().deleteMessage(channelId, messageId);
     } catch (err: unknown) {
       const errMsg = extractErrorMessage(err, 'Failed to delete message.');
-      // error[channelId] is the latest-window LOAD status (base-owned); a mutation
-      // failure surfaces via the thrown error the caller handles, not that field.
+      // error[channelId] is the latest-window LOAD status (base-owned). A mutation
+      // failure surfaces to the user as a toast (and via the thrown error for the
+      // caller's control flow) -- never silently, and never as a load error.
+      useToastStore.getState().addToast(errMsg);
       throw new Error(errMsg);
     }
   },
@@ -537,8 +544,10 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       eventBus.emit('bastion:message-sent');
     } catch (err: unknown) {
       const errMsg = extractErrorMessage(err, 'Failed to send message.');
-      // error[channelId] is the latest-window LOAD status (base-owned); a mutation
-      // failure surfaces via the thrown error the caller handles, not that field.
+      // error[channelId] is the latest-window LOAD status (base-owned). A mutation
+      // failure surfaces to the user as a toast (and via the thrown error for the
+      // caller's control flow) -- never silently, and never as a load error.
+      useToastStore.getState().addToast(errMsg);
       throw new Error(errMsg);
     }
   },

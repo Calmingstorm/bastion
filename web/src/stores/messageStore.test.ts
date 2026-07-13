@@ -9,8 +9,14 @@ vi.mock('../api/client', () => ({
   linkAbortToSession: vi.fn(() => vi.fn()), // returns a fresh unlink spy per call
 }));
 
+vi.mock('./toastStore', () => {
+  const addToast = vi.fn();
+  return { useToastStore: { getState: () => ({ addToast, toasts: [], removeToast: vi.fn() }) } };
+});
+
 import { useMessageStore } from './messageStore';
 import * as client from '../api/client';
+import { useToastStore } from './toastStore';
 
 function tISO(sec: number): string {
   return `2026-01-01T00:00:${String(sec).padStart(2, '0')}.000Z`;
@@ -748,11 +754,39 @@ describe('messageStore.fetchMessages', () => {
     }
   });
 
-  it('a send failure does not set the latest-window error', async () => {
+  it('a send failure does not set the latest-window error but does show a toast', async () => {
     useMessageStore.setState({ messages: { c1: [msg('m1', tISO(1))] }, error: {} });
     vi.mocked(client.apiSendMessage).mockRejectedValue(new Error('boom'));
     await expect(useMessageStore.getState().sendMessage('c1', 'hi')).rejects.toThrow();
-    // A send failure surfaces via the throw, not the base-load error field.
+    // A send failure surfaces via a toast + the throw, NOT the base-load error field.
     expect(useMessageStore.getState().error.c1 ?? null).toBeFalsy();
+    expect(useToastStore.getState().addToast).toHaveBeenCalledWith('Failed to send message.');
+  });
+
+  it('a resync clears an existing latest-window error when it starts (inverse retry race)', async () => {
+    vi.useFakeTimers();
+    try {
+      // An abandoned initial load has surfaced the base error (Retry showing).
+      useMessageStore.setState({
+        messages: { c1: [] },
+        isLoading: {},
+        error: { c1: 'Failed to load messages.' },
+        errorSeq: { c1: 5 },
+        committedSeq: {},
+        maxStartedBaseSeq: { c1: 5 },
+      });
+      const b = deferred<Message[]>();
+      vi.mocked(client.apiGetMessages).mockImplementation(() => b.promise);
+      const bDone = useMessageStore.getState().fetchMessages('c1', undefined, true); // reconnect resync starts
+      // Starting the resync hides the stale Retry immediately, so it can't be clicked
+      // to spawn a superseding fetch.
+      expect(useMessageStore.getState().error.c1 ?? null).toBeFalsy();
+      vi.useRealTimers();
+      b.resolve([msg('m1', tISO(1))]);
+      await bDone;
+      expect(ids()).toEqual(['m1']);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

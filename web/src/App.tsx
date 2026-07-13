@@ -11,6 +11,7 @@ import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { ServerSetupPage } from './pages/ServerSetupPage';
 import { AppPage } from './pages/AppPage';
 import { InvitePage } from './pages/InvitePage';
+import { ToastContainer } from './components/ToastContainer';
 
 // Import theme store so it initializes and applies the saved theme on load
 import './stores/themeStore';
@@ -123,6 +124,7 @@ export default function App() {
           <Route path="/app" element={<AppPage />} />
           <Route path="*" element={<Navigate to="/app" replace />} />
         </Routes>
+        <ToastContainer />
       </Router>
     </ErrorBoundary>
   );
