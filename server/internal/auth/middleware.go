@@ -225,17 +225,27 @@ func handleBotAuth(w http.ResponseWriter, r *http.Request, next http.Handler, to
 	for _, c := range candidates {
 		match, err := CompareBotToken(token, c.hash)
 		if err == nil && match {
-			// Lazy-heal: record the digest so this bot uses the fast path next
-			// time. The token_lookup IS NULL guard makes a concurrent first
-			// authentication a harmless zero-row no-op (nil error) rather than a
-			// unique-index violation. A genuine write error, however, is a real
-			// database fault: surface it as 500 rather than authenticating past a
-			// failing write and leaving the bot permanently on the Argon2 path.
-			if _, err := db.Exec(r.Context(),
-				`UPDATE bots SET token_lookup = $1 WHERE id = $2 AND token_lookup IS NULL`,
-				digest, c.id); err != nil {
+			// Lazy-heal: install the digest so this bot uses the fast path next
+			// time. The WHERE admits only two valid states -- not yet healed, or
+			// already healed to THIS digest by a concurrent identical auth -- and
+			// we require exactly one affected row.
+			//
+			// A genuine write error is a real database fault -> 500. Zero rows,
+			// however, means the row moved out from under us between the Argon2
+			// match and here: regeneration installed a different digest, or the
+			// bot was deleted. The presented credential is no longer valid, so it
+			// must be rejected rather than admitted on a now-stale Argon2 match.
+			tag, err := db.Exec(r.Context(),
+				`UPDATE bots SET token_lookup = $1
+				 WHERE id = $2 AND (token_lookup IS NULL OR token_lookup = $1)`,
+				digest, c.id)
+			if err != nil {
 				log.Error().Err(err).Msg("bot token lazy-heal failed")
 				http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+				return
+			}
+			if tag.RowsAffected() != 1 {
+				http.Error(w, `{"error":"invalid bot token"}`, http.StatusUnauthorized)
 				return
 			}
 			authenticateBot(w, r, next, c.userID)

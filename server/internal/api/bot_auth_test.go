@@ -449,3 +449,50 @@ func TestBotAuthRegenerationRotatesLookup(t *testing.T) {
 		t.Fatal("regeneration must store the new token's SHA-256 digest")
 	}
 }
+
+// TestBotAuthPausedLegacyLosesToRegeneration: if an old legacy token's Argon2
+// match completes but regeneration installs a new digest before the heal runs,
+// the guarded heal affects zero rows and the rotated-away token must be REJECTED
+// -- not admitted on a now-stale match. A zero-row heal that authenticates
+// anyway (or a heal WHERE that ignores the current digest) fails this.
+func TestBotAuthPausedLegacyLosesToRegeneration(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	serverID := h.CreateServer(owner, "S")
+	botID, _, oldToken := createBotFull(t, h, owner, serverID)
+	makeLegacy(t, h, botID)
+
+	// Pause the first Argon2 comparison after it computes its (matching) result
+	// but before the handler heals, so regeneration can win the race in between.
+	reached := make(chan struct{})
+	resume := make(chan struct{})
+	var once sync.Once
+	orig := auth.CompareBotToken
+	auth.CompareBotToken = func(password, hash string) (bool, error) {
+		match, err := orig(password, hash)
+		once.Do(func() { close(reached); <-resume })
+		return match, err
+	}
+	t.Cleanup(func() { auth.CompareBotToken = orig })
+
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- authAsBot(h, oldToken) }()
+	<-reached // the old-token auth has matched and is paused before healing
+
+	// Regeneration wins: it installs a different digest and returns 200.
+	var resp struct {
+		Token string `json:"token"`
+	}
+	if code := h.Request(http.MethodPost,
+		"/api/v1/servers/"+serverID+"/bots/"+botID+"/regenerate-token",
+		owner.AccessToken, nil, &resp); code != http.StatusOK {
+		t.Fatalf("regenerate: expected 200, got %d", code)
+	}
+
+	// Resume the paused auth. Its guarded heal now affects zero rows, so the
+	// rotated-away credential must be rejected.
+	close(resume)
+	if code := <-codeCh; code != http.StatusUnauthorized {
+		t.Fatalf("token rotated away mid-auth must be rejected, got %d", code)
+	}
+}
