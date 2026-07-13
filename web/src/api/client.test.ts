@@ -7,6 +7,8 @@ import apiClient, {
   getAccessToken,
   getRefreshToken,
   setAuthFailureHandler,
+  abortInFlightRequests,
+  linkAbortToSession,
 } from './client';
 import { useAuthStore } from '../stores/authStore';
 
@@ -97,5 +99,29 @@ describe('apiClient auth interceptor', () => {
     await expect(req).rejects.toBeTruthy();
     expect(getRefreshToken()).toBeNull();
     expect(getAccessToken()).toBeNull();
+  });
+
+  // A request that supplies its own signal (e.g. a per-fetch abort) must still be
+  // cancelled by logout: the interceptor combines the caller's signal with the
+  // session signal, so a message GET in flight at logout cannot resolve and write
+  // the previous user's data back.
+  // A caller that supplies its own request signal links it to the session via
+  // linkAbortToSession, so logout still cancels it -- and unlinks on settlement so
+  // a completed request leaves no listener on the long-lived session signal.
+  it('linkAbortToSession cancels a linked controller on logout and unlinks cleanly', () => {
+    const c1 = new AbortController();
+    const unlink1 = linkAbortToSession(c1);
+    expect(c1.signal.aborted).toBe(false);
+    abortInFlightRequests(); // as logout does
+    expect(c1.signal.aborted).toBe(true); // the linked controller was aborted
+
+    // A controller that unlinks (its request settled) is NOT aborted by a later
+    // session abort, and left no listener behind.
+    const c2 = new AbortController();
+    const unlink2 = linkAbortToSession(c2);
+    unlink2(); // request settled
+    abortInFlightRequests();
+    expect(c2.signal.aborted).toBe(false);
+    unlink1();
   });
 });

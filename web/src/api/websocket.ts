@@ -35,6 +35,13 @@ export class WebSocketClient {
   private heartbeatInterval: number = 30000;
   private intentionalClose: boolean = false;
   private wasConnectedBefore: boolean = false;
+  // Monotonic generation of the live socket. Every socket callback captures the
+  // generation it was created under and refuses to act once a newer socket (from a
+  // reconnect) or a disconnect (logout) has superseded it. This client is a shared
+  // singleton, so without it a buffered callback from an old socket would run
+  // this.dispatch() against whatever handlers the NEXT session has since registered
+  // -- delivering a previous session's frame into the new one.
+  private connectionGen: number = 0;
 
   connect(token: string): void {
     this.token = token;
@@ -44,6 +51,11 @@ export class WebSocketClient {
   }
 
   private doConnect(): void {
+    // This socket's generation. Captured by every callback below; a callback whose
+    // generation is no longer the live one belongs to a superseded socket and must
+    // not dispatch a frame or mutate connection state.
+    const gen = ++this.connectionGen;
+
     if (this.ws) {
       this.ws.onclose = null;
       this.ws.onerror = null;
@@ -60,6 +72,7 @@ export class WebSocketClient {
     this.ws = new WebSocket(this.url);
 
     this.ws.onopen = () => {
+      if (gen !== this.connectionGen) return; // superseded socket
       this.reconnectAttempts = 0;
       this.startHeartbeat();
       // Notify listeners that the connection is open (or reopened after reconnect)
@@ -68,6 +81,7 @@ export class WebSocketClient {
     };
 
     this.ws.onmessage = (event: MessageEvent) => {
+      if (gen !== this.connectionGen) return; // buffered frame from a superseded socket
       try {
         const msg: WSMessage = JSON.parse(event.data as string);
         this.dispatch(msg.type, msg.data);
@@ -81,6 +95,7 @@ export class WebSocketClient {
     };
 
     this.ws.onclose = () => {
+      if (gen !== this.connectionGen) return; // a superseded socket closing
       this.stopHeartbeat();
       if (!this.intentionalClose) {
         this.scheduleReconnect();
@@ -125,7 +140,18 @@ export class WebSocketClient {
   }
 
   disconnect(): void {
+    // Invalidate the live socket's callbacks first: any buffered onmessage/onclose
+    // from the socket we are about to close now belongs to a superseded generation
+    // and will no-op, even though onmessage is not nulled and close() is async.
+    this.connectionGen++;
     this.intentionalClose = true;
+    // A disconnect ends the session (logout / a fresh connect's leading teardown).
+    // Reset the reconnect lineage so the NEXT session's first open is classified as
+    // an initial connection, not a reconnect -- otherwise it would fire a spurious
+    // resyncAfterReconnect. A network-drop reconnect does NOT come through here (it
+    // runs onclose -> scheduleReconnect -> doConnect), so it correctly stays a
+    // reconnect.
+    this.wasConnectedBefore = false;
     this.removeAllHandlers();
 
     if (this.reconnectTimer) {

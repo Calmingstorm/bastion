@@ -6,6 +6,7 @@ import { useUnreadStore } from '../../stores/unreadStore';
 import { useAutoScroll } from '../../hooks/useAutoScroll';
 import { MessageItem, DateSeparator } from './MessageItem';
 import { TypingIndicator } from './TypingIndicator';
+import { MessageLoadError } from './MessageLoadError';
 import { SearchDialog } from '../search/SearchDialog';
 import { PinnedMessages } from './PinnedMessages';
 import { eventBus } from '../../utils/eventBus';
@@ -85,6 +86,13 @@ export function MessageList({ onToggleMembers, onToggleSidebar }: MessageListPro
   const channelIsLoading = useMessageStore(
     (s) => (activeChannelId ? s.isLoading[activeChannelId] ?? false : false)
   );
+  const channelError = useMessageStore(
+    (s) => (activeChannelId ? s.error[activeChannelId] ?? null : null)
+  );
+  const channelErrorGen = useMessageStore(
+    (s) => (activeChannelId ? s.errorSeq[activeChannelId] ?? 0 : 0)
+  );
+  const retryLoad = useMessageStore((s) => s.retryLoad);
 
   const { containerRef, scrollToBottomPersistent } = useAutoScroll([
     channelMessages.length,
@@ -426,8 +434,14 @@ export function MessageList({ onToggleMembers, onToggleSidebar }: MessageListPro
           );
         })}
 
+        {/* Error state: a latest-window load failed (e.g. abandoned after timing
+            out). Show a retry rather than a misleading "no messages" empty state. */}
+        {channelMessages.length === 0 && !channelIsLoading && channelError && activeChannelId && (
+          <MessageLoadError error={channelError} onRetry={() => retryLoad(activeChannelId, channelErrorGen)} />
+        )}
+
         {/* Empty state */}
-        {channelMessages.length === 0 && !channelIsLoading && (
+        {channelMessages.length === 0 && !channelIsLoading && !channelError && (
           <div className="flex items-center justify-center py-12">
             <p className="text-sm text-[var(--text-muted)]">
               {isDM

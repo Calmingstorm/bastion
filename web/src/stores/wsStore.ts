@@ -19,6 +19,22 @@ interface WSState {
 
 let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 
+// resyncAfterReconnect refreshes the data a dropped socket may have missed. The
+// active channel is re-fetched in MERGE mode so the reconnect preserves
+// scrolled-in history and live changes rather than replacing them. Exported so
+// the reconnect wiring is testable.
+export function resyncAfterReconnect(): void {
+  const selectedChannelId = useServerStore.getState().selectedChannelId;
+  const selectedDMId = useDMStore.getState().selectedDMId;
+  const activeChannelId = selectedChannelId || selectedDMId;
+  if (activeChannelId) {
+    void useMessageStore.getState().fetchMessages(activeChannelId, undefined, true);
+  }
+  eventBus.emit('bastion:member-update');
+  void useDMStore.getState().fetchDMs();
+  void useUnreadStore.getState().fetchReadStates();
+}
+
 export const useWSStore = create<WSState>((set) => ({
   isConnected: false,
 
@@ -315,18 +331,7 @@ export const useWSStore = create<WSState>((set) => ({
       set({ isConnected: true });
 
       if (isReconnect) {
-        // Resync missed data after reconnection
-        const selectedChannelId = useServerStore.getState().selectedChannelId;
-        const selectedDMId = useDMStore.getState().selectedDMId;
-        const activeChannelId = selectedChannelId || selectedDMId;
-        if (activeChannelId) {
-          useMessageStore.getState().fetchMessages(activeChannelId);
-        }
-        // Refresh member list
-        eventBus.emit('bastion:member-update');
-        // Refresh DMs and unread state
-        useDMStore.getState().fetchDMs();
-        useUnreadStore.getState().fetchReadStates();
+        resyncAfterReconnect();
       }
     });
 

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { useServerStore } from './serverStore';
 import { useMessageStore } from './messageStore';
 import { useDMStore } from './dmStore';
@@ -7,8 +7,10 @@ import { usePermissionStore } from './permissionStore';
 import { useTypingStore } from './typingStore';
 import { useUnreadStore } from './unreadStore';
 import { useCommandStore } from './commandStore';
+import { useToastStore } from './toastStore';
 import { useAuthStore } from './authStore';
 import { resetAllStores } from './resetAll';
+import { wsClient } from '../api/websocket';
 import type { Server } from '../types';
 
 // Seed every per-user store with some data, so a test can prove each one is
@@ -22,6 +24,7 @@ function seedAllStores() {
   useTypingStore.setState({ typing: { c1: { u1: 1 } } as never });
   useUnreadStore.setState({ readStates: { c1: {} as never }, unreadChannels: new Set(['c1']) });
   useCommandStore.setState({ commands: [{ id: 'cmd1' } as never], serverId: 's1' });
+  useToastStore.setState({ toasts: [{ id: 1, message: 'stale toast' }] });
 }
 
 describe('resetAllStores', () => {
@@ -39,6 +42,29 @@ describe('resetAllStores', () => {
     expect(useUnreadStore.getState().unreadChannels.size).toBe(0);
     expect(useCommandStore.getState().commands).toEqual([]);
     expect(useCommandStore.getState().serverId).toBeNull();
+    expect(useToastStore.getState().toasts).toEqual([]); // stale toasts don't leak into the next session
+  });
+});
+
+describe('resetAllStores WebSocket teardown', () => {
+  it('synchronously disconnects the session WebSocket (so a late event cannot repopulate a cleared store)', () => {
+    const spy = vi.spyOn(wsClient, 'disconnect');
+    resetAllStores();
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('removes WebSocket handlers, so an event delivered after logout is inert', () => {
+    const handler = vi.fn();
+    wsClient.on('MESSAGE_CREATE', handler);
+    resetAllStores(); // -> wsClient.disconnect() -> removeAllHandlers()
+    // A frame still in the browser's receive buffer would dispatch to registered
+    // handlers; after logout there must be none left to write into the fresh store.
+    (wsClient as unknown as { dispatch: (t: string, d: unknown) => void }).dispatch(
+      'MESSAGE_CREATE',
+      { message: { id: 'm', channelId: 'c' } }
+    );
+    expect(handler).not.toHaveBeenCalled();
   });
 });
 

@@ -41,6 +41,22 @@ const apiClient = axios.create({
 // write the previous user's data back into a freshly-reset store.
 let sessionAbort = new AbortController();
 
+// Abort `controller` when the current session is aborted (logout), and return an
+// unlink to call once the request settles so the listener never outlives it. This
+// lets a caller that supplies its own request signal (e.g. a per-fetch abort) still
+// be cancelled by logout, without leaking a listener onto the long-lived session
+// signal for a request that completes normally.
+export function linkAbortToSession(controller: AbortController): () => void {
+  const sig = sessionAbort.signal;
+  if (sig.aborted) {
+    controller.abort();
+    return () => {};
+  }
+  const onAbort = () => controller.abort();
+  sig.addEventListener('abort', onAbort);
+  return () => sig.removeEventListener('abort', onAbort);
+}
+
 // sessionEpoch bumps on every logout. The token-refresh call uses the bare
 // axios.post (not apiClient), so aborting apiClient requests cannot cancel it —
 // the refresh path compares the epoch captured when it started against the
@@ -91,7 +107,9 @@ apiClient.interceptors.request.use(
     if (token && config.headers) {
       config.headers.Authorization = `Bearer ${token}`;
     }
-    // Tie the request to the current session so logout can cancel it.
+    // Tie a request that has no signal of its own to the current session so logout
+    // can cancel it. A caller that supplies its own signal is expected to link it to
+    // the session itself (see linkAbortToSession) so it can unlink on settlement.
     if (!config.signal) {
       config.signal = sessionAbort.signal;
     }
@@ -332,7 +350,8 @@ export async function apiDeleteChannel(
 export async function apiGetMessages(
   channelId: string,
   before?: string,
-  limit: number = 50
+  limit: number = 50,
+  signal?: AbortSignal
 ): Promise<Message[]> {
   const params: Record<string, string | number> = { limit };
   if (before) {
@@ -340,7 +359,7 @@ export async function apiGetMessages(
   }
   const response = await apiClient.get<Message[]>(
     `/channels/${channelId}/messages`,
-    { params }
+    { params, signal }
   );
   return Array.isArray(response.data) ? response.data : [];
 }

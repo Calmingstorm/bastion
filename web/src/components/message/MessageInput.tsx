@@ -3,7 +3,7 @@ import { useMessageStore } from '../../stores/messageStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useDMStore } from '../../stores/dmStore';
 import { wsClient } from '../../api/websocket';
-import { apiSendMessageWithFiles, apiGetMembers, apiExecuteInteraction } from '../../api/client';
+import { apiGetMembers, apiExecuteInteraction } from '../../api/client';
 import { MentionAutocomplete } from './MentionAutocomplete';
 import { SlashCommandPicker } from './SlashCommandPicker';
 import { EmojiInputPicker } from './EmojiInputPicker';
@@ -22,7 +22,7 @@ export function MessageInput() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const lastTypingSentRef = useRef(0);
   const sendMessage = useMessageStore((s) => s.sendMessage);
-  const addMessage = useMessageStore((s) => s.addMessage);
+  const sendMessageWithFiles = useMessageStore((s) => s.sendMessageWithFiles);
   const replyingTo = useMessageStore((s) => s.replyingTo);
   const setReplyingTo = useMessageStore((s) => s.setReplyingTo);
   const selectedChannelId = useServerStore((s) => s.selectedChannelId);
@@ -127,9 +127,7 @@ export function MessageInput() {
     setIsSending(true);
     try {
       if (files.length > 0) {
-        const msg = await apiSendMessageWithFiles(activeChannelId, trimmed, files);
-        addMessage(activeChannelId, msg);
-        eventBus.emit('bastion:message-sent');
+        await sendMessageWithFiles(activeChannelId, trimmed, files);
       } else {
         await sendMessage(activeChannelId, trimmed, replyingTo?.id);
       }
@@ -146,7 +144,7 @@ export function MessageInput() {
     } finally {
       setIsSending(false);
     }
-  }, [content, files, activeChannelId, isSending, sendMessage, addMessage, replyingTo, setReplyingTo, pendingCommand, selectedServerId, commands]);
+  }, [content, files, activeChannelId, isSending, sendMessage, sendMessageWithFiles, replyingTo, setReplyingTo, pendingCommand, selectedServerId, commands]);
 
   // Detect @mention context from text before cursor
   const checkMentionContext = (text: string, cursorPos: number) => {
