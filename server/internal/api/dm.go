@@ -77,7 +77,7 @@ func (h *DMHandler) CreateOrGet(w http.ResponseWriter, r *http.Request) {
 
 	var channelID string
 	err = tx.QueryRow(r.Context(),
-		`INSERT INTO channels (name, type) VALUES ('DM', 'dm')
+		`INSERT INTO channels (name, type, dm_kind) VALUES ('DM', 'dm', 'group')
 		 RETURNING id`,
 	).Scan(&channelID)
 	if err != nil {
@@ -182,8 +182,8 @@ func (h *DMHandler) createOrGetDirect(w http.ResponseWriter, r *http.Request, us
 
 	var channelID string
 	err = tx.QueryRow(r.Context(),
-		`INSERT INTO channels (name, type, dm_user_lo, dm_user_hi)
-		 VALUES ('DM', 'dm', $1, $2) RETURNING id`,
+		`INSERT INTO channels (name, type, dm_kind, dm_user_lo, dm_user_hi)
+		 VALUES ('DM', 'dm', 'direct', $1, $2) RETURNING id`,
 		lo, hi,
 	).Scan(&channelID)
 	if err != nil {
@@ -241,7 +241,7 @@ func (h *DMHandler) createOrGetDirect(w http.ResponseWriter, r *http.Request, us
 func (h *DMHandler) lookupDirectDM(r *http.Request, lo, hi uuid.UUID) string {
 	var id string
 	if err := h.db.QueryRow(r.Context(),
-		`SELECT id FROM channels WHERE dm_user_lo = $1 AND dm_user_hi = $2`, lo, hi).Scan(&id); err != nil {
+		`SELECT id FROM channels WHERE dm_user_lo = $1 AND dm_user_hi = $2 AND dm_kind = 'direct'`, lo, hi).Scan(&id); err != nil {
 		return ""
 	}
 	return id

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Calmingstorm/bastion/server/internal/testutil"
 )
@@ -20,6 +21,28 @@ func createDM(t *testing.T, h *testutil.Harness, u *testutil.TestUser, recipient
 	code := h.Request(http.MethodPost, "/api/v1/dm", u.AccessToken,
 		map[string]any{"recipientIds": []string{recipientID}}, &ch)
 	return code, ch.ID
+}
+
+// rawCreateDM posts a 1:1 DM over a bare HTTP client, safe to call from a
+// goroutine (no t.Fatalf). Returns the status and channel id.
+func rawCreateDM(h *testutil.Harness, u *testutil.TestUser, recipientID string) (int, string) {
+	payload, _ := json.Marshal(map[string]any{"recipientIds": []string{recipientID}})
+	req, err := http.NewRequest(http.MethodPost, h.URL("/api/v1/dm"), bytes.NewReader(payload))
+	if err != nil {
+		return -1, ""
+	}
+	req.Header.Set("Authorization", "Bearer "+u.AccessToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return -1, ""
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var ch struct {
+		ID string `json:"id"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&ch)
+	return resp.StatusCode, ch.ID
 }
 
 func countDirectChannels(t *testing.T, h *testutil.Harness) int {
@@ -85,25 +108,8 @@ func TestDMDirectConcurrentCreatesConverge(t *testing.T) {
 			if i%2 == 1 {
 				u, rid = b, a.ID
 			}
-			payload, _ := json.Marshal(map[string]any{"recipientIds": []string{rid}})
-			req, err := http.NewRequest(http.MethodPost, h.URL("/api/v1/dm"), bytes.NewReader(payload))
-			if err != nil {
-				results[i] = result{-1, ""}
-				return
-			}
-			req.Header.Set("Authorization", "Bearer "+u.AccessToken)
-			req.Header.Set("Content-Type", "application/json")
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				results[i] = result{-1, ""}
-				return
-			}
-			defer func() { _ = resp.Body.Close() }()
-			var ch struct {
-				ID string `json:"id"`
-			}
-			_ = json.NewDecoder(resp.Body).Decode(&ch)
-			results[i] = result{resp.StatusCode, ch.ID}
+			code, id := rawCreateDM(h, u, rid)
+			results[i] = result{code, id}
 		}(i)
 	}
 	wg.Wait()
@@ -194,5 +200,94 @@ func TestDMDirectForcedFailureLeavesNoOrphan(t *testing.T) {
 	}
 	if n := countDirectChannels(t, h); n != 0 {
 		t.Fatalf("rolled-back create must leave no orphan channel, got %d", n)
+	}
+}
+
+// TestDMDirectNeverAdoptsLegacyUnknown: a pre-migration legacy_unknown channel
+// (which could be a shrunk group) must never be returned as a direct DM. A
+// direct request creates a fresh keyed channel instead.
+func TestDMDirectNeverAdoptsLegacyUnknown(t *testing.T) {
+	h := testutil.New(t)
+	a := h.Register("alice")
+	b := h.Register("bob")
+
+	ctx := context.Background()
+	var legacyID string
+	if err := h.Pool.QueryRow(ctx,
+		`INSERT INTO channels (name, type, dm_kind) VALUES ('DM','dm','legacy_unknown') RETURNING id`).Scan(&legacyID); err != nil {
+		t.Fatalf("seed legacy channel: %v", err)
+	}
+	if _, err := h.Pool.Exec(ctx,
+		`INSERT INTO dm_members (channel_id, user_id) VALUES ($1,$2),($1,$3)`, legacyID, a.ID, b.ID); err != nil {
+		t.Fatalf("seed members: %v", err)
+	}
+
+	code, direct := createDM(t, h, a, b.ID)
+	if code != http.StatusCreated {
+		t.Fatalf("expected a fresh direct 201, got %d", code)
+	}
+	if direct == legacyID {
+		t.Fatal("must not adopt a legacy_unknown channel as a direct DM")
+	}
+	var kind string
+	if err := h.Pool.QueryRow(ctx, `SELECT dm_kind FROM channels WHERE id = $1`, direct).Scan(&kind); err != nil || kind != "direct" {
+		t.Fatalf("new channel should be dm_kind=direct, got %q (err=%v)", kind, err)
+	}
+}
+
+// TestDMDirectFansOutExactlyOnce: reverse-direction concurrent creates emit
+// exactly one DM_CREATE total (to whichever recipient the winner had); later
+// existing-channel requests in both directions emit none.
+func TestDMDirectFansOutExactlyOnce(t *testing.T) {
+	h := testutil.New(t)
+	a := h.Register("alice")
+	b := h.Register("bob")
+
+	aWS := h.DialWS(a)
+	bWS := h.DialWS(b)
+
+	const n = 6
+	codes := make([]int, n)
+	ids := make([]string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			u, rid := a, b.ID
+			if i%2 == 1 {
+				u, rid = b, a.ID
+			}
+			codes[i], ids[i] = rawCreateDM(h, u, rid)
+		}(i)
+	}
+	wg.Wait()
+
+	created, chID := 0, ""
+	for i := range codes {
+		if codes[i] == http.StatusCreated {
+			created++
+			chID = ids[i]
+		}
+	}
+	if created != 1 {
+		t.Fatalf("expected exactly one creating request, got %d", created)
+	}
+
+	// Exactly one DM_CREATE lands across both sockets, for the winning channel.
+	total := aWS.CountEvents("DM_CREATE", 800*time.Millisecond) + bWS.CountEvents("DM_CREATE", 800*time.Millisecond)
+	if total != 1 {
+		t.Fatalf("expected exactly one DM_CREATE across both sockets, got %d (channel %s)", total, chID)
+	}
+
+	// Later existing-channel requests (both directions) fan out nothing.
+	if code, _ := createDM(t, h, a, b.ID); code != http.StatusOK {
+		t.Fatalf("existing create A->B: expected 200, got %d", code)
+	}
+	if code, _ := createDM(t, h, b, a.ID); code != http.StatusOK {
+		t.Fatalf("existing create B->A: expected 200, got %d", code)
+	}
+	if extra := aWS.CountEvents("DM_CREATE", 400*time.Millisecond) + bWS.CountEvents("DM_CREATE", 400*time.Millisecond); extra != 0 {
+		t.Fatalf("existing-channel requests must not fan out DM_CREATE, got %d", extra)
 	}
 }
