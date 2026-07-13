@@ -445,11 +445,15 @@ export const useMessageStore = create<MessageState>((set, get) => ({
           }
           const existingIds = new Set(existing.map((m) => m.id));
           const older = reconciledFetched.filter((m) => !existingIds.has(m.id));
-          // A full page that adds NOTHING new (every row already loaded) means the
-          // cursor -- the oldest loaded message's id -- did not advance, so the next
-          // "load older" would request the same page again forever. Stop instead of
-          // looping. Real remaining history always yields at least one new id.
-          const hasMore = fetched.length === MESSAGE_LIMIT && older.length > 0;
+          // "Stuck cursor" (loop) vs "end of history" is judged on RAW page novelty,
+          // not post-reconcile survivors. The cursor is the oldest loaded id; a full
+          // page whose rows are ALL already loaded never advances it, so paging again
+          // would refetch it forever -> stop. But a full page of genuinely new ids
+          // that realtime DELETES during the fetch reconciles to zero survivors while
+          // older history still exists -> that must NOT be mistaken for the end. So
+          // gauge progress on the raw fetched ids, not `older`.
+          const rawAdvancedCursor = fetched.some((m) => !existingIds.has(m.id));
+          const hasMore = fetched.length === MESSAGE_LIMIT && rawAdvancedCursor;
           // Pagination loads OLDER history; it does not refresh the latest window,
           // so it does NOT touch committedSeq or the load error -- a pagination
           // success must not suppress or clear a latest-window (base) failure.

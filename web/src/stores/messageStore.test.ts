@@ -1007,4 +1007,20 @@ describe('messageStore.fetchMessages', () => {
     expect(useMessageStore.getState().hasMore.c1).toBe(false); // stuck cursor -> stop, do not loop
     expect(ids().length).toBe(LIMIT); // nothing new prepended
   });
+
+  it('keeps hasMore when a full new older page is all deleted by realtime during the fetch', async () => {
+    useMessageStore.setState({ messages: { c1: block('w', 5, 100) }, hasMore: { c1: true } });
+    const older = block('old', LIMIT, 1); // a full page of genuinely older, unseen messages
+    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
+      // Realtime deletes every fetched message mid-request -> reconciliation drops
+      // them all, but older history still exists beyond this page.
+      for (const m of older) useMessageStore.getState().deleteMessage('c1', m.id);
+      return desc(older);
+    });
+    await useMessageStore.getState().fetchMessages('c1', 'w0');
+    // Raw page advanced the cursor (new ids), so this is NOT end-of-history even
+    // though zero rows survived reconciliation.
+    expect(useMessageStore.getState().hasMore.c1).toBe(true);
+    expect(ids()).toEqual(['w0', 'w1', 'w2', 'w3', 'w4']); // nothing prepended (all deleted)
+  });
 });
