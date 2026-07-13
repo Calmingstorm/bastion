@@ -85,26 +85,31 @@ func (h *PinHandler) Pin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check pin limit (max 50 per channel)
-	var pinCount int
-	err = h.db.QueryRow(r.Context(),
-		`SELECT COUNT(*) FROM message_pins WHERE channel_id = $1`, channelID,
-	).Scan(&pinCount)
+	// Serialize pins for this channel with an advisory lock so the cap check and
+	// the insert cannot be raced across concurrent statements (an in-statement
+	// COUNT alone does not serialize). The lock is held until the transaction ends.
+	tx, err := h.db.Begin(r.Context())
 	if err != nil {
-		log.Error().Err(err).Msg("failed to count pins")
+		log.Error().Err(err).Msg("failed to begin transaction")
 		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
-	if pinCount >= 50 {
-		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "this channel has reached the maximum of 50 pins"))
+	defer func() { _ = tx.Rollback(r.Context()) }()
+
+	if _, err := tx.Exec(r.Context(),
+		`SELECT pg_advisory_xact_lock(hashtext($1))`, channelID.String()); err != nil {
+		log.Error().Err(err).Msg("failed to lock channel for pin")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
-	// Insert pin (ON CONFLICT DO NOTHING for idempotency)
-	_, err = h.db.Exec(r.Context(),
+	// ON CONFLICT keeps it idempotent; a row is inserted only when the pin is new
+	// AND under the cap, so RowsAffected tells us exactly what happened.
+	tag, err := tx.Exec(r.Context(),
 		`INSERT INTO message_pins (channel_id, message_id, pinned_by)
-		 VALUES ($1, $2, $3)
-		 ON CONFLICT DO NOTHING`,
+		 SELECT $1, $2, $3
+		 WHERE (SELECT COUNT(*) FROM message_pins WHERE channel_id = $1) < 50
+		 ON CONFLICT (channel_id, message_id) DO NOTHING`,
 		channelID, messageID, userID,
 	)
 	if err != nil {
@@ -113,6 +118,37 @@ func (h *PinHandler) Pin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if tag.RowsAffected() == 0 {
+		// Nothing inserted: the message is already pinned (idempotent success, no
+		// duplicate broadcast) or the channel is at its cap.
+		var alreadyPinned bool
+		if err := tx.QueryRow(r.Context(),
+			`SELECT EXISTS(SELECT 1 FROM message_pins WHERE channel_id = $1 AND message_id = $2)`,
+			channelID, messageID).Scan(&alreadyPinned); err != nil {
+			log.Error().Err(err).Msg("failed to check existing pin")
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+			return
+		}
+		if !alreadyPinned {
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "this channel has reached the maximum of 50 pins"))
+			return
+		}
+		if err := tx.Commit(r.Context()); err != nil {
+			log.Error().Err(err).Msg("failed to commit transaction")
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+
+	if err := tx.Commit(r.Context()); err != nil {
+		log.Error().Err(err).Msg("failed to commit transaction")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+
+	// A new pin was created and committed: broadcast exactly once.
 	h.hub.BroadcastToChannel(channelID, realtime.Event{
 		Type: realtime.EventMessagePin,
 		Data: map[string]string{
@@ -175,7 +211,7 @@ func (h *PinHandler) Unpin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Delete the pin
-	_, err = h.db.Exec(r.Context(),
+	tag, err := h.db.Exec(r.Context(),
 		`DELETE FROM message_pins WHERE channel_id = $1 AND message_id = $2`,
 		channelID, messageID,
 	)
@@ -185,13 +221,17 @@ func (h *PinHandler) Unpin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.hub.BroadcastToChannel(channelID, realtime.Event{
-		Type: realtime.EventMessageUnpin,
-		Data: map[string]string{
-			"channelId": channelID.String(),
-			"messageId": messageID.String(),
-		},
-	})
+	// Broadcast only when a pin was actually removed, so a repeated (no-op) unpin
+	// is an idempotent success rather than a duplicate MESSAGE_UNPIN.
+	if tag.RowsAffected() > 0 {
+		h.hub.BroadcastToChannel(channelID, realtime.Event{
+			Type: realtime.EventMessageUnpin,
+			Data: map[string]string{
+				"channelId": channelID.String(),
+				"messageId": messageID.String(),
+			},
+		})
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

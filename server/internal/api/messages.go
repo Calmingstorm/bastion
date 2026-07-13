@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -21,6 +22,11 @@ import (
 	"github.com/Calmingstorm/bastion/server/internal/permissions"
 	"github.com/Calmingstorm/bastion/server/internal/realtime"
 )
+
+// BeforeEditUpdateForTest, when non-nil, runs between a message-edit's author
+// check and its UPDATE ... RETURNING. Tests use it to delete the row in that
+// window (the row-vanished-mid-edit race); it is nil in production.
+var BeforeEditUpdateForTest func()
 
 var mentionRegex = regexp.MustCompile(`@([a-zA-Z0-9_-]+)`)
 
@@ -285,8 +291,12 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 		err = h.db.QueryRow(r.Context(),
 			`SELECT created_at FROM messages WHERE id = $1`, beforeID,
 		).Scan(&cursorTime)
-		if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "cursor message not found"))
+			return
+		} else if err != nil {
+			log.Error().Err(err).Msg("failed to read cursor message")
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
 
@@ -608,6 +618,10 @@ func (h *MessageHandler) Edit(w http.ResponseWriter, r *http.Request) {
 		editEmbedsJSON, _ = json.Marshal(req.Embeds)
 	}
 
+	if BeforeEditUpdateForTest != nil {
+		BeforeEditUpdateForTest()
+	}
+
 	var msg models.Message
 	var author models.Author
 	var returnedEmbedsJSON []byte
@@ -623,7 +637,10 @@ func (h *MessageHandler) Edit(w http.ResponseWriter, r *http.Request) {
 		req.Content, messageID, editEmbedsJSON,
 	).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.CreatedAt, &returnedEmbedsJSON,
 		&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL, &author.IsBot)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "message not found"))
+		return
+	} else if err != nil {
 		log.Error().Err(err).Msg("failed to update message")
 		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
