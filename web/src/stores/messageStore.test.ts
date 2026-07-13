@@ -71,4 +71,35 @@ describe('messageStore.fetchMessages', () => {
     expect(list.map((m) => m.id)).toEqual(['m1']); // m2 stays deleted, not resurrected
     expect(list[0].content).toBe('edited'); // live edit preserved, not clobbered by stale fetch
   });
+
+  it('applies a server edit missed while disconnected (unchanged local -> fetched wins)', async () => {
+    // Local copy is stale and untouched since the request began.
+    useMessageStore.setState({
+      messages: { c1: [msg('m1', '2026-01-01', 'stale')] },
+      hasMore: { c1: false },
+    });
+    // The server edited m1 while we were disconnected; the resync must apply it.
+    vi.mocked(client.apiGetMessages).mockResolvedValue([msg('m1', '2026-01-01', 'server-edited')]);
+
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+
+    const list = useMessageStore.getState().messages.c1;
+    expect(list.map((m) => m.id)).toEqual(['m1']);
+    expect(list[0].content).toBe('server-edited');
+  });
+
+  it('does not resurrect when live deletes empty the list during the resync', async () => {
+    useMessageStore.setState({
+      messages: { c1: [msg('m1', '2026-01-01'), msg('m2', '2026-01-02')] },
+      hasMore: { c1: false },
+    });
+    // Both messages are deleted during the fetch; the fetched page is stale.
+    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
+      useMessageStore.setState({ messages: { c1: [] } });
+      return [msg('m2', '2026-01-02'), msg('m1', '2026-01-01')];
+    });
+
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+    expect(useMessageStore.getState().messages.c1).toEqual([]);
+  });
 });

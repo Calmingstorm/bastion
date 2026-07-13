@@ -40,10 +40,13 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     // Prevent duplicate loading
     if (state.isLoading[channelId]) return;
 
-    // Snapshot the ids present when the request begins. On a merge resync, any of
-    // these that are gone by the time the response lands were deleted by a live
-    // event during the fetch, so the (stale) response must not resurrect them.
-    const startIds = merge ? new Set((state.messages[channelId] || []).map((m) => m.id)) : null;
+    // Snapshot the message OBJECTS present when the request begins. On a merge
+    // resync this lets us reconcile the fetched page against realtime changes by
+    // reference identity (the store updates messages immutably): a row still ===
+    // its start snapshot is unchanged since the request began.
+    const startSnap = merge
+      ? new Map((state.messages[channelId] || []).map((m) => [m.id, m]))
+      : null;
 
     set((s) => ({
       isLoading: { ...s.isLoading, [channelId]: true },
@@ -76,22 +79,32 @@ export const useMessageStore = create<MessageState>((set, get) => ({
           };
         }
 
-        // Reconnect resync: union the latest page with what we already have,
-        // deduping by id and sorting ascending. This preserves paginated history
-        // the user scrolled in. It must NOT undo realtime changes that landed
-        // during the fetch, so:
-        //   - a message deleted during the fetch (present at start, absent now)
-        //     is dropped from the fetched page rather than resurrected, and
-        //   - for an id in both, the CURRENT store copy wins over the fetched one,
-        //     since it carries any MESSAGE_UPDATE that arrived during the fetch.
-        // Older-history availability is unchanged, so hasMore is preserved.
-        if (merge && existing.length > 0) {
-          const existingIds = new Set(existing.map((m) => m.id));
-          const byId = new Map(
-            fetched.filter((m) => !(startIds?.has(m.id) && !existingIds.has(m.id))).map((m) => [m.id, m])
-          );
-          for (const m of existing) byId.set(m.id, m);
-          const merged = Array.from(byId.values()).sort(
+        // Reconnect resync: reconcile the fetched page against realtime changes
+        // that landed during the fetch, per id, so a stale response neither undoes
+        // live changes nor blocks server changes missed while disconnected:
+        //   - changed during the fetch (current !== start snapshot) -> current wins;
+        //   - deleted during the fetch (was in the snapshot, gone now) -> excluded;
+        //   - unchanged since request start -> fetched wins (applies missed edits);
+        //   - fetched-only / current-only rows -> unioned.
+        // Runs even when live deletes emptied the list. hasMore is preserved.
+        if (merge && startSnap) {
+          const currentById = new Map(existing.map((m) => [m.id, m]));
+          const result = new Map<string, Message>();
+          for (const m of fetched) {
+            const cur = currentById.get(m.id);
+            if (startSnap.has(m.id) && cur === undefined) {
+              continue; // deleted during the fetch -> stays deleted
+            }
+            if (cur !== undefined && cur !== startSnap.get(m.id)) {
+              result.set(m.id, cur); // changed during the fetch -> current wins
+            } else {
+              result.set(m.id, m); // unchanged since start (or new) -> fetched wins
+            }
+          }
+          for (const m of existing) {
+            if (!result.has(m.id)) result.set(m.id, m); // history / live creates
+          }
+          const merged = Array.from(result.values()).sort(
             (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
           );
           return {
