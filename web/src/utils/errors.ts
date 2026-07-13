@@ -31,3 +31,14 @@ export function extractErrorMessage(err: unknown, fallback: string): string {
   }
   return fallback;
 }
+
+/**
+ * True when a request was cancelled (e.g. its abort signal fired on logout),
+ * rather than genuinely failing. Callers use this to avoid surfacing a
+ * user-facing error for an intentional cancellation.
+ */
+export function isAbort(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { name?: string; code?: string };
+  return e.name === 'AbortError' || e.name === 'CanceledError' || e.code === 'ERR_CANCELED';
+}

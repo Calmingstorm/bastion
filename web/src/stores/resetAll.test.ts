@@ -7,6 +7,7 @@ import { usePermissionStore } from './permissionStore';
 import { useTypingStore } from './typingStore';
 import { useUnreadStore } from './unreadStore';
 import { useCommandStore } from './commandStore';
+import { useToastStore } from './toastStore';
 import { useAuthStore } from './authStore';
 import { resetAllStores } from './resetAll';
 import type { Server } from '../types';
@@ -22,6 +23,7 @@ function seedAllStores() {
   useTypingStore.setState({ typing: { c1: { u1: 1 } } as never });
   useUnreadStore.setState({ readStates: { c1: {} as never }, unreadChannels: new Set(['c1']) });
   useCommandStore.setState({ commands: [{ id: 'cmd1' } as never], serverId: 's1' });
+  useToastStore.setState({ toasts: [{ id: 1, message: 'stale toast' }] });
 }
 
 describe('resetAllStores', () => {
@@ -39,6 +41,7 @@ describe('resetAllStores', () => {
     expect(useUnreadStore.getState().unreadChannels.size).toBe(0);
     expect(useCommandStore.getState().commands).toEqual([]);
     expect(useCommandStore.getState().serverId).toBeNull();
+    expect(useToastStore.getState().toasts).toEqual([]); // stale toasts don't leak into the next session
   });
 });
 

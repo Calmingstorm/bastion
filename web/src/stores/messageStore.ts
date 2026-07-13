@@ -1,7 +1,14 @@
 import { create } from 'zustand';
 import type { Message } from '../types';
-import { apiGetMessages, apiSendMessage, apiEditMessage, apiDeleteMessage, linkAbortToSession } from '../api/client';
-import { extractErrorMessage } from '../utils/errors';
+import {
+  apiGetMessages,
+  apiSendMessage,
+  apiSendMessageWithFiles,
+  apiEditMessage,
+  apiDeleteMessage,
+  linkAbortToSession,
+} from '../api/client';
+import { extractErrorMessage, isAbort } from '../utils/errors';
 import { eventBus } from '../utils/eventBus';
 import { useToastStore } from './toastStore';
 
@@ -25,6 +32,7 @@ interface MessageState {
   setReplyingTo: (msg: Message | null) => void;
   fetchMessages: (channelId: string, before?: string, merge?: boolean) => Promise<void>;
   sendMessage: (channelId: string, content: string, replyToId?: string) => Promise<void>;
+  sendMessageWithFiles: (channelId: string, content: string, files: File[]) => Promise<void>;
   editMessage: (channelId: string, messageId: string, content: string) => Promise<void>;
   requestDeleteMessage: (channelId: string, messageId: string) => Promise<void>;
   addMessage: (channelId: string, message: Message) => void;
@@ -516,8 +524,10 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       const errMsg = extractErrorMessage(err, 'Failed to edit message.');
       // error[channelId] is the latest-window LOAD status (base-owned). A mutation
       // failure surfaces to the user as a toast (and via the thrown error for the
-      // caller's control flow) -- never silently, and never as a load error.
-      useToastStore.getState().addToast(errMsg);
+      // caller's control flow) -- never silently, and never as a load error. A
+      // cancellation (e.g. the request aborted on logout) is not a user-facing
+      // failure, so it does not toast into the logged-out / next-user UI.
+      if (!isAbort(err)) useToastStore.getState().addToast(errMsg);
       throw new Error(errMsg);
     }
   },
@@ -530,8 +540,10 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       const errMsg = extractErrorMessage(err, 'Failed to delete message.');
       // error[channelId] is the latest-window LOAD status (base-owned). A mutation
       // failure surfaces to the user as a toast (and via the thrown error for the
-      // caller's control flow) -- never silently, and never as a load error.
-      useToastStore.getState().addToast(errMsg);
+      // caller's control flow) -- never silently, and never as a load error. A
+      // cancellation (e.g. the request aborted on logout) is not a user-facing
+      // failure, so it does not toast into the logged-out / next-user UI.
+      if (!isAbort(err)) useToastStore.getState().addToast(errMsg);
       throw new Error(errMsg);
     }
   },
@@ -546,8 +558,25 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       const errMsg = extractErrorMessage(err, 'Failed to send message.');
       // error[channelId] is the latest-window LOAD status (base-owned). A mutation
       // failure surfaces to the user as a toast (and via the thrown error for the
-      // caller's control flow) -- never silently, and never as a load error.
-      useToastStore.getState().addToast(errMsg);
+      // caller's control flow) -- never silently, and never as a load error. A
+      // cancellation (e.g. the request aborted on logout) is not a user-facing
+      // failure, so it does not toast into the logged-out / next-user UI.
+      if (!isAbort(err)) useToastStore.getState().addToast(errMsg);
+      throw new Error(errMsg);
+    }
+  },
+
+  sendMessageWithFiles: async (channelId: string, content: string, files: File[]) => {
+    try {
+      const message = await apiSendMessageWithFiles(channelId, content, files);
+      get().addMessage(channelId, message);
+      eventBus.emit('bastion:message-sent');
+    } catch (err: unknown) {
+      const errMsg = extractErrorMessage(err, 'Failed to send message.');
+      // Uploads run through the store like a plain send so a failure surfaces as a
+      // toast rather than being silently swallowed by the caller (a cancellation on
+      // logout does not toast).
+      if (!isAbort(err)) useToastStore.getState().addToast(errMsg);
       throw new Error(errMsg);
     }
   },

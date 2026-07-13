@@ -4,6 +4,7 @@ import type { Message } from '../types';
 vi.mock('../api/client', () => ({
   apiGetMessages: vi.fn(),
   apiSendMessage: vi.fn(),
+  apiSendMessageWithFiles: vi.fn(),
   apiEditMessage: vi.fn(),
   apiDeleteMessage: vi.fn(),
   linkAbortToSession: vi.fn(() => vi.fn()), // returns a fresh unlink spy per call
@@ -56,6 +57,7 @@ describe('messageStore.fetchMessages', () => {
   beforeEach(() => {
     useMessageStore.getState().reset();
     vi.mocked(client.apiGetMessages).mockReset();
+    vi.mocked(useToastStore.getState().addToast).mockClear();
   });
 
   // --- Basics --------------------------------------------------------------
@@ -761,6 +763,21 @@ describe('messageStore.fetchMessages', () => {
     // A send failure surfaces via a toast + the throw, NOT the base-load error field.
     expect(useMessageStore.getState().error.c1 ?? null).toBeFalsy();
     expect(useToastStore.getState().addToast).toHaveBeenCalledWith('Failed to send message.');
+  });
+
+  it('an attachment (file) send failure shows a toast', async () => {
+    vi.mocked(client.apiSendMessageWithFiles).mockRejectedValue(new Error('boom'));
+    await expect(
+      useMessageStore.getState().sendMessageWithFiles('c1', 'hi', [new File([], 'f.png')])
+    ).rejects.toThrow();
+    expect(useToastStore.getState().addToast).toHaveBeenCalledWith('Failed to send message.');
+  });
+
+  it('a send cancelled on logout does not toast', async () => {
+    vi.mocked(client.apiSendMessage).mockRejectedValue(new DOMException('aborted', 'AbortError'));
+    await expect(useMessageStore.getState().sendMessage('c1', 'hi')).rejects.toThrow();
+    // A cancellation is not a user-facing failure -- no toast into the next session.
+    expect(useToastStore.getState().addToast).not.toHaveBeenCalled();
   });
 
   it('a resync clears an existing latest-window error when it starts (inverse retry race)', async () => {
