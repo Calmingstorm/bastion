@@ -74,6 +74,7 @@ export function UnifiedSidebar() {
   const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
   const [editCategoryName, setEditCategoryName] = useState('');
   const [deletingCategoryId, setDeletingCategoryId] = useState<string | null>(null);
+  const [isDeletingCategory, setIsDeletingCategory] = useState(false);
   const editCategoryRef = useRef<HTMLInputElement>(null);
   // See ChannelList: restore focus to the deleting category's persistent context-menu
   // trigger (the shared dialog captures the menu portal, which unmounts on close).
@@ -148,11 +149,13 @@ export function UnifiedSidebar() {
 
   const handleDeleteCategory = async () => {
     if (!deletingCategoryId || !expandedServerId) return;
+    setIsDeletingCategory(true); // locks the dialog so it can't be dismissed mid-request
     try {
       await apiDeleteCategory(expandedServerId, deletingCategoryId);
       fetchCategories();
       useServerStore.getState().selectServer(expandedServerId);
     } catch { /* silently fail */ }
+    setIsDeletingCategory(false);
     setDeletingCategoryId(null);
   };
 
@@ -758,6 +761,7 @@ export function UnifiedSidebar() {
         title="Delete Category"
         description="Are you sure you want to delete this category? Channels in this category will become uncategorized."
         returnFocusRef={pendingReturnFocusRef}
+        isPending={isDeletingCategory}
       />
     </div>
   );

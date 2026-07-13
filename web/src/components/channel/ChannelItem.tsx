@@ -21,6 +21,7 @@ export function ChannelItem({ channel, isSelected, onClick, canManage, serverId,
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(channel.name);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
   const editRef = useRef<HTMLInputElement>(null);
   // The delete confirm is opened from the context menu; its portal holds focus when
   // the dialog captures it, so we hand the dialog this persistent trigger to restore
@@ -49,10 +50,12 @@ export function ChannelItem({ channel, isSelected, onClick, canManage, serverId,
 
   const handleDelete = async () => {
     if (!serverId) return;
+    setIsDeleting(true); // locks the dialog so it can't be dismissed mid-request
     try {
       await apiDeleteChannel(serverId, channel.id);
       useServerStore.getState().removeChannel(channel.id);
     } catch { /* handled */ }
+    setIsDeleting(false);
     setShowDeleteConfirm(false);
   };
 
@@ -142,6 +145,7 @@ export function ChannelItem({ channel, isSelected, onClick, canManage, serverId,
           onOpenChange={setShowDeleteConfirm}
           onConfirm={handleDelete}
           returnFocusRef={triggerRef}
+          isPending={isDeleting}
           title="Delete Channel"
           description={
             <>
@@ -220,6 +224,7 @@ export function ChannelItem({ channel, isSelected, onClick, canManage, serverId,
         onOpenChange={setShowDeleteConfirm}
         onConfirm={handleDelete}
         returnFocusRef={triggerRef}
+        isPending={isDeleting}
         title="Delete Channel"
         description={
           <>

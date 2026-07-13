@@ -97,6 +97,7 @@ export function ChannelList() {
   const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
   const [editCategoryName, setEditCategoryName] = useState('');
   const [deletingCategoryId, setDeletingCategoryId] = useState<string | null>(null);
+  const [isDeletingCategory, setIsDeletingCategory] = useState(false);
   const editCategoryRef = useRef<HTMLInputElement>(null);
   // The delete-category confirm is opened from a context menu whose portal holds
   // focus when the dialog captures it; hand the dialog the category's persistent
@@ -221,6 +222,7 @@ export function ChannelList() {
 
   const handleDeleteCategory = async () => {
     if (!deletingCategoryId || !selectedServerId) return;
+    setIsDeletingCategory(true); // locks the dialog so it can't be dismissed mid-request
     try {
       await apiDeleteCategory(selectedServerId, deletingCategoryId);
       fetchCategories();
@@ -229,6 +231,7 @@ export function ChannelList() {
     } catch {
       // silently fail
     }
+    setIsDeletingCategory(false);
     setDeletingCategoryId(null);
   };
 
@@ -577,6 +580,7 @@ export function ChannelList() {
         title="Delete Category"
         description="Are you sure you want to delete this category? Channels in this category will become uncategorized."
         returnFocusRef={pendingReturnFocusRef}
+        isPending={isDeletingCategory}
       />
     </div>
   );

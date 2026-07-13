@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { useRef, useState } from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ConfirmDialog } from './ConfirmDialog';
 
@@ -105,6 +105,45 @@ function FailedConfirmHarness() {
         onOpenChange={setOpen}
         onConfirm={() => {
           /* deletion failed: dialog stays open */
+        }}
+        title="Delete Category"
+        description="Are you sure you want to delete this? This cannot be undone."
+        returnFocusRef={triggerRef}
+      />
+    </>
+  );
+}
+
+// A confirm whose async action stays pending until the test resolves it, then
+// succeeds by removing the trigger and closing the dialog -- the real destructive
+// lifecycle. The resolver is exposed at module scope because the open modal marks
+// everything outside it inert, so a "resolve" button could not be clicked.
+let resolvePendingDelete: (() => void) | null = null;
+function PendingDeleteHarness() {
+  const [open, setOpen] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [deleted, setDeleted] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  return (
+    <>
+      <div data-focus-fallback tabIndex={-1}>
+        app
+      </div>
+      {!deleted && <button ref={triggerRef}>persistent trigger</button>}
+      {!open && <button onClick={() => setOpen(true)}>menu item</button>}
+      <ConfirmDialog
+        open={open}
+        onOpenChange={setOpen}
+        isPending={pending}
+        onConfirm={() => {
+          setPending(true);
+          new Promise<void>((res) => {
+            resolvePendingDelete = res;
+          }).then(() => {
+            setDeleted(true); // success removes the trigger
+            setPending(false);
+            setOpen(false); // and closes the dialog
+          });
         }}
         title="Delete Category"
         description="Are you sure you want to delete this? This cannot be undone."
@@ -263,5 +302,30 @@ describe('ConfirmDialog', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     // The control survived the failed delete, so focus returns to it, not the fallback.
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'persistent trigger' }));
+  });
+
+  it('cannot be dismissed while a confirmed action is pending', async () => {
+    const user = userEvent.setup();
+    render(<Harness isPending pendingLabel="Deleting..." />);
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+    await user.keyboard('{Escape}');
+    // Locked: dismissal must not close it while the action runs.
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+
+  it('a dismissal attempt while pending is ignored, and a later successful deletion lands on the fallback', async () => {
+    const user = userEvent.setup();
+    render(<PendingDeleteHarness />);
+    await user.click(screen.getByRole('button', { name: 'menu item' }));
+    await user.click(screen.getByRole('button', { name: 'Delete' })); // -> pending
+    await user.keyboard('{Escape}'); // dismissal attempt while pending -> ignored
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    await act(async () => {
+      resolvePendingDelete?.(); // deletion succeeds: trigger removed, dialog closes
+    });
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    // The trigger is gone; focus must be on the app fallback, never <body>.
+    expect(document.activeElement).toBe(document.querySelector('[data-focus-fallback]'));
   });
 });
