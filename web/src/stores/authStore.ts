@@ -8,6 +8,7 @@ import {
   clearTokens,
   abortInFlightRequests,
 } from '../api/client';
+import { invalidateSession } from '../api/session';
 import { extractErrorMessage } from '../utils/errors';
 import { storage } from '../utils/storage';
 import { resetAllStores } from './resetAll';
@@ -43,6 +44,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ isLoading: true, error: null });
     try {
       const response = await apiLogin(email, password);
+      // A new identity takes over: invalidate any work still tied to a prior one
+      // (account replacement) before the new tokens/user are established.
+      invalidateSession();
       persistTokens(response.accessToken, response.refreshToken);
       storage.setItem('user', JSON.stringify(response.user));
       set({
@@ -82,8 +86,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   logout: () => {
-    // Cancel in-flight requests first, so a response already underway cannot
-    // resolve after the reset and repopulate a store with the old user's data.
+    // Advance the session generation FIRST -- before aborting requests or
+    // resetting stores -- so any async work already in flight (even one that
+    // resolves during this teardown) sees a stale generation and refuses to write
+    // into the next session. Aborting transport below is best-effort on top of it.
+    invalidateSession();
     abortInFlightRequests();
     clearTokens();
     set({

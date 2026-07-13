@@ -8,6 +8,7 @@ import {
   apiLeaveServer,
   apiDeleteServer,
 } from '../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../api/session';
 import { extractErrorMessage } from '../utils/errors';
 import { usePermissionStore } from './permissionStore';
 
@@ -44,9 +45,13 @@ export const useServerStore = create<ServerState>((set, get) => ({
   error: null,
 
   fetchServers: async () => {
+    // Capture the session at entry; after every await, bail if an identity
+    // boundary has passed so a late response never writes the old account's data.
+    const generation = captureSessionGeneration();
     set({ isLoadingServers: true, error: null });
     try {
       const rawServers = await apiGetServers();
+      if (!isSessionGenerationCurrent(generation)) return;
       const servers = Array.isArray(rawServers) ? rawServers : [];
 
       // If no server is selected and we have servers, merge server list +
@@ -68,6 +73,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
         // Fetch channels for the auto-selected server
         try {
           const rawChannels = await apiGetChannels(servers[0].id);
+          if (!isSessionGenerationCurrent(generation)) return;
           const sorted = (Array.isArray(rawChannels) ? rawChannels : []).sort((a, b) => a.position - b.position);
           set({
             channels: sorted,
@@ -75,18 +81,21 @@ export const useServerStore = create<ServerState>((set, get) => ({
             selectedChannelId: sorted.length > 0 ? sorted[0].id : null,
           });
         } catch {
+          if (!isSessionGenerationCurrent(generation)) return;
           set({ isLoadingChannels: false });
         }
       } else {
         set({ servers, isLoadingServers: false });
       }
     } catch (err: unknown) {
+      if (!isSessionGenerationCurrent(generation)) return;
       const message = extractErrorMessage(err, 'Failed to load servers.');
       set({ isLoadingServers: false, error: message });
     }
   },
 
   selectServer: async (id: string) => {
+    const generation = captureSessionGeneration();
     set({
       selectedServerId: id,
       selectedChannelId: null,
@@ -98,6 +107,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
     usePermissionStore.getState().fetchPermissions(id);
     try {
       const rawChannels = await apiGetChannels(id);
+      if (!isSessionGenerationCurrent(generation)) return;
       const sorted = (Array.isArray(rawChannels) ? rawChannels : []).sort((a, b) => a.position - b.position);
       // Merge channels + auto-select into a single state update
       set({
@@ -106,6 +116,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
         selectedChannelId: sorted.length > 0 ? sorted[0].id : null,
       });
     } catch (err: unknown) {
+      if (!isSessionGenerationCurrent(generation)) return;
       const message = extractErrorMessage(err, 'Failed to load channels.');
       set({ isLoadingChannels: false, error: message });
     }
@@ -116,14 +127,17 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   createServer: async (name: string) => {
+    const generation = captureSessionGeneration();
     try {
       const server = await apiCreateServer(name);
+      if (!isSessionGenerationCurrent(generation)) return;
       set((state) => ({
         servers: [...state.servers, server],
       }));
-      // Select the newly created server
+      // Select the newly created server (itself session-guarded)
       await get().selectServer(server.id);
     } catch (err: unknown) {
+      if (!isSessionGenerationCurrent(generation)) return;
       const message = extractErrorMessage(err, 'Failed to create server.');
       set({ error: message });
       throw new Error(message);
@@ -131,8 +145,10 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   createChannel: async (serverId: string, name: string, topic?: string, categoryId?: string) => {
+    const generation = captureSessionGeneration();
     try {
       const channel = await apiCreateChannel(serverId, name, topic, categoryId);
+      if (!isSessionGenerationCurrent(generation)) return;
       set((state) => ({
         channels: [...state.channels, channel].sort(
           (a, b) => a.position - b.position
@@ -141,6 +157,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
       // Select the newly created channel
       set({ selectedChannelId: channel.id });
     } catch (err: unknown) {
+      if (!isSessionGenerationCurrent(generation)) return;
       const message = extractErrorMessage(err, 'Failed to create channel.');
       set({ error: message });
       throw new Error(message);
@@ -190,12 +207,16 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   leaveServer: async (serverId: string) => {
+    const generation = captureSessionGeneration();
     await apiLeaveServer(serverId);
+    if (!isSessionGenerationCurrent(generation)) return;
     get().removeServer(serverId);
   },
 
   deleteServer: async (serverId: string) => {
+    const generation = captureSessionGeneration();
     await apiDeleteServer(serverId);
+    if (!isSessionGenerationCurrent(generation)) return;
     get().removeServer(serverId);
   },
 

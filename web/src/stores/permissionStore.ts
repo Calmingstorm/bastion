@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { apiGetMemberPermissions } from '../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../api/session';
 import { hasFlag } from '../utils/permissions';
 
 interface PermissionState {
@@ -14,8 +15,10 @@ export const usePermissionStore = create<PermissionState>((set, get) => ({
   permissions: {},
 
   fetchPermissions: async (serverId: string) => {
+    const generation = captureSessionGeneration();
     try {
       const { permissions: perms } = await apiGetMemberPermissions(serverId);
+      if (!isSessionGenerationCurrent(generation)) return;
       set((state) => ({
         permissions: { ...state.permissions, [serverId]: perms },
       }));

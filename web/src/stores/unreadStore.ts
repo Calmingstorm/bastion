@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { ReadState } from '../types';
 import { apiGetReadStates, apiAckChannel } from '../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../api/session';
 
 interface UnreadState {
   readStates: Record<string, ReadState>; // channelId -> ReadState
@@ -19,8 +20,10 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
   unreadChannels: new Set(),
 
   fetchReadStates: async () => {
+    const generation = captureSessionGeneration();
     try {
       const rawStates = await apiGetReadStates();
+      if (!isSessionGenerationCurrent(generation)) return;
       const states = Array.isArray(rawStates) ? rawStates : [];
       const map: Record<string, ReadState> = {};
       states.forEach((rs) => {
@@ -33,8 +36,10 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
   },
 
   ackChannel: async (channelId: string, messageId: string) => {
+    const generation = captureSessionGeneration();
     try {
       await apiAckChannel(channelId, messageId);
+      if (!isSessionGenerationCurrent(generation)) return;
       set((state) => {
         const newUnread = new Set(state.unreadChannels);
         newUnread.delete(channelId);

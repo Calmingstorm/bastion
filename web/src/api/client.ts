@@ -1,6 +1,7 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios';
 import { wsClient } from './websocket';
 import { storage } from '../utils/storage';
+import { captureSessionGeneration, isSessionGenerationCurrent } from './session';
 import type {
   User,
   Server,
@@ -57,17 +58,13 @@ export function linkAbortToSession(controller: AbortController): () => void {
   return () => sig.removeEventListener('abort', onAbort);
 }
 
-// sessionEpoch bumps on every logout. The token-refresh call uses the bare
-// axios.post (not apiClient), so aborting apiClient requests cannot cancel it —
-// the refresh path compares the epoch captured when it started against the
-// current one and refuses to write tokens if a logout happened in between.
-let sessionEpoch = 0;
-
-// abortInFlightRequests cancels every request currently in flight, invalidates
-// any pending token refresh, and starts a fresh session signal for subsequent
-// requests. Called on logout.
+// abortInFlightRequests cancels every request currently in flight and starts a
+// fresh session signal for subsequent requests. It is transport-level teardown
+// only; the identity boundary itself is the session generation, which the caller
+// (logout) must advance via invalidateSession() BEFORE calling this. The
+// token-refresh path (a bare axios.post that apiClient's abort cannot cancel)
+// captures that generation when it begins and refuses to write tokens if it moved.
 export function abortInFlightRequests(): void {
-  sessionEpoch += 1;
   sessionAbort.abort();
   sessionAbort = new AbortController();
 }
@@ -162,9 +159,9 @@ apiClient.interceptors.response.use(
 
       (originalRequest as InternalAxiosRequestConfig & { _retry?: boolean })._retry = true;
       isRefreshing = true;
-      // Capture the session at the moment refresh begins; if a logout bumps the
-      // epoch before the refresh resolves, the result must be discarded.
-      const epochAtRefresh = sessionEpoch;
+      // Capture the session at the moment refresh begins; if an identity boundary
+      // (logout) advances the generation before the refresh resolves, discard it.
+      const generationAtRefresh = captureSessionGeneration();
 
       const refreshToken = getRefreshToken();
       if (!refreshToken) {
@@ -186,7 +183,7 @@ apiClient.interceptors.response.use(
         // A logout during the in-flight refresh must remain authoritative: do
         // not write the new tokens back, update the socket, or resume queued
         // requests — that would resurrect the dead session.
-        if (epochAtRefresh !== sessionEpoch) {
+        if (!isSessionGenerationCurrent(generationAtRefresh)) {
           processQueue(new Error('session ended'), null);
           return Promise.reject(error);
         }
