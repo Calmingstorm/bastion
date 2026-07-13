@@ -85,26 +85,15 @@ func (h *PinHandler) Pin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check pin limit (max 50 per channel)
-	var pinCount int
-	err = h.db.QueryRow(r.Context(),
-		`SELECT COUNT(*) FROM message_pins WHERE channel_id = $1`, channelID,
-	).Scan(&pinCount)
-	if err != nil {
-		log.Error().Err(err).Msg("failed to count pins")
-		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
-		return
-	}
-	if pinCount >= 50 {
-		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "this channel has reached the maximum of 50 pins"))
-		return
-	}
-
-	// Insert pin (ON CONFLICT DO NOTHING for idempotency)
-	_, err = h.db.Exec(r.Context(),
+	// Insert the pin, enforcing the 50-per-channel cap inside the same statement
+	// (the separate count-then-insert let concurrent pins exceed it). ON CONFLICT
+	// keeps it idempotent. A row is inserted only when the pin is new AND under
+	// the cap, so RowsAffected tells us exactly what happened.
+	tag, err := h.db.Exec(r.Context(),
 		`INSERT INTO message_pins (channel_id, message_id, pinned_by)
-		 VALUES ($1, $2, $3)
-		 ON CONFLICT DO NOTHING`,
+		 SELECT $1, $2, $3
+		 WHERE (SELECT COUNT(*) FROM message_pins WHERE channel_id = $1) < 50
+		 ON CONFLICT (channel_id, message_id) DO NOTHING`,
 		channelID, messageID, userID,
 	)
 	if err != nil {
@@ -113,6 +102,26 @@ func (h *PinHandler) Pin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if tag.RowsAffected() == 0 {
+		// Nothing inserted: the message is already pinned (idempotent success,
+		// no duplicate broadcast) or the channel is at its cap.
+		var alreadyPinned bool
+		if err := h.db.QueryRow(r.Context(),
+			`SELECT EXISTS(SELECT 1 FROM message_pins WHERE channel_id = $1 AND message_id = $2)`,
+			channelID, messageID).Scan(&alreadyPinned); err != nil {
+			log.Error().Err(err).Msg("failed to check existing pin")
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+			return
+		}
+		if !alreadyPinned {
+			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "this channel has reached the maximum of 50 pins"))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+
+	// A new pin was created: broadcast exactly once.
 	h.hub.BroadcastToChannel(channelID, realtime.Event{
 		Type: realtime.EventMessagePin,
 		Data: map[string]string{

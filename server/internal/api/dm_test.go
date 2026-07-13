@@ -166,6 +166,34 @@ func TestDMDirectDoesNotMatchGroupDM(t *testing.T) {
 	}
 }
 
+// TestDMGroupDedupesRecipients: duplicate and self recipients must not trip the
+// dm_members primary key and 500; they are de-duplicated, and an all-self/dup
+// recipient list is a 400.
+func TestDMGroupDedupesRecipients(t *testing.T) {
+	h := testutil.New(t)
+	a := h.Register("alice")
+	b := h.Register("bob")
+
+	var ch struct {
+		ID string `json:"id"`
+	}
+	if code := h.Request(http.MethodPost, "/api/v1/dm", a.AccessToken,
+		map[string]any{"recipientIds": []string{b.ID, b.ID, a.ID}}, &ch); code != http.StatusCreated {
+		t.Fatalf("group with dup/self recipients should be 201, got %d", code)
+	}
+	var n int
+	if err := h.Pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM dm_members WHERE channel_id = $1`, ch.ID).Scan(&n); err != nil || n != 2 {
+		t.Fatalf("recipients should de-dup to creator + bob = 2, got %d (err=%v)", n, err)
+	}
+
+	// A recipient list that is only the creator (and dups) leaves no one to DM.
+	if code := h.Request(http.MethodPost, "/api/v1/dm", a.AccessToken,
+		map[string]any{"recipientIds": []string{a.ID, a.ID}}, nil); code != http.StatusBadRequest {
+		t.Fatalf("group with only self/dup recipients should be 400, got %d", code)
+	}
+}
+
 // TestDMSelfRejected: a DM to yourself is rejected rather than 500-ing on the key
 // constraint.
 func TestDMSelfRejected(t *testing.T) {

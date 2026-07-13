@@ -97,13 +97,21 @@ func (h *DMHandler) CreateOrGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Add recipients
+	// Add recipients, de-duplicated and excluding the creator (already a member),
+	// so a repeated or self recipient does not trip the dm_members primary key
+	// and 500 the request.
+	seen := map[uuid.UUID]bool{userID: true}
+	added := 0
 	for _, rid := range req.RecipientIDs {
 		recipientID, err := parseUUID(rid)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "invalid recipient ID"))
 			return
 		}
+		if seen[recipientID] {
+			continue
+		}
+		seen[recipientID] = true
 		_, err = tx.Exec(r.Context(),
 			`INSERT INTO dm_members (channel_id, user_id) VALUES ($1, $2)`,
 			channelID, recipientID,
@@ -113,6 +121,11 @@ func (h *DMHandler) CreateOrGet(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
+		added++
+	}
+	if added == 0 {
+		writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "a DM needs at least one other member"))
+		return
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
