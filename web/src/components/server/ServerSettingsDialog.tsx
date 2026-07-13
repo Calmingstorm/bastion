@@ -35,6 +35,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { resolveMediaUrl, getPlatform } from '../../platform';
 import { PERMISSIONS } from '../../utils/permissions';
 import type { Role, ServerBan, AuditLogEntry, MemberWithUser, Channel, Webhook, Bot } from '../../types';
+import { toWebhookSummary, type WebhookSummary } from '../../utils/webhook';
 
 const PERMISSION_LABELS: { key: keyof typeof PERMISSIONS; label: string; desc: string }[] = [
   { key: 'ViewChannel', label: 'View Channels', desc: 'Allows viewing text channels' },
@@ -872,7 +873,7 @@ function AuditTab({ serverId }: { serverId: string }) {
 /* ---- Webhooks ---- */
 
 export function WebhooksTab({ serverId }: { serverId: string }) {
-  const [webhooks, setWebhooks] = useState<Webhook[]>([]);
+  const [webhooks, setWebhooks] = useState<WebhookSummary[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [newName, setNewName] = useState('');
@@ -889,7 +890,7 @@ export function WebhooksTab({ serverId }: { serverId: string }) {
   useEffect(() => {
     Promise.all([apiGetWebhooks(serverId), apiGetChannels(serverId)])
       .then(([wh, ch]) => {
-        setWebhooks(wh);
+        setWebhooks(wh.map(toWebhookSummary));
         setChannels(ch.sort((a, b) => a.position - b.position));
         if (ch.length > 0 && !newChannelId) setNewChannelId(ch[0].id);
       })
@@ -905,9 +906,7 @@ export function WebhooksTab({ serverId }: { serverId: string }) {
       const wh = await apiCreateWebhook(serverId, { name, channelId: newChannelId });
       // Keep the plaintext token only in `revealed`; the persistent list row must
       // never hold it, or a dismissed token would linger in memory.
-      const { token: _t, ...listRow } = wh;
-      void _t;
-      setWebhooks((prev) => [listRow, ...prev]);
+      setWebhooks((prev) => [toWebhookSummary(wh), ...prev]);
       setNewName('');
       setRevealed(wh); // show the token URL once
       setCopied(false);
@@ -921,10 +920,8 @@ export function WebhooksTab({ serverId }: { serverId: string }) {
     setRegeneratingId(webhookId);
     try {
       const wh = await apiRegenerateWebhookToken(serverId, webhookId);
-      const { token: _t, ...listRow } = wh;
-      void _t;
       // Replace the row (updates the hint) and reveal the new token once.
-      setWebhooks((prev) => prev.map((w) => (w.id === wh.id ? listRow : w)));
+      setWebhooks((prev) => prev.map((w) => (w.id === wh.id ? toWebhookSummary(wh) : w)));
       setRevealed(wh);
       setCopied(false);
     } catch { /* handled */ } finally {

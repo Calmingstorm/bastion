@@ -68,10 +68,10 @@ describe('WebhooksTab', () => {
     expect(screen.getByRole('button', { name: 'Regenerate' })).toBeInTheDocument();
   });
 
-  it('requires confirmation before regenerating', async () => {
+  it('requires confirmation, then updates the hint and reveals the new URL', async () => {
     vi.mocked(client.apiGetWebhooks).mockResolvedValue([webhook({ id: 'w1', tokenHint: 'abcd1234' })]);
     vi.mocked(client.apiRegenerateWebhookToken).mockResolvedValue(
-      webhook({ id: 'w1', token: 'whk_new', tokenHint: 'whk_new'.slice(-8) })
+      webhook({ id: 'w1', token: 'whk_rotated', tokenHint: 'rotated1' })
     );
     render(<WebhooksTab serverId="s1" />);
     await screen.findByText(/abcd1234/);
@@ -82,6 +82,15 @@ describe('WebhooksTab', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Confirm rotate' }));
     expect(client.apiRegenerateWebhookToken).toHaveBeenCalledTimes(1);
+
+    // The post-response update runs: the row hint changes and the new URL is
+    // revealed from the configured origin. (A no-op update would leave the old
+    // hint and no reveal, failing these.)
+    expect(await screen.findByText(/rotated1/)).toBeInTheDocument();
+    expect(screen.queryByText(/abcd1234/)).toBeNull();
+    expect(
+      await screen.findByDisplayValue('https://cfg.example/api/v1/webhooks/w1/whk_rotated')
+    ).toBeInTheDocument();
   });
 
   it('guards against a double-click firing two rotations', async () => {
@@ -104,6 +113,8 @@ describe('WebhooksTab', () => {
     await userEvent.click(rotating);
     expect(client.apiRegenerateWebhookToken).toHaveBeenCalledTimes(1);
 
+    // Resolve and flush, so the pending state update happens inside act.
     resolve(webhook({ id: 'w1', token: 'whk_new', tokenHint: 'k_new123' }));
+    await screen.findByText(/k_new123/);
   });
 });
