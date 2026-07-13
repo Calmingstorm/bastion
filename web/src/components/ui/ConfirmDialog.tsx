@@ -42,6 +42,9 @@ interface ConfirmDialogProps {
  *    `returnFocusRef` if the caller gave one (required for menu-launched dialogs --
  *    see that prop) else the auto-captured opener, falling back to the landmark only
  *    if that target is unexpectedly gone.
+ * The confirm/dismiss decision tracks the ACTUAL close cause: if a confirm fails and
+ * leaves the dialog open, a later dismissal still restores the opener (each dismiss
+ * path clears the confirm flag).
  */
 export function ConfirmDialog({
   open,
@@ -93,6 +96,16 @@ export function ConfirmDialog({
             }
             document.querySelector<HTMLElement>('[data-focus-fallback]')?.focus();
           }}
+          // Dismissals are the true close cause even after a FAILED confirm left the
+          // dialog open (confirmedRef would still be set from the earlier click).
+          // Clearing it here means a later Escape/backdrop restores the surviving
+          // opener rather than jumping to the fallback. (Cancel clears it too, below.)
+          onEscapeKeyDown={() => {
+            confirmedRef.current = false;
+          }}
+          onInteractOutside={() => {
+            confirmedRef.current = false;
+          }}
           className="fixed left-1/2 top-1/2 z-50 w-full max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-md bg-[var(--bg-primary)] p-6 shadow-xl"
         >
           <Dialog.Title className="text-lg font-bold text-[var(--text-primary)]">
@@ -105,6 +118,9 @@ export function ConfirmDialog({
             <Dialog.Close asChild>
               <button
                 type="button"
+                onClick={() => {
+                  confirmedRef.current = false; // Cancel is a dismiss: restore the opener
+                }}
                 className="rounded-[3px] px-4 py-2.5 text-sm font-medium text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] hover:underline"
               >
                 {cancelLabel}

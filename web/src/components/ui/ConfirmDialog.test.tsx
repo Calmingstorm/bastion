@@ -88,6 +88,32 @@ function MenuHarness({ removeTriggerOnConfirm = false }: { removeTriggerOnConfir
   );
 }
 
+// A confirm that FAILS and leaves the dialog open (like a delete whose request
+// rejected). A later dismissal must restore the opener, not the fallback.
+function FailedConfirmHarness() {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  return (
+    <>
+      <div data-focus-fallback tabIndex={-1}>
+        app
+      </div>
+      <button ref={triggerRef}>persistent trigger</button>
+      {!open && <button onClick={() => setOpen(true)}>menu item</button>}
+      <ConfirmDialog
+        open={open}
+        onOpenChange={setOpen}
+        onConfirm={() => {
+          /* deletion failed: dialog stays open */
+        }}
+        title="Delete Category"
+        description="Are you sure you want to delete this? This cannot be undone."
+        returnFocusRef={triggerRef}
+      />
+    </>
+  );
+}
+
 describe('ConfirmDialog', () => {
   it('exposes accessible dialog semantics and content when open', () => {
     render(<Harness />);
@@ -225,5 +251,17 @@ describe('ConfirmDialog', () => {
     expect(trigger).toBeInTheDocument(); // still here (removal would be async in prod)
     expect(document.activeElement).toBe(document.querySelector('[data-focus-fallback]'));
     expect(document.activeElement).not.toBe(trigger);
+  });
+
+  it('a failed confirm that leaves the dialog open, then dismissed, restores the opener', async () => {
+    const user = userEvent.setup();
+    render(<FailedConfirmHarness />);
+    await user.click(screen.getByRole('button', { name: 'menu item' }));
+    await user.click(screen.getByRole('button', { name: 'Delete' })); // confirm fails -> stays open
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    await user.keyboard('{Escape}'); // the real close is a dismiss
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    // The control survived the failed delete, so focus returns to it, not the fallback.
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'persistent trigger' }));
   });
 });
