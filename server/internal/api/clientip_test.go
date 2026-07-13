@@ -110,6 +110,21 @@ func TestResolveClientIP(t *testing.T) {
 			want:    "5.6.7.8",
 		},
 		{
+			name:    "present-but-empty XFF fails closed, ignores X-Real-IP",
+			remote:  "10.0.0.1:5000",
+			xff:     []string{"   "},
+			realIP:  "5.6.7.8",
+			trusted: prefixes("10.0.0.0/8"),
+			want:    "10.0.0.1",
+		},
+		{
+			name:    "duplicate empty XFF fields fail closed",
+			remote:  "10.0.0.1:5000",
+			xff:     []string{"", ""},
+			trusted: prefixes("10.0.0.0/8"),
+			want:    "10.0.0.1",
+		},
+		{
 			name:    "IPv6 client through trusted IPv6 proxy",
 			remote:  "[2001:db8::1]:5000",
 			xff:     []string{"2606:4700::1"},
@@ -142,6 +157,17 @@ func TestResolveClientIP(t *testing.T) {
 				t.Fatalf("resolveClientIP = %s, want %s", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestResolveClientIPAmbiguousRealIP: multiple X-Real-IP header lines are
+// ambiguous and must fail closed to the peer rather than trust either.
+func TestResolveClientIPAmbiguousRealIP(t *testing.T) {
+	r := &http.Request{RemoteAddr: "10.0.0.1:5000", Header: http.Header{}}
+	r.Header.Add("X-Real-IP", "5.6.7.8")
+	r.Header.Add("X-Real-IP", "9.9.9.9")
+	if got := resolveClientIP(r, prefixes("10.0.0.0/8")); got.String() != "10.0.0.1" {
+		t.Fatalf("ambiguous X-Real-IP: got %s, want 10.0.0.1 (peer)", got)
 	}
 }
 

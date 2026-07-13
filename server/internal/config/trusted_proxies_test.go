@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"net/netip"
+	"testing"
+)
 
 func TestParseTrustedProxies(t *testing.T) {
 	t.Run("empty is nil, no error", func(t *testing.T) {
@@ -33,6 +36,25 @@ func TestParseTrustedProxies(t *testing.T) {
 		// netip.ParsePrefix requires a mask; a bare IP is rejected (fail closed).
 		if _, err := parseTrustedProxies("127.0.0.1"); err == nil {
 			t.Fatal("expected an error for a CIDR without a mask")
+		}
+	})
+
+	t.Run("IPv4-mapped IPv6 prefix normalizes to IPv4 and matches", func(t *testing.T) {
+		got, err := parseTrustedProxies("::ffff:10.0.0.0/104")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("want 1 prefix, got %d", len(got))
+		}
+		if !got[0].Contains(netip.MustParseAddr("10.0.0.5")) {
+			t.Fatalf("normalized prefix %s should contain 10.0.0.5", got[0])
+		}
+	})
+
+	t.Run("IPv4-mapped IPv6 prefix with too-short mask is an error", func(t *testing.T) {
+		if _, err := parseTrustedProxies("::ffff:10.0.0.0/64"); err == nil {
+			t.Fatal("expected an error for an IPv4-mapped prefix shorter than /96")
 		}
 	})
 }

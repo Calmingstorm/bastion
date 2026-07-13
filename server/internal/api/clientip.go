@@ -74,19 +74,25 @@ func resolveClientIP(r *http.Request, trusted []netip.Prefix) netip.Addr {
 		return peer
 	}
 
-	// Join all X-Forwarded-For header lines, so duplicate headers cannot create
-	// ambiguity. X-Forwarded-For takes precedence over X-Real-IP.
+	// X-Forwarded-For takes precedence over X-Real-IP. X-Real-IP is consulted only
+	// when XFF is entirely absent — a present-but-empty XFF is an asserted (but
+	// empty) chain and must fail closed to the peer, not silently fall back.
 	xffLines := r.Header.Values("X-Forwarded-For")
-	if len(xffLines) == 0 || strings.TrimSpace(strings.Join(xffLines, "")) == "" {
-		// No XFF: X-Real-IP is a single-address fallback.
-		if xr := strings.TrimSpace(r.Header.Get("X-Real-IP")); xr != "" {
-			if a, err := netip.ParseAddr(xr); err == nil {
+	if len(xffLines) == 0 {
+		// No XFF at all: X-Real-IP is a single-address fallback, accepted only when
+		// unambiguous (exactly one header line). Absent/ambiguous/malformed fails
+		// closed to the peer.
+		realIP := r.Header.Values("X-Real-IP")
+		if len(realIP) == 1 {
+			if a, err := netip.ParseAddr(strings.TrimSpace(realIP[0])); err == nil {
 				return a.Unmap()
 			}
 		}
 		return peer
 	}
 
+	// XFF is present. Join all header lines so duplicates cannot create ambiguity,
+	// then walk right-to-left; empty or malformed entries fail closed to the peer.
 	entries := strings.Split(strings.Join(xffLines, ","), ",")
 	for i := len(entries) - 1; i >= 0; i-- {
 		s := strings.TrimSpace(entries[i])
