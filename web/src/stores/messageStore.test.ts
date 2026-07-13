@@ -366,4 +366,58 @@ describe('messageStore.fetchMessages', () => {
     expect(useMessageStore.getState().error).toBeNull(); // no stale error written
     expect(useMessageStore.getState().isLoading.c1).toBeFalsy();
   });
+
+  // --- A partial content edit must not erase other dimensions --------------
+
+  function withReaction(id: string, createdAt: string, content: string, emoji: string, user: string): Message {
+    return { ...msg(id, createdAt, content), reactions: [{ emoji, count: 1, users: [user] }] } as Message;
+  }
+
+  it('a live content update preserves the loaded reactions', () => {
+    useMessageStore.setState({ messages: { c1: [withReaction('m1', tISO(1), 'old', '👍', 'u2')] } });
+    useMessageStore.getState().updateMessage('c1', msg('m1', tISO(1), 'edited')); // partial MESSAGE_UPDATE
+    const m = useMessageStore.getState().messages.c1[0];
+    expect(m.content).toBe('edited');
+    expect(reactionUsers('m1', '👍')).toEqual(['u2']); // reaction not erased by the partial edit
+  });
+
+  it('a content update during a resync preserves reactions from the fetched baseline', async () => {
+    const baseline = withReaction('m1', tISO(1), 'old', '👍', 'u2');
+    useMessageStore.setState({ messages: { c1: [baseline] }, hasMore: { c1: false } });
+    vi.mocked(client.apiGetMessages).mockImplementation(async () => {
+      useMessageStore.getState().updateMessage('c1', msg('m1', tISO(1), 'edited')); // partial edit during fetch
+      return [baseline]; // fetched baseline still carries the reaction
+    });
+    await useMessageStore.getState().fetchMessages('c1', undefined, true);
+    const m = useMessageStore.getState().messages.c1[0];
+    expect(m.content).toBe('edited'); // realtime edit applied
+    expect(reactionUsers('m1', '👍')).toEqual(['u2']); // reaction preserved from the baseline
+  });
+
+  // --- Obsolete pagination failure must not clobber fresh state ------------
+
+  it('an obsolete pagination failure does not surface a stale error', async () => {
+    useMessageStore.setState({ messages: { c1: block('old', LIMIT, 50) }, hasMore: { c1: true } });
+    const p = deferred<Message[]>();
+    vi.mocked(client.apiGetMessages)
+      .mockImplementationOnce(() => p.promise) // pagination (older page), held
+      .mockResolvedValueOnce(desc(block('n', LIMIT, 200))); // resync: full, no overlap -> gap
+
+    const pDone = useMessageStore.getState().fetchMessages('c1', 'old0'); // pagination starts (epoch 0)
+    await useMessageStore.getState().fetchMessages('c1', undefined, true); // gap reset -> epoch advances
+    p.reject(new Error('network')); // the now-obsolete pagination fails
+    await pDone;
+
+    expect(useMessageStore.getState().error).toBeNull(); // no stale error over the fresh state
+    expect(ids()).toContain('n0');
+  });
+
+  // --- Reaction patches per message are bounded ---------------------------
+
+  it('per-message reaction patches stay bounded under churn', () => {
+    useMessageStore.setState({ messages: { c1: [msg('m1', tISO(1))] } });
+    for (let i = 0; i < 200; i++) useMessageStore.getState().addReaction('c1', 'm1', '👍', `u${i}`);
+    const patches = useMessageStore.getState().journal['m1']?.reactions.length ?? 0;
+    expect(patches).toBeLessThanOrEqual(1); // compacted -- not one-per-reaction
+  });
 });

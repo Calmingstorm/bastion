@@ -103,13 +103,24 @@ function applyReaction(m: Message, emoji: string, userId: string, op: 'add' | 'r
   return { ...m, reactions };
 }
 
+// A MESSAGE_UPDATE (edit) carries only content-bearing fields (content, editedAt,
+// embeds) -- the server's edit payload omits reactions, reply metadata, and
+// attachments. Merge just those fields onto a baseline so a partial edit never
+// erases the reactions/reply/attachments the baseline already holds.
+function mergeEditFields(base: Message, update: Message): Message {
+  return { ...base, content: update.content, editedAt: update.editedAt, embeds: update.embeds };
+}
+
 // Reconstruct the authoritative view of a message at fetch-start version startVer:
 // content from the newest source (a realtime content op after start, else the
 // fetched baseline), then every realtime reaction patch since start layered on.
 // Returns null if the message was deleted after start (and not recreated).
 function reconcile(entry: JournalEntry, fetched: Message, startVer: number): Message | null {
   if (entry.deletedVer > startVer && entry.deletedVer > entry.contentVer) return null;
-  let content = entry.contentVer > startVer && entry.content ? entry.content : fetched;
+  // A realtime content op newer than the fetch overrides only its content-bearing
+  // fields; reactions/reply/attachments stay from the fetched baseline. Then layer
+  // on realtime reaction patches recorded after the fetch started.
+  let content = entry.contentVer > startVer && entry.content ? mergeEditFields(fetched, entry.content) : fetched;
   for (const p of entry.reactions) {
     if (p.ver > startVer) content = applyReaction(content, p.emoji, p.userId, p.op);
   }
@@ -159,7 +170,8 @@ function recordUpsert(
     contentVer: journalVer,
     content: message,
     deletedVer: 0,
-    reactions: prev?.reactions || [],
+    // Keep only patches an in-flight fetch could still need (see recordReaction).
+    reactions: (prev?.reactions || []).filter((p) => p.ver > protectFloor),
   };
   return pruneJournal({ ...journal, [id]: next }, protectFloor);
 }
@@ -192,13 +204,21 @@ function recordReaction(
   // A reaction to an already-deleted message is meaningless -- keep the tombstone.
   if (prev && prev.deletedVer > prev.contentVer) return journal;
   journalVer += 1;
+  // Compact the patch list: a patch with ver <= protectFloor is older than every
+  // in-flight fetch's start, so no active fetch will replay it (it is already in
+  // their fetched baselines) -- drop it. This bounds one entry's patch list to the
+  // active-fetch window, so reaction churn can't grow it without bound (with no
+  // active fetch, protectFloor is Infinity and the list collapses entirely).
+  const kept = (prev?.reactions || []).filter((p) => p.ver > protectFloor);
+  const nextPatch: ReactionPatch = { ver: journalVer, emoji, userId, op };
+  const reactions = journalVer > protectFloor ? [...kept, nextPatch] : kept;
   const next: JournalEntry = {
     ver: journalVer,
     ts: nowMs(),
     contentVer: prev?.contentVer ?? 0,
     content: prev?.content,
     deletedVer: prev?.deletedVer ?? 0,
-    reactions: [...(prev?.reactions || []), { ver: journalVer, emoji, userId, op }],
+    reactions,
   };
   return pruneJournal({ ...journal, [id]: next }, protectFloor);
 }
@@ -352,9 +372,12 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       // A request begun before a reset must not write into the new session.
       if (sessionEpoch === startSession) {
         set((s) => {
-          // Superseded by a later-started base fetch -> clear own loading but do not
-          // surface a stale error.
-          const superseded = isBase && mySeq < (s.maxStartedBaseSeq[channelId] ?? mySeq);
+          // Obsolete requests clear their own loading but must not surface a stale
+          // error over the fresh state: a base fetch superseded by a later-started
+          // one, or a pagination whose window was replaced/gapped since it started.
+          const superseded = isBase
+            ? mySeq < (s.maxStartedBaseSeq[channelId] ?? mySeq)
+            : (s.windowEpoch[channelId] ?? 0) !== startEpoch;
           return {
             ...(merge ? {} : { isLoading: { ...s.isLoading, [channelId]: false } }),
             ...(superseded ? {} : { error: message }),
@@ -424,8 +447,10 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       const existing = state.messages[channelId];
       return {
         journal: recordUpsert(state.journal, message.id, message, protectFloorOf(state.activeFetches)),
+        // A live edit is partial (content-only); merge its fields so the loaded
+        // copy keeps its reactions/reply/attachments.
         messages: existing
-          ? { ...state.messages, [channelId]: existing.map((m) => (m.id === message.id ? message : m)) }
+          ? { ...state.messages, [channelId]: existing.map((m) => (m.id === message.id ? mergeEditFields(m, message) : m)) }
           : state.messages,
       };
     });
