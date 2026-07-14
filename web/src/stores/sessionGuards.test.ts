@@ -245,9 +245,13 @@ describe('session-boundary guards', () => {
     expect(useAuthStore.getState().isAuthenticated).toBe(true); // provisional identity in memory
     storage.removeItem('accessToken');
     storage.removeItem('refreshToken');
+    const genBefore = captureSessionGeneration();
     const ownedNoToken = await useAuthStore.getState().loadFromStorage(); // no-token path
     expect(ownedNoToken).toBe(true); // it owned the (no-session) outcome
-    // The owner's outcome is "no session" -- in MEMORY too, not just storage.
+    // The owner ENDS the provisional session -- full logout, not a field clear:
+    // the generation advances (so an in-flight provisional refresh can no longer
+    // restore the old credentials), and memory is unauthenticated.
+    expect(isSessionGenerationCurrent(genBefore)).toBe(false); // identity ended
     expect(useAuthStore.getState().isAuthenticated).toBe(false);
     expect(useAuthStore.getState().user).toBeNull();
     expect(useAuthStore.getState().accessToken).toBeNull();
@@ -257,6 +261,23 @@ describe('session-boundary guards', () => {
     expect(await pOld).toBe(false); // it did not own the outcome
     // ...and it did not commit anything (no logout ran for it).
     expect(vi.mocked(resetAllStores).mock.calls.length).toBe(resetsBefore);
+  });
+
+  // F38 round 14: an OWNING invocation failing unexpectedly must not complete
+  // startup with a provisional identity still authenticated -- it tears down.
+  it('an owning startup failure ends the provisional identity safely', async () => {
+    // Provisional identity from an earlier overlapped validation.
+    useAuthStore.setState({ user: { id: 'u-a' } as never, isAuthenticated: true });
+    const getItemSpy = vi.spyOn(storage, 'getItem').mockImplementationOnce(() => {
+      throw new Error('storage exploded');
+    });
+
+    const owned = await useAuthStore.getState().loadFromStorage();
+
+    expect(owned).toBe(true); // the owner reports its (torn-down) outcome
+    expect(useAuthStore.getState().isAuthenticated).toBe(false); // not left authenticated
+    expect(useAuthStore.getState().user).toBeNull();
+    getItemSpy.mockRestore();
   });
 
   // F38 round 13: loadFromStorage is TOTAL -- it never rejects, because startup

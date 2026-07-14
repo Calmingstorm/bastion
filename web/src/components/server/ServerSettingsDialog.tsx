@@ -476,41 +476,53 @@ function ChannelsTab({ serverId }: { serverId: string }) {
 
 /* ---- Roles ---- */
 
-function RolesTab({ serverId }: { serverId: string }) {
+export function RolesTab({ serverId }: { serverId: string }) {
   const [roles, setRoles] = useState<Role[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [selectedRoleId, setSelectedRoleId] = useState<string | null>(null);
   const [newRoleName, setNewRoleName] = useState('');
   const [isCreating, setIsCreating] = useState(false);
+  // Only the LATEST list fetch owns the list and loading flag (session + recency).
+  const listFetchSeqRef = useRef(0);
 
   useEffect(() => {
+    const generation = captureSessionGeneration();
+    const seq = ++listFetchSeqRef.current;
+    const owns = () => seq === listFetchSeqRef.current && isSessionGenerationCurrent(generation);
     apiGetRoles(serverId)
       .then((r) => {
+        if (!owns()) return;
         const sorted = r.sort((a, b) => b.position - a.position);
         setRoles(sorted);
         if (sorted.length > 0) setSelectedRoleId(sorted[0].id);
       })
       .catch(() => {})
-      .finally(() => setIsLoading(false));
+      .finally(() => {
+        if (owns()) setIsLoading(false);
+      });
   }, [serverId]);
 
   const handleCreate = async () => {
     const name = newRoleName.trim();
     if (!name) return;
     setIsCreating(true);
+    const generation = captureSessionGeneration();
     try {
       const role = await apiCreateRole(serverId, { name });
+      if (!isSessionGenerationCurrent(generation)) return;
       setRoles((prev) => [...prev, role].sort((a, b) => b.position - a.position));
       setSelectedRoleId(role.id);
       setNewRoleName('');
     } catch { /* handled */ } finally {
-      setIsCreating(false);
+      if (isSessionGenerationCurrent(generation)) setIsCreating(false);
     }
   };
 
   const handleDelete = async (roleId: string) => {
+    const generation = captureSessionGeneration();
     try {
       await apiDeleteRole(serverId, roleId);
+      if (!isSessionGenerationCurrent(generation)) return;
       setRoles((prev) => prev.filter((r) => r.id !== roleId));
       if (selectedRoleId === roleId) setSelectedRoleId(roles.find((r) => r.id !== roleId)?.id || null);
     } catch { /* handled */ }
@@ -570,13 +582,17 @@ function RoleEditor({ role, serverId, onUpdate, onDelete }: {
 
   const handleSave = async () => {
     setIsSaving(true);
+    const generation = captureSessionGeneration();
     try {
       const updated = await apiUpdateRole(serverId, role.id, { name: name.trim(), color, permissions: perms });
+      if (!isSessionGenerationCurrent(generation)) return;
       onUpdate(updated);
       setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
+      setTimeout(() => {
+        if (isSessionGenerationCurrent(generation)) setSaved(false);
+      }, 2000);
     } catch { /* handled */ } finally {
-      setIsSaving(false);
+      if (isSessionGenerationCurrent(generation)) setIsSaving(false);
     }
   };
 
@@ -636,7 +652,7 @@ function RoleEditor({ role, serverId, onUpdate, onDelete }: {
 
 /* ---- Members ---- */
 
-function MembersTab({ serverId }: { serverId: string }) {
+export function MembersTab({ serverId }: { serverId: string }) {
   const [members, setMembers] = useState<MemberWithUser[]>([]);
   const [roles, setRoles] = useState<Role[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -647,37 +663,80 @@ function MembersTab({ serverId }: { serverId: string }) {
   const servers = useServerStore((s) => s.servers);
   const server = servers.find((s) => s.id === serverId);
 
+  // Only the LATEST fetch owns the lists and loading flag (session + recency).
+  const listFetchSeqRef = useRef(0);
+
   useEffect(() => {
+    const generation = captureSessionGeneration();
+    const seq = ++listFetchSeqRef.current;
+    const owns = () => seq === listFetchSeqRef.current && isSessionGenerationCurrent(generation);
     Promise.all([apiGetMembers(serverId), apiGetRoles(serverId)])
-      .then(([m, r]) => { setMembers(m); setRoles(r.sort((a, b) => b.position - a.position)); })
+      .then(([m, r]) => {
+        if (!owns()) return;
+        setMembers(m); setRoles(r.sort((a, b) => b.position - a.position));
+      })
       .catch(() => {})
-      .finally(() => setIsLoading(false));
+      .finally(() => {
+        if (owns()) setIsLoading(false);
+      });
   }, [serverId]);
 
   const clearAction = () => { setAction(null); setReason(''); setTimeoutMin(60); setRoleToAssign(''); };
 
+  // Refresh after a mutation, owned by the session AND superseded by any newer list
+  // fetch (it shares the same recency counter as the mount fetch).
   const refreshMembers = async () => {
-    try { setMembers(await apiGetMembers(serverId)); } catch { /* handled */ }
+    const generation = captureSessionGeneration();
+    const seq = ++listFetchSeqRef.current;
+    try {
+      const m = await apiGetMembers(serverId);
+      if (seq === listFetchSeqRef.current && isSessionGenerationCurrent(generation)) setMembers(m);
+    } catch { /* handled */ }
   };
 
   const handleKick = async (userId: string) => {
-    try { await apiKickMember(serverId, userId, reason || undefined); setMembers((p) => p.filter((m) => m.userId !== userId)); clearAction(); } catch { /* handled */ }
+    const generation = captureSessionGeneration();
+    try {
+      await apiKickMember(serverId, userId, reason || undefined);
+      if (!isSessionGenerationCurrent(generation)) return;
+      setMembers((p) => p.filter((m) => m.userId !== userId)); clearAction();
+    } catch { /* handled */ }
   };
 
   const handleBan = async (userId: string) => {
-    try { await apiBanMember(serverId, userId, reason || undefined); setMembers((p) => p.filter((m) => m.userId !== userId)); clearAction(); } catch { /* handled */ }
+    const generation = captureSessionGeneration();
+    try {
+      await apiBanMember(serverId, userId, reason || undefined);
+      if (!isSessionGenerationCurrent(generation)) return;
+      setMembers((p) => p.filter((m) => m.userId !== userId)); clearAction();
+    } catch { /* handled */ }
   };
 
   const handleTimeout = async (userId: string) => {
-    try { await apiTimeoutMember(serverId, userId, timeoutMin * 60, reason || undefined); clearAction(); await refreshMembers(); } catch { /* handled */ }
+    const generation = captureSessionGeneration();
+    try {
+      await apiTimeoutMember(serverId, userId, timeoutMin * 60, reason || undefined);
+      if (!isSessionGenerationCurrent(generation)) return;
+      clearAction(); await refreshMembers();
+    } catch { /* handled */ }
   };
 
   const handleAssignRole = async (userId: string, roleId: string) => {
-    try { await apiAssignRole(serverId, roleId, userId); clearAction(); await refreshMembers(); } catch { /* handled */ }
+    const generation = captureSessionGeneration();
+    try {
+      await apiAssignRole(serverId, roleId, userId);
+      if (!isSessionGenerationCurrent(generation)) return;
+      clearAction(); await refreshMembers();
+    } catch { /* handled */ }
   };
 
   const handleRemoveRole = async (userId: string, roleId: string) => {
-    try { await apiRemoveRole(serverId, roleId, userId); await refreshMembers(); } catch { /* handled */ }
+    const generation = captureSessionGeneration();
+    try {
+      await apiRemoveRole(serverId, roleId, userId);
+      if (!isSessionGenerationCurrent(generation)) return;
+      await refreshMembers();
+    } catch { /* handled */ }
   };
 
   if (isLoading) return <Spinner />;
@@ -789,16 +848,32 @@ function MemberActionBtn({ label, onClick, danger }: { label: string; onClick: (
 
 /* ---- Bans ---- */
 
-function BansTab({ serverId }: { serverId: string }) {
+export function BansTab({ serverId }: { serverId: string }) {
   const [bans, setBans] = useState<ServerBan[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const listFetchSeqRef = useRef(0);
 
   useEffect(() => {
-    apiGetBans(serverId).then(setBans).catch(() => {}).finally(() => setIsLoading(false));
+    const generation = captureSessionGeneration();
+    const seq = ++listFetchSeqRef.current;
+    const owns = () => seq === listFetchSeqRef.current && isSessionGenerationCurrent(generation);
+    apiGetBans(serverId)
+      .then((b) => {
+        if (owns()) setBans(b);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (owns()) setIsLoading(false);
+      });
   }, [serverId]);
 
   const handleUnban = async (userId: string) => {
-    try { await apiUnbanMember(serverId, userId); setBans((p) => p.filter((b) => b.userId !== userId)); } catch { /* handled */ }
+    const generation = captureSessionGeneration();
+    try {
+      await apiUnbanMember(serverId, userId);
+      if (!isSessionGenerationCurrent(generation)) return;
+      setBans((p) => p.filter((b) => b.userId !== userId));
+    } catch { /* handled */ }
   };
 
   if (isLoading) return <Spinner />;
@@ -831,15 +906,27 @@ function BansTab({ serverId }: { serverId: string }) {
 
 /* ---- Audit Log ---- */
 
-function AuditTab({ serverId }: { serverId: string }) {
+export function AuditTab({ serverId }: { serverId: string }) {
   const [entries, setEntries] = useState<AuditLogEntry[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [filterAction, setFilterAction] = useState('');
+  // Recency also orders filter changes: an old filter's slow response must not
+  // overwrite the newer filter's results.
+  const listFetchSeqRef = useRef(0);
 
   useEffect(() => {
     setIsLoading(true);
+    const generation = captureSessionGeneration();
+    const seq = ++listFetchSeqRef.current;
+    const owns = () => seq === listFetchSeqRef.current && isSessionGenerationCurrent(generation);
     apiGetAuditLog(serverId, filterAction ? { action: filterAction } : undefined)
-      .then(setEntries).catch(() => {}).finally(() => setIsLoading(false));
+      .then((e) => {
+        if (owns()) setEntries(e);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (owns()) setIsLoading(false);
+      });
   }, [serverId, filterAction]);
 
   const ACTION_LABELS: Record<string, string> = {

@@ -171,16 +171,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       };
 
       if (!isValidToken(accessToken) || !isValidToken(refreshToken)) {
-        // No session to restore. Clear persistent storage AND -- when this invocation
-        // owns startup -- any provisional in-memory identity an earlier overlapped
-        // validation optimistically published before its (now superseded) fetch.
-        // Without the in-memory clear, the owner reports "no session" while the store
-        // still says isAuthenticated: true with the stale user and tokens.
-        clearTokens();
         if (owns()) {
-          set({ user: null, accessToken: null, refreshToken: null, isAuthenticated: false });
+          // "No session" is an identity END for whatever provisional state exists.
+          // Clearing fields is not enough: without advancing the generation, an
+          // in-flight refresh started under the provisional identity could still
+          // restore the old credentials afterward. logout() invalidates first,
+          // then aborts transport, clears storage AND memory, disconnects the
+          // socket, and resets every per-user store.
+          get().logout();
           return true;
         }
+        // Superseded: the owning invocation decides the outcome; commit nothing.
         return false;
       }
 
@@ -221,8 +222,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         return true;
       }
     } catch {
-      // Unexpected failure: the owner treats it as nothing-to-restore.
-      return owns();
+      // Unexpected failure. An OWNING invocation must not complete startup with a
+      // provisional identity still authenticated -- end it safely; a superseded
+      // failure commits nothing and resolves false.
+      if (owns()) {
+        get().logout();
+        return true;
+      }
+      return false;
     }
   },
 
