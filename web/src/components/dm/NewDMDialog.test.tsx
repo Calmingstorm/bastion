@@ -136,8 +136,10 @@ describe('NewDMDialog session guard', () => {
     expect(screen.queryByText(/al-old/)).toBeNull(); // older discarded
   });
 
-  it('selects the DM and closes the dialog when the session is unchanged', async () => {
+  it('selects the DM, enters DM scope, and closes the dialog when the session is unchanged', async () => {
     const user = userEvent.setup();
+    const { useServerStore } = await import('../../stores/serverStore');
+    useServerStore.setState({ selectedServerId: 's1', selectedChannelId: 'c1' });
     vi.spyOn(client, 'apiCreateDM').mockResolvedValue({ id: 'dm-new' } as DMChannel);
     const onOpenChange = vi.fn();
 
@@ -145,7 +147,12 @@ describe('NewDMDialog session guard', () => {
     await selectAliceAndCreate(user);
 
     await waitFor(() => expect(useDMStore.getState().selectedDMId).toBe('dm-new'));
+    // The dialog ENTERS DM scope: layouts rendering selectedChannelId || selectedDMId
+    // must show the new DM, not the still-selected server channel.
+    expect(useServerStore.getState().selectedServerId).toBeNull();
+    expect(useServerStore.getState().selectedChannelId).toBeNull();
     expect(onOpenChange).toHaveBeenCalledWith(false);
+    useServerStore.getState().reset();
   });
 
   // F38 round 6: the workflow spans more than the create -- a session change during

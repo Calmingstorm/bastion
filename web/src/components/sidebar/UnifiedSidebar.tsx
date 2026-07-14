@@ -12,7 +12,7 @@ import { CreateServerDialog } from '../server/CreateServerDialog';
 import { InviteDialog } from '../server/InviteDialog';
 import { ServerSettingsDialog } from '../server/ServerSettingsDialog';
 import { NewDMDialog } from '../dm/NewDMDialog';
-import { apiGetCategories, apiCreateCategory, apiUpdateCategory, apiDeleteCategory, apiCreateChannel, apiGetChannels } from '../../api/client';
+import { apiGetCategories, apiCreateCategory, apiUpdateCategory, apiDeleteCategory, apiCreateChannel } from '../../api/client';
 import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { usePermissionStore } from '../../stores/permissionStore';
 import { PERMISSIONS } from '../../utils/permissions';
@@ -216,12 +216,11 @@ export function UnifiedSidebar() {
     try {
       await apiCreateChannel(serverId, trimmed, undefined, createChannelInCategory || undefined);
       if (!isSessionGenerationCurrent(generation)) return;
-      const updated = await apiGetChannels(serverId);
+      // Owned read-after-write refresh: the store action claims the lineage at
+      // start and commits only while it still owns it and the server is still
+      // selected -- a realtime commit mid-refresh supersedes it.
+      await useServerStore.getState().refreshChannels(serverId);
       if (!isSessionGenerationCurrent(generation)) return;
-      // Scoped, lineage-claiming write: an old-server refresh settling after a
-      // switch must not replace the new server's channels.
-      useServerStore.getState().setChannelsScoped(serverId,
-        (Array.isArray(updated) ? updated : []).sort((a, b) => a.position - b.position));
       setNewChannelName('');
       setShowCreateChannel(false);
       setCreateChannelInCategory(null);

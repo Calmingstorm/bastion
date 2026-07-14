@@ -46,13 +46,16 @@ export const useDMStore = create<DMState>((set) => ({
     const dm = await apiCreateDM(recipientIds);
     // The DM was created for the OLD account; do not surface it in the new session.
     if (!isSessionGenerationCurrent(generation)) return undefined;
+    // Claim UNCONDITIONALLY: a successful create (even a same-ID reopen) is newer
+    // truth than any in-flight snapshot -- and it settles the loading flag of any
+    // fetch it supersedes.
+    fetchDMsSeq += 1;
     set((state) => {
       const exists = state.dmChannels.some((d) => d.id === dm.id);
       if (!exists) {
-        fetchDMsSeq += 1; // commit supersession: an older fetch snapshot must not erase it
-        return { dmChannels: [dm, ...state.dmChannels] };
+        return { dmChannels: [dm, ...state.dmChannels], isLoading: false };
       }
-      return {};
+      return { isLoading: false };
     });
     return dm;
   },
@@ -79,6 +82,7 @@ export const useDMStore = create<DMState>((set) => ({
       return {
         dmChannels: state.dmChannels.filter((d) => d.id !== channelId),
         selectedDMId: state.selectedDMId === channelId ? null : state.selectedDMId,
+        isLoading: false, // settle the loading of any superseded fetch
       };
     });
   },
@@ -86,10 +90,10 @@ export const useDMStore = create<DMState>((set) => ({
   // Realtime DM_CREATE commits through here: the write claims the list lineage
   // (commit supersession) so an older fetch snapshot settling later cannot erase it.
   addDM: (dm: DMChannel) => {
+    fetchDMsSeq += 1; // claim unconditionally (see createDM)
     set((state) => {
-      if (state.dmChannels.some((d) => d.id === dm.id)) return {};
-      fetchDMsSeq += 1;
-      return { dmChannels: [dm, ...state.dmChannels] };
+      if (state.dmChannels.some((d) => d.id === dm.id)) return { isLoading: false };
+      return { dmChannels: [dm, ...state.dmChannels], isLoading: false };
     });
   },
 

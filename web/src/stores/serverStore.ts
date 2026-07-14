@@ -28,7 +28,8 @@ interface ServerState {
   selectServer: (id: string) => Promise<void>;
   selectChannel: (id: string) => void;
   clearServerSelection: () => void;
-  setChannelsScoped: (serverId: string, channels: Channel[]) => void;
+  setChannelPositions: (serverId: string, positions: { id: string; position: number }[]) => void;
+  refreshChannels: (serverId: string) => Promise<void>;
   createServer: (name: string) => Promise<void>;
   createChannel: (serverId: string, name: string, topic?: string, categoryId?: string) => Promise<void>;
   updateServer: (server: Server) => void;
@@ -154,16 +155,40 @@ export const useServerStore = create<ServerState>((set, get) => ({
   // selectedChannelId || selectedDMId, so the stale channel would shadow the DM.
   clearServerSelection: () => {
     channelScopeSeq += 1;
-    set({ selectedServerId: null, selectedChannelId: null, channels: [] });
+    // The claim supersedes any in-flight channel fetch whose finally can no longer
+    // run -- settle its loading flag here.
+    set({ selectedServerId: null, selectedChannelId: null, channels: [], isLoadingChannels: false });
   },
 
-  // Component write sites (optimistic reorder + its revert, sidebar channel-create
-  // refresh) commit through here: the write claims the channel lineage (commit
-  // supersession) and is scope-checked against the server it was computed for.
-  setChannelsScoped: (serverId: string, channels: Channel[]) => {
+  // Reorder commits are FUNCTIONAL position applies, not wholesale snapshot
+  // replacements: applying a position map to the CURRENT list preserves channels
+  // created (or removed) by realtime events after the reorder was computed --
+  // a snapshot replacement would erase (or resurrect) them. Scope-checked and
+  // lineage-claiming.
+  setChannelPositions: (serverId: string, positions: { id: string; position: number }[]) => {
     if (get().selectedServerId !== serverId) return;
     channelScopeSeq += 1;
-    set({ channels });
+    const posMap = new Map(positions.map((p) => [p.id, p.position]));
+    set((state) => ({
+      channels: state.channels
+        .map((c) => (posMap.has(c.id) ? { ...c, position: posMap.get(c.id)! } : c))
+        .sort((a, b) => a.position - b.position),
+    }));
+  },
+
+  // A read-after-write refresh of the channel list, with full ownership: it is a
+  // FETCH, so it claims the lineage at start and commits only while it still owns
+  // it and the server is still selected -- a realtime commit mid-refresh
+  // supersedes it (momentarily partial rather than wrong).
+  refreshChannels: async (serverId: string) => {
+    const generation = captureSessionGeneration();
+    const seq = ++channelScopeSeq;
+    try {
+      const raw = await apiGetChannels(serverId);
+      if (seq !== channelScopeSeq || !isSessionGenerationCurrent(generation)) return;
+      if (get().selectedServerId !== serverId) return;
+      set({ channels: (Array.isArray(raw) ? raw : []).sort((a, b) => a.position - b.position) });
+    } catch { /* leave current state */ }
   },
 
   // Superseded mutations REJECT (SessionSupersededError) rather than fulfilling: a
@@ -175,8 +200,10 @@ export const useServerStore = create<ServerState>((set, get) => ({
     try {
       const server = await apiCreateServer(name);
       if (!isSessionGenerationCurrent(generation)) throw new SessionSupersededError();
+      serverListSeq += 1; // commit supersession: an older list snapshot must not erase it
       set((state) => ({
         servers: [...state.servers, server],
+        isLoadingServers: false,
       }));
       // Select the newly created server (itself session-guarded)
       await get().selectServer(server.id);
@@ -202,10 +229,12 @@ export const useServerStore = create<ServerState>((set, get) => ({
       // switched servers, the create SUCCEEDED (resolve normally) but it must not
       // be appended to -- or selected within -- the new server's state.
       if (get().selectedServerId !== serverId) return;
+      channelScopeSeq += 1; // commit supersession: an older snapshot must not erase it
       set((state) => ({
         channels: [...state.channels, channel].sort(
           (a, b) => a.position - b.position
         ),
+        isLoadingChannels: false, // this commit assumes any superseded fetch's loading
       }));
       // Select the newly created channel
       set({ selectedChannelId: channel.id });
@@ -219,8 +248,10 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   updateServer: (server: Server) => {
+    serverListSeq += 1; // commit supersession: an older snapshot must not revert it
     set((state) => ({
       servers: state.servers.map((s) => (s.id === server.id ? { ...s, ...server } : s)),
+      isLoadingServers: false,
     }));
   },
 
@@ -247,21 +278,30 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   updateChannel: (channel: Channel) => {
+    // Claim UNCONDITIONALLY: even when the id is not locally present (e.g. the
+    // list was cleared by an in-flight selectServer), this realtime event is
+    // newer truth than that fetch's snapshot -- the snapshot must not commit
+    // stale data over it.
+    channelScopeSeq += 1;
     set((state) => {
-      if (!state.channels.some((c) => c.id === channel.id)) return {};
-      channelScopeSeq += 1; // commit supersession (see addChannel)
+      if (!state.channels.some((c) => c.id === channel.id)) {
+        return { isLoadingChannels: false };
+      }
       return {
         channels: state.channels.map((c) =>
           c.id === channel.id ? { ...c, ...channel } : c
         ),
+        isLoadingChannels: false,
       };
     });
   },
 
   removeChannel: (channelId: string) => {
+    channelScopeSeq += 1; // claim unconditionally (see updateChannel)
     set((state) => {
-      if (!state.channels.some((c) => c.id === channelId)) return {};
-      channelScopeSeq += 1; // commit supersession (see addChannel)
+      if (!state.channels.some((c) => c.id === channelId)) {
+        return { isLoadingChannels: false };
+      }
       const remaining = state.channels.filter((c) => c.id !== channelId);
       const updates: Partial<ServerState> = { channels: remaining, isLoadingChannels: false };
       // Auto-select next channel if the deleted one was selected
@@ -299,6 +339,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   removeServer: (serverId: string) => {
+    serverListSeq += 1; // commit supersession: an older snapshot must not resurrect it
     set((state) => {
       const remaining = state.servers.filter((s) => s.id !== serverId);
       if (state.selectedServerId === serverId) {

@@ -333,12 +333,103 @@ describe('session-boundary guards', () => {
     useDMStore.getState().reset();
   });
 
-  it('setChannelsScoped commits nothing for a server that is no longer selected', async () => {
+  it('setChannelPositions commits nothing for a server that is no longer selected', async () => {
     useServerStore.setState({ servers: [], selectedServerId: 'srv-b', channels: [{ id: 'chan-b', name: 'b', serverId: 'srv-b', position: 0 } as Channel] });
-    useServerStore.getState().setChannelsScoped('srv-a', [
-      { id: 'chan-a', name: 'a', serverId: 'srv-a', position: 0 } as Channel,
-    ]); // an old-server reorder revert / refresh
-    expect(useServerStore.getState().channels.map((c) => c.id)).toEqual(['chan-b']); // untouched
+    useServerStore.getState().setChannelPositions('srv-a', [{ id: 'chan-b', position: 5 }]); // old-server reorder/revert
+    expect(useServerStore.getState().channels[0].position).toBe(0); // untouched
+    useServerStore.getState().reset();
+  });
+
+  it('a reorder commit preserves a channel created by realtime mid-flight', async () => {
+    useServerStore.setState({
+      servers: [], selectedServerId: 'srv-a',
+      channels: [
+        { id: 'c1', name: 'one', serverId: 'srv-a', position: 0 } as Channel,
+        { id: 'c2', name: 'two', serverId: 'srv-a', position: 1 } as Channel,
+      ],
+    });
+    // A realtime channel arrives AFTER the reorder was computed...
+    useServerStore.getState().addChannel({ id: 'c-rt', name: 'rt', serverId: 'srv-a', position: 2 } as Channel);
+    // ...then the (older-snapshot-based) reorder commits functionally.
+    useServerStore.getState().setChannelPositions('srv-a', [
+      { id: 'c2', position: 0 }, { id: 'c1', position: 1 },
+    ]);
+    const ids = useServerStore.getState().channels.map((c) => c.id);
+    expect(ids).toContain('c-rt'); // NOT erased by the reorder
+    expect(ids.slice(0, 2)).toEqual(['c2', 'c1']); // positions applied
+    useServerStore.getState().reset();
+  });
+
+  it('createChannel commit survives an older selectServer snapshot', async () => {
+    useServerStore.setState({ servers: [], selectedServerId: null, channels: [] });
+    const dSnap = deferred<Channel[]>();
+    vi.mocked(client.apiGetChannels).mockReturnValue(dSnap.promise);
+    vi.mocked(client.apiGetMemberPermissions).mockResolvedValue({ permissions: 0 });
+    const pSel = useServerStore.getState().selectServer('srv-a'); // snapshot held
+    vi.mocked(client.apiCreateChannel).mockResolvedValue({ id: 'c-new', name: 'new', serverId: 'srv-a', position: 9 } as Channel);
+    await useServerStore.getState().createChannel('srv-a', 'new'); // commits + claims
+    dSnap.resolve([{ id: 'c-old', name: 'old', serverId: 'srv-a', position: 0 } as Channel]); // pre-create snapshot
+    await pSel;
+    expect(useServerStore.getState().channels.map((c) => c.id)).toContain('c-new'); // not erased
+    useServerStore.getState().reset();
+  });
+
+  it('a realtime remove while the list is cleared still supersedes the in-flight snapshot', async () => {
+    useServerStore.setState({ servers: [], selectedServerId: null, channels: [] });
+    const dSnap = deferred<Channel[]>();
+    vi.mocked(client.apiGetChannels).mockReturnValue(dSnap.promise);
+    vi.mocked(client.apiGetMemberPermissions).mockResolvedValue({ permissions: 0 });
+    const pSel = useServerStore.getState().selectServer('srv-a'); // clears list; snapshot held
+    useServerStore.getState().removeChannel('c-dead'); // realtime delete; id not locally present
+    dSnap.resolve([{ id: 'c-dead', name: 'dead', serverId: 'srv-a', position: 0 } as Channel]); // stale snapshot with it
+    await pSel;
+    expect(useServerStore.getState().channels.map((c) => c.id)).not.toContain('c-dead'); // no stale return
+    expect(useServerStore.getState().isLoadingChannels).toBe(false); // loading settled
+    useServerStore.getState().reset();
+  });
+
+  it('entering DM scope settles a superseded channel fetch loading flag', async () => {
+    useServerStore.setState({ servers: [], selectedServerId: null, channels: [] });
+    vi.mocked(client.apiGetChannels).mockReturnValue(new Promise(() => {})); // held forever
+    vi.mocked(client.apiGetMemberPermissions).mockResolvedValue({ permissions: 0 });
+    void useServerStore.getState().selectServer('srv-a'); // loading true, fetch held
+    expect(useServerStore.getState().isLoadingChannels).toBe(true);
+    useServerStore.getState().clearServerSelection();
+    expect(useServerStore.getState().isLoadingChannels).toBe(false); // not stranded
+    useServerStore.getState().reset();
+  });
+
+  it('a DM commit settles a superseded DM fetch loading flag', async () => {
+    useDMStore.setState({ dmChannels: [], isLoading: false });
+    vi.mocked(client.apiGetDMs).mockReturnValue(new Promise(() => {})); // held forever
+    void useDMStore.getState().fetchDMs();
+    expect(useDMStore.getState().isLoading).toBe(true);
+    useDMStore.getState().addDM({ id: 'dm-rt2' } as DMChannel); // realtime commit supersedes
+    expect(useDMStore.getState().isLoading).toBe(false); // settled by the commit
+    useDMStore.getState().reset();
+  });
+
+  it('a same-ID DM commit still supersedes an older snapshot', async () => {
+    useDMStore.setState({ dmChannels: [{ id: 'dm-x2' } as DMChannel] });
+    const dFetch = deferred<DMChannel[]>();
+    vi.mocked(client.apiGetDMs).mockReturnValue(dFetch.promise);
+    const pFetch = useDMStore.getState().fetchDMs(); // held
+    useDMStore.getState().addDM({ id: 'dm-x2' } as DMChannel); // same-ID (not locally novel)
+    dFetch.resolve([]); // stale empty snapshot
+    await pFetch;
+    expect(useDMStore.getState().dmChannels.map((d2) => d2.id)).toContain('dm-x2'); // not replaced
+    useDMStore.getState().reset();
+  });
+
+  it('a removed server is not resurrected by an older fetchServers snapshot', async () => {
+    useServerStore.setState({ servers: [{ id: 'srv-x', name: 'X', ownerId: 'u1' } as Server], selectedServerId: 'srv-x', channels: [] });
+    const dList = deferred<Server[]>();
+    vi.mocked(client.apiGetServers).mockReturnValue(dList.promise);
+    const pList = useServerStore.getState().fetchServers(); // pre-removal snapshot held
+    useServerStore.getState().removeServer('srv-x'); // commits + claims
+    dList.resolve([{ id: 'srv-x', name: 'X', ownerId: 'u1' } as Server]); // stale snapshot with it
+    await pList;
+    expect(useServerStore.getState().servers.map((sv) => sv.id)).not.toContain('srv-x');
     useServerStore.getState().reset();
   });
 

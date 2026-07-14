@@ -124,23 +124,24 @@ export function ChannelList() {
     const newIndex = channels.findIndex((c) => c.id === over.id);
     if (oldIndex === -1 || newIndex === -1) return;
 
-    // Optimistic reorder in store -- a scoped, lineage-claiming write.
+    // Optimistic reorder as a FUNCTIONAL position apply (scoped + lineage
+    // claiming): applying positions to the CURRENT list preserves channels
+    // created/removed by realtime events after this reorder was computed.
     const reordered = [...channels];
     const [moved] = reordered.splice(oldIndex, 1);
     reordered.splice(newIndex, 0, moved);
-    useServerStore.getState().setChannelsScoped(selectedServerId, reordered);
-
-    // Persist to backend
     const positions = reordered.map((c, i) => ({ id: c.id, position: i }));
+    useServerStore.getState().setChannelPositions(selectedServerId, positions);
+
+    const revertPositions = channels.map((c) => ({ id: c.id, position: c.position }));
     const generation = captureSessionGeneration();
     try {
       await apiReorderChannels(selectedServerId, positions);
     } catch {
-      // Revert on failure -- but never into a different session OR server scope: a
-      // late failure after a switch must not restore the OLD server's channel list
-      // over the new one. setChannelsScoped enforces the scope check.
+      // Revert on failure -- functionally, and never into a different session or
+      // server scope (setChannelPositions enforces the scope check).
       if (isSessionGenerationCurrent(generation)) {
-        useServerStore.getState().setChannelsScoped(selectedServerId, channels);
+        useServerStore.getState().setChannelPositions(selectedServerId, revertPositions);
       }
     }
   }, [channels, selectedServerId]);

@@ -3,6 +3,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { apiSearchUsers } from '../../api/client';
 import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { useDMStore } from '../../stores/dmStore';
+import { useServerStore } from '../../stores/serverStore';
 import { resolveMediaUrl } from '../../platform';
 import type { MessageAuthor } from '../../types';
 
@@ -96,6 +97,10 @@ export function NewDMDialog({ open, onOpenChange }: NewDMDialogProps) {
       if (!dm || !isSessionGenerationCurrent(generation)) return;
       await fetchDMs();
       if (!isSessionGenerationCurrent(generation)) return;
+      // Enter DM scope: without clearing the server selection, layouts that render
+      // selectedChannelId || selectedDMId keep showing the server channel instead
+      // of the newly created DM (and a held selectServer could shadow it).
+      useServerStore.getState().clearServerSelection();
       selectDM(dm.id);
       onOpenChange(false);
     } catch {
