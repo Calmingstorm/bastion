@@ -257,7 +257,95 @@ describe('WebhooksTab', () => {
   });
 });
 
+describe('WebhooksTab list ownership', () => {
+  // F38 round 12: a held old-session list response must not populate the
+  // still-mounted integration UI after an identity boundary.
+  it('a stale list response does not populate the webhook UI', async () => {
+    let resolveList!: (w: Webhook[]) => void;
+    vi.mocked(client.apiGetWebhooks).mockImplementation(
+      () =>
+        new Promise((res) => {
+          resolveList = res as (w: Webhook[]) => void;
+        })
+    );
+    const { container } = render(<WebhooksTab serverId="s1" />); // fetch in flight (held)
+
+    await act(async () => {
+      invalidateSession(); // a new account logs in
+      resolveList([webhook({ id: 'w1', tokenHint: 'oldhint1' })]);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // The old session's response neither renders rows nor completes loading --
+    // the stale component stays in its in-flight state.
+    expect(screen.queryByText(/oldhint1/)).toBeNull(); // old rows never shown
+    expect(container.querySelector('.animate-spin')).not.toBeNull(); // not "loaded"
+  });
+});
+
 describe('IntegrationsTab (bots) session ownership', () => {
+  // F38 round 12: same list ownership as webhooks.
+  it('a stale bot list response does not populate the UI', async () => {
+    let resolveList!: (b: unknown[]) => void;
+    vi.mocked(client.apiGetBots).mockImplementation(
+      () =>
+        new Promise((res) => {
+          resolveList = res;
+        }) as never
+    );
+    const { container } = render(<IntegrationsTab serverId="s1" />);
+
+    await act(async () => {
+      invalidateSession();
+      resolveList([{ id: 'b1', username: 'oldbot', tokenHint: 'oldhint2', createdAt: '2026-01-01T00:00:00Z' }]);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(screen.queryByText(/oldbot/)).toBeNull();
+    expect(container.querySelector('.animate-spin')).not.toBeNull(); // not "loaded"
+  });
+
+  // F38 round 12: rotations are recency-ordered within a session -- each rotation
+  // invalidates the previous token server-side, so when two settle out of order
+  // the OLDER (already-dead) token must not end up displayed.
+  it('an older rotation settling last does not overwrite the newer token', async () => {
+    vi.mocked(client.apiGetBots).mockResolvedValue([
+      { id: 'b1', username: 'helper', tokenHint: 'oken1234', createdAt: '2026-01-01T00:00:00Z' } as never,
+    ]);
+    let resolveFirst!: (v: { token: string }) => void;
+    let resolveSecond!: (v: { token: string }) => void;
+    vi.mocked(client.apiRegenerateBotToken)
+      .mockImplementationOnce(
+        () =>
+          new Promise((res) => {
+            resolveFirst = res as (v: { token: string }) => void;
+          })
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((res) => {
+            resolveSecond = res as (v: { token: string }) => void;
+          })
+      );
+    render(<IntegrationsTab serverId="s1" />);
+    await screen.findByText(/helper/);
+
+    await userEvent.click(screen.getByRole('button', { name: /Regenerate/ })); // rotation 1 (held)
+    await userEvent.click(screen.getByRole('button', { name: /Regenerate/ })); // rotation 2 (held)
+
+    await act(async () => {
+      resolveSecond({ token: 'bot_token_newest' }); // NEWER settles first
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await act(async () => {
+      resolveFirst({ token: 'bot_token_older' }); // OLDER (already invalidated) settles last
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(screen.getByText(/bot_token_newest/)).toBeInTheDocument(); // latest shown
+    expect(screen.queryByText(/bot_token_older/)).toBeNull(); // dead token never shown
+  });
+
   // F38 round 11: bot creation returns a one-time plaintext token shown in a modal
   // -- the same secret-publishing hazard as webhook rotation.
   it('a bot create resolving after a session change does not show the token modal', async () => {

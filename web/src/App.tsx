@@ -60,9 +60,15 @@ export default function App() {
   const [isInitialized, setIsInitialized] = useState(false);
 
   useEffect(() => {
-    loadFromStorage().finally(() => {
-      setIsInitialized(true);
-    });
+    // Only the invocation that OWNED the validation outcome completes startup.
+    // Under StrictMode's double effect, the first (superseded) call settles while
+    // the second is still validating -- flipping isInitialized on ANY settle would
+    // mount protected routing before the owning validation resolves.
+    loadFromStorage()
+      .then((owned) => {
+        if (owned) setIsInitialized(true);
+      })
+      .catch(() => setIsInitialized(true)); // never hang startup on an unexpected throw
   }, [loadFromStorage]);
 
   if (!isInitialized) {

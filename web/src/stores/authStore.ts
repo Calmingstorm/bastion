@@ -33,7 +33,12 @@ interface AuthState {
   ) => Promise<void>;
   logout: () => void;
   setTokens: (access: string, refresh: string) => void;
-  loadFromStorage: () => Promise<void>;
+  /**
+   * Restore and validate the stored session. Resolves true only when THIS
+   * invocation owned the outcome (it was the latest, in the same session) --
+   * a superseded call resolves false so startup gating waits for the owner.
+   */
+  loadFromStorage: () => Promise<boolean>;
   clearError: () => void;
 }
 
@@ -142,6 +147,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   loadFromStorage: async () => {
+    // Claim recency AT ENTRY -- every invocation supersedes all earlier ones,
+    // including the no-token/corrupt-token paths below. If they returned before
+    // claiming, an older HELD validation would still be "latest" and commit later.
+    const seq = ++loadFromStorageSeq;
+    const generation = captureSessionGeneration();
+    const owns = () => seq === loadFromStorageSeq && isSessionGenerationCurrent(generation);
+
     const accessToken = storage.getItem('accessToken');
     const refreshToken = storage.getItem('refreshToken');
     const userStr = storage.getItem('user');
@@ -155,9 +167,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     };
 
     if (!isValidToken(accessToken) || !isValidToken(refreshToken)) {
-      // Corrupted tokens — clear and bail
+      // Corrupted tokens — clear and bail (this invocation owned that outcome)
       clearTokens();
-      return;
+      return owns();
     }
 
     let user: User | null = null;
@@ -180,23 +192,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       isAuthenticated: true,
     });
 
-    // Validate token by fetching current user. Capture the generation AND a
-    // recency sequence: if an identity boundary passes during validation, neither
-    // repopulate the user nor log out -- and when two validations overlap (same
-    // generation), only the latest may commit, so an older failure cannot log out
-    // the session a newer success just validated.
-    const generation = captureSessionGeneration();
-    const seq = ++loadFromStorageSeq;
-    const owns = () => seq === loadFromStorageSeq && isSessionGenerationCurrent(generation);
+    // Validate the token by fetching the current user. If an identity boundary
+    // passes during validation, neither repopulate the user nor log out -- and
+    // when two validations overlap (same generation), only the latest may commit,
+    // so an older failure cannot log out the session a newer success validated.
     try {
       const freshUser = await apiGetMe();
-      if (!owns()) return;
+      if (!owns()) return false;
       storage.setItem('user', JSON.stringify(freshUser));
       set({ user: freshUser });
+      return true;
     } catch {
-      if (!owns()) return; // do not log out a newer session/validation
+      if (!owns()) return false; // do not log out a newer session/validation
       // Token is invalid, clear everything
       get().logout();
+      return true;
     }
   },
 

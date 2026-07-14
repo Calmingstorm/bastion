@@ -35,6 +35,7 @@ import { useDMStore } from './dmStore';
 import { useUnreadStore } from './unreadStore';
 import { usePermissionStore } from './permissionStore';
 import { useCommandStore } from './commandStore';
+import { useToastStore } from './toastStore';
 import { useAuthStore } from './authStore';
 import {
   captureSessionGeneration,
@@ -215,15 +216,61 @@ describe('session-boundary guards', () => {
     expect(useDMStore.getState().error).toBeNull(); // not this session's concern
   });
 
-  it('closeDM records a same-session failure as error state instead of rejecting', async () => {
-    useDMStore.setState({ error: null });
+  it('closeDM surfaces a same-session failure as a toast instead of rejecting', async () => {
+    useToastStore.getState().clear();
     const d = deferred<void>();
     vi.mocked(client.apiCloseDM).mockReturnValue(d.promise);
     const p = useDMStore.getState().closeDM('dm1');
     d.reject(new Error('boom'));
     await expect(p).resolves.toBeUndefined();
-    expect(useDMStore.getState().error).toBe('Failed to close conversation');
-    useDMStore.setState({ error: null });
+    // The app-level ToastContainer renders these; dmStore.error is rendered nowhere.
+    expect(useToastStore.getState().toasts.map((t) => t.message)).toContain(
+      'Failed to close conversation'
+    );
+    useToastStore.getState().clear();
+  });
+
+  // F38 round 12: EVERY loadFromStorage invocation claims recency at entry --
+  // including the no-token path. If it returned before claiming, an older HELD
+  // validation would still be "latest" and could commit (e.g. log out) afterward.
+  it('a no-token loadFromStorage supersedes an older held validation', async () => {
+    storage.setItem('accessToken', 'valid-token-aaaa');
+    storage.setItem('refreshToken', 'valid-token-bbbb');
+    const dOld = deferred<{ id: string; username: string }>();
+    vi.mocked(client.apiGetMe).mockReturnValueOnce(dOld.promise as never);
+
+    const pOld = useAuthStore.getState().loadFromStorage(); // held validation
+    storage.removeItem('accessToken');
+    storage.removeItem('refreshToken');
+    const ownedNoToken = await useAuthStore.getState().loadFromStorage(); // no-token path
+    expect(ownedNoToken).toBe(true); // it owned the (nothing-to-validate) outcome
+
+    dOld.reject(new Error('expired')); // the superseded validation then fails
+    const ownedOld = await pOld;
+    expect(ownedOld).toBe(false); // it did not own the outcome
+    expect(useAuthStore.getState().isAuthenticated).toBe(true); // and did NOT log out
+    useAuthStore.setState({ user: null, isAuthenticated: false });
+  });
+
+  // F38 round 12: startup gating consumes the owned-boolean -- a superseded call
+  // resolves false so App does not mount protected routing on ITS settle.
+  it('a superseded loadFromStorage resolves false; the owning one resolves true', async () => {
+    storage.setItem('accessToken', 'valid-token-aaaa');
+    storage.setItem('refreshToken', 'valid-token-bbbb');
+    const dOld = deferred<{ id: string; username: string }>();
+    const dNew = deferred<{ id: string; username: string }>();
+    vi.mocked(client.apiGetMe)
+      .mockReturnValueOnce(dOld.promise as never)
+      .mockReturnValueOnce(dNew.promise as never);
+
+    const pOld = useAuthStore.getState().loadFromStorage();
+    const pNew = useAuthStore.getState().loadFromStorage();
+    dOld.resolve({ id: 'u1', username: 'alice' }); // the OLDER settles first
+    expect(await pOld).toBe(false); // superseded: must not complete startup
+    dNew.resolve({ id: 'u1', username: 'alice' });
+    expect(await pNew).toBe(true); // the owner completes startup
+    useAuthStore.setState({ user: null, isAuthenticated: false });
+    storage.removeItem('accessToken'); storage.removeItem('refreshToken'); storage.removeItem('user');
   });
 
   // F38 round 9: login must TEAR DOWN the superseded identity at entry -- clear the

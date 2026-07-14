@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { DMChannel } from '../types';
 import { apiGetDMs, apiCreateDM, apiCloseDM } from '../api/client';
 import { captureSessionGeneration, isSessionGenerationCurrent } from '../api/session';
+import { useToastStore } from './toastStore';
 
 interface DMState {
   dmChannels: DMChannel[];
@@ -57,10 +58,10 @@ export const useDMStore = create<DMState>((set) => ({
       // Every caller is fire-and-forget, so this action must be TOTAL -- it never
       // rejects. Logout aborts the in-flight request (a rejection that would
       // otherwise surface as an unhandled rejection mid-teardown); swallow it when
-      // the session has ended, and record a same-session failure as store error
-      // state instead of throwing at nobody.
+      // the session has ended, and surface a same-session failure as a toast (the
+      // app-level ToastContainer renders it -- nothing renders dmStore.error).
       if (!isSessionGenerationCurrent(generation)) return;
-      set({ error: 'Failed to close conversation' });
+      useToastStore.getState().addToast('Failed to close conversation');
       return;
     }
     // Deliberately a silent return (not a SessionSupersededError like the server

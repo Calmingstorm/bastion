@@ -905,16 +905,25 @@ export function WebhooksTab({ serverId }: { serverId: string }) {
   // The webhook whose plaintext token was just revealed (create/regenerate). The
   // token is only available here, once — persisted rows only have a hint.
   const [revealed, setRevealed] = useState<Webhook | null>(null);
+  // Only the LATEST list fetch owns the lists and loading flag -- a held
+  // old-session (or old-server) response must not populate this UI late.
+  const listFetchSeqRef = useRef(0);
 
   useEffect(() => {
+    const generation = captureSessionGeneration();
+    const seq = ++listFetchSeqRef.current;
+    const owns = () => seq === listFetchSeqRef.current && isSessionGenerationCurrent(generation);
     Promise.all([apiGetWebhooks(serverId), apiGetChannels(serverId)])
       .then(([wh, ch]) => {
+        if (!owns()) return;
         setWebhooks(wh.map(toWebhookSummary));
         setChannels(ch.sort((a, b) => a.position - b.position));
         if (ch.length > 0 && !newChannelId) setNewChannelId(ch[0].id);
       })
       .catch(() => {})
-      .finally(() => setIsLoading(false));
+      .finally(() => {
+        if (owns()) setIsLoading(false);
+      });
   }, [serverId]);
 
   const handleCreate = async () => {
@@ -1094,12 +1103,25 @@ export function IntegrationsTab({ serverId }: { serverId: string }) {
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [tokenModal, setTokenModal] = useState<{ token: string; botName: string } | null>(null);
   const [tokenCopied, setTokenCopied] = useState(false);
+  // Only the LATEST list fetch owns the list and loading flag (see WebhooksTab).
+  const listFetchSeqRef = useRef(0);
+  // Only the LATEST rotation may present its one-time token: two concurrent
+  // rotations can settle newest-first, and the older token -- already invalidated
+  // server-side by the newer rotation -- must not end up displayed.
+  const regenSeqRef = useRef(0);
 
   useEffect(() => {
+    const generation = captureSessionGeneration();
+    const seq = ++listFetchSeqRef.current;
+    const owns = () => seq === listFetchSeqRef.current && isSessionGenerationCurrent(generation);
     apiGetBots(serverId)
-      .then(setBots)
+      .then((fetched) => {
+        if (owns()) setBots(fetched);
+      })
       .catch(() => {})
-      .finally(() => setIsLoading(false));
+      .finally(() => {
+        if (owns()) setIsLoading(false);
+      });
   }, [serverId]);
 
   const handleCreate = async () => {
@@ -1138,11 +1160,14 @@ export function IntegrationsTab({ serverId }: { serverId: string }) {
 
   const handleRegenerate = async (botId: string, botName: string) => {
     // Same secret-publishing hazard as webhook rotation: a held regeneration must
-    // not reveal the old session's token after the boundary.
+    // not reveal the old session's token after the boundary. And rotations must be
+    // recency-ordered within a session: each new rotation invalidates the previous
+    // token server-side, so only the LATEST settlement may be displayed.
     const generation = captureSessionGeneration();
+    const seq = ++regenSeqRef.current;
     try {
       const { token } = await apiRegenerateBotToken(serverId, botId);
-      if (!isSessionGenerationCurrent(generation)) return;
+      if (seq !== regenSeqRef.current || !isSessionGenerationCurrent(generation)) return;
       setTokenModal({ token, botName });
     } catch { /* handled */ }
   };
