@@ -138,4 +138,96 @@ describe('session invalidation', () => {
     expect(onFail).not.toHaveBeenCalled();
     postSpy.mockRestore();
   });
+
+  // F38 round 3: a request issued under an ended session that 401s must NOT trigger a
+  // refresh/retry -- that would reuse the new account's credentials for the old request.
+  it('a stale request that 401s after the session ended is not refreshed or retried', async () => {
+    storage.setItem('accessToken', 'tok');
+    storage.setItem('refreshToken', 'ref');
+    const postSpy = vi.spyOn(axios, 'post').mockRejectedValue(new Error('should not refresh'));
+
+    let release401!: () => void;
+    let adapterRan!: () => void;
+    const adapterCalled = new Promise<void>((r) => {
+      adapterRan = r;
+    });
+    apiClient.defaults.adapter = ((config) =>
+      new Promise<AxiosResponse>((_res, reject) => {
+          adapterRan();
+          release401 = () => {
+            const err = new Error('Unauthorized') as Error & Record<string, unknown>;
+            err.config = config;
+            err.response = { status: 401, data: {} };
+            err.isAxiosError = true;
+            reject(err);
+          };
+        })) as AxiosAdapter;
+
+    const req = apiClient.get('/x'); // tagged with the current generation at send time
+    await adapterCalled;
+    invalidateSession(); // the session ends while the request is in flight
+    release401(); // now its 401 comes back
+    await expect(req).rejects.toBeTruthy();
+
+    expect(postSpy).not.toHaveBeenCalled(); // stale request must not have refreshed
+    postSpy.mockRestore();
+  });
+
+  // F38 round 3: a current-session request must not queue behind a refresh that
+  // belongs to an ended session and inherit its rejection; it starts its own.
+  it('a current-session request does not inherit a stale in-flight refresh rejection', async () => {
+    storage.setItem('accessToken', 'a-access');
+    storage.setItem('refreshToken', 'a-refresh');
+
+    // First refresh (account A) is held; a later one (account B) succeeds.
+    let rejectRefreshA!: (e: unknown) => void;
+    let refreshACalled!: () => void;
+    const refreshAInFlight = new Promise<void>((r) => {
+      refreshACalled = r;
+    });
+    const postSpy = vi
+      .spyOn(axios, 'post')
+      .mockImplementationOnce(
+        () =>
+          new Promise((_res, rej) => {
+            refreshACalled();
+            rejectRefreshA = rej;
+          })
+      )
+      .mockResolvedValueOnce({ data: { accessToken: 'b-access' } } as never);
+
+    // The adapter 401s the first time /b is seen, then succeeds on its retry.
+    const seen = new Set<string>();
+    const adapter = (async (config): Promise<AxiosResponse> => {
+      if (config.url === '/b' && seen.has('b')) {
+        return { data: { ok: true }, status: 200, statusText: 'OK', headers: {}, config } as AxiosResponse;
+      }
+      if (config.url === '/b') seen.add('b');
+      const err = new Error('Unauthorized') as Error & Record<string, unknown>;
+      err.config = config;
+      err.response = { status: 401, data: {} };
+      err.isAxiosError = true;
+      throw err;
+    }) as AxiosAdapter;
+    apiClient.defaults.adapter = adapter;
+
+    const reqA = apiClient.get('/a'); // account A: 401 -> starts refresh A (held)
+    await refreshAInFlight;
+
+    invalidateSession(); // account B logs in
+    storage.setItem('accessToken', 'b-access');
+    storage.setItem('refreshToken', 'b-refresh');
+
+    // Account B's request 401s: it must reset the stale refresh A and start its own.
+    let reqB: AxiosResponse | undefined;
+    await act(async () => {
+      reqB = await apiClient.get('/b');
+    });
+    expect((reqB?.data as { ok: boolean }).ok).toBe(true); // B succeeded on its own refresh
+
+    // Clean up the still-held refresh A.
+    rejectRefreshA(new Error('A refresh failed'));
+    await expect(reqA).rejects.toBeTruthy();
+    postSpy.mockRestore();
+  });
 });

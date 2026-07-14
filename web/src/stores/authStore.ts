@@ -12,6 +12,7 @@ import {
   invalidateSession,
   captureSessionGeneration,
   isSessionGenerationCurrent,
+  SessionSupersededError,
 } from '../api/session';
 import { extractErrorMessage } from '../utils/errors';
 import { storage } from '../utils/storage';
@@ -53,7 +54,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const generation = captureSessionGeneration();
     try {
       const response = await apiLogin(email, password);
-      if (!isSessionGenerationCurrent(generation)) return; // superseded -> do not resurrect
+      // Superseded by a newer boundary: reject (do NOT resolve as success, or the
+      // form would navigate to /app) and do not surface a login error.
+      if (!isSessionGenerationCurrent(generation)) throw new SessionSupersededError();
       persistTokens(response.accessToken, response.refreshToken);
       storage.setItem('user', JSON.stringify(response.user));
       set({
@@ -65,7 +68,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         error: null,
       });
     } catch (err: unknown) {
-      if (!isSessionGenerationCurrent(generation)) return; // superseded
+      if (err instanceof SessionSupersededError) throw err;
+      if (!isSessionGenerationCurrent(generation)) throw new SessionSupersededError();
       const message = extractErrorMessage(err, 'Login failed. Please check your credentials.');
       set({ isLoading: false, error: message });
       throw new Error(message);
@@ -79,7 +83,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const generation = captureSessionGeneration();
     try {
       const response = await apiRegister(username, email, password);
-      if (!isSessionGenerationCurrent(generation)) return; // superseded -> do not resurrect
+      if (!isSessionGenerationCurrent(generation)) throw new SessionSupersededError();
       persistTokens(response.accessToken, response.refreshToken);
       storage.setItem('user', JSON.stringify(response.user));
       set({
@@ -91,7 +95,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         error: null,
       });
     } catch (err: unknown) {
-      if (!isSessionGenerationCurrent(generation)) return; // superseded
+      if (err instanceof SessionSupersededError) throw err;
+      if (!isSessionGenerationCurrent(generation)) throw new SessionSupersededError();
       const message = extractErrorMessage(err, 'Registration failed. Please try again.');
       set({ isLoading: false, error: message });
       throw new Error(message);
@@ -111,6 +116,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       accessToken: null,
       refreshToken: null,
       isAuthenticated: false,
+      isLoading: false, // a login that was pending when we logged out must not keep spinning
       error: null,
     });
     // Clear every other per-user store so the next user on this session does not
@@ -162,12 +168,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       isAuthenticated: true,
     });
 
-    // Validate token by fetching current user
+    // Validate token by fetching current user. Capture the generation: if an
+    // identity boundary passes during validation, neither repopulate the user nor
+    // log out -- both would clobber whatever session is current now.
+    const generation = captureSessionGeneration();
     try {
       const freshUser = await apiGetMe();
+      if (!isSessionGenerationCurrent(generation)) return;
       storage.setItem('user', JSON.stringify(freshUser));
       set({ user: freshUser });
     } catch {
+      if (!isSessionGenerationCurrent(generation)) return; // do not log out a newer session
       // Token is invalid, clear everything
       get().logout();
     }

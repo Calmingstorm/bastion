@@ -31,3 +31,15 @@ export function isSessionGenerationCurrent(generation_: number): boolean {
 export function invalidateSession(): void {
   generation += 1;
 }
+
+/**
+ * Thrown by an auth operation (login/register) whose result arrived after a newer
+ * identity boundary superseded it. Callers must treat it as "not this session's
+ * concern" -- neither a success (do not navigate) nor a login error to show.
+ */
+export class SessionSupersededError extends Error {
+  constructor() {
+    super('Session superseded by a newer identity');
+    this.name = 'SessionSupersededError';
+  }
+}

@@ -38,7 +38,9 @@ import {
   captureSessionGeneration,
   isSessionGenerationCurrent,
   invalidateSession,
+  SessionSupersededError,
 } from '../api/session';
+import { storage } from '../utils/storage';
 
 function deferred<T>() {
   let resolve!: (v: T) => void;
@@ -166,16 +168,44 @@ describe('session-boundary guards', () => {
     expect(usePermissionStore.getState().permissions).toEqual({});
   });
 
-  it('a login response resolving after a newer identity boundary does not resurrect the session', async () => {
+  it('a login response resolving after a newer identity boundary rejects and does not resurrect the session', async () => {
     useAuthStore.setState({ isAuthenticated: false, user: null });
     const d = deferred<LoginResponse>();
     vi.mocked(client.apiLogin).mockReturnValue(d.promise);
     const p = useAuthStore.getState().login('a@b.c', 'pw'); // invalidates + captures at entry
     invalidateSession(); // a newer boundary (concurrent login / logout) supersedes it
     d.resolve({ user: { id: 'u-old', username: 'old' }, accessToken: 'a', refreshToken: 'r' } as LoginResponse);
-    await p;
-    expect(useAuthStore.getState().isAuthenticated).toBe(false); // stale login did not authenticate
+    // Rejects (not resolves) so the form's await throws and it does NOT navigate to /app.
+    await expect(p).rejects.toBeInstanceOf(SessionSupersededError);
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
     expect(useAuthStore.getState().user).toBeNull();
+  });
+
+  it('loadFromStorage validation resolving after a boundary does not repopulate the user', async () => {
+    storage.setItem('accessToken', 'a'.repeat(20));
+    storage.setItem('refreshToken', 'r'.repeat(20));
+    storage.removeItem('user');
+    const d = deferred<{ id: string; username: string }>();
+    vi.mocked(client.apiGetMe).mockReturnValue(d.promise as never);
+    const p = useAuthStore.getState().loadFromStorage();
+    invalidateSession(); // logout / account replacement during validation
+    d.resolve({ id: 'u-old', username: 'old' });
+    await p;
+    expect(useAuthStore.getState().user).toBeNull(); // stale validation did not repopulate
+  });
+
+  it('loadFromStorage validation failing after a boundary does not log out the newer session', async () => {
+    storage.setItem('accessToken', 'a'.repeat(20));
+    storage.setItem('refreshToken', 'r'.repeat(20));
+    const logoutSpy = vi.spyOn(useAuthStore.getState(), 'logout');
+    const d = deferred<never>();
+    vi.mocked(client.apiGetMe).mockReturnValue(d.promise as never);
+    const p = useAuthStore.getState().loadFromStorage();
+    invalidateSession();
+    d.reject(new Error('invalid token'));
+    await p;
+    expect(logoutSpy).not.toHaveBeenCalled(); // must not clobber a newer session
+    logoutSpy.mockRestore();
   });
 
   it('register advances the session generation at entry (establishes a new identity)', () => {
