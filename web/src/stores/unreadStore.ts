@@ -9,7 +9,7 @@ interface UnreadState {
   unreadChannels: Set<string>;
   fetchReadStates: () => Promise<void>;
   ackChannel: (channelId: string, messageId: string) => Promise<void>;
-  markUnread: (channelId: string, createdAt?: string) => void;
+  markUnread: (channelId: string, mark?: { seq?: number; at?: string }) => void;
   incrementMention: (channelId: string) => void;
   isUnread: (channelId: string) => boolean;
   getMentionCount: (channelId: string) => number;
@@ -47,13 +47,19 @@ const bumpActivity = (channelId: string) =>
 let resetEpoch = 0;
 
 // The unread FLAG must also reconcile with server truth: a DELAYED pre-ack
-// notification (its message predates an ack that already covered it) would
-// otherwise resurrect the flag forever, since fetches never write the flag and
-// only an ack clears it. Both timestamps below are SERVER-minted (a message's
-// createdAt; a read state's lastReadAt from a fetch) -- one clock, comparable.
-// flagRaisedAt records the newest message time that raised each flag; a
-// committed read state whose lastReadAt covers it clears the flag.
-const flagRaisedAt = new Map<string, number>();
+// notification (its message was already covered by an ack) would otherwise
+// resurrect the flag forever, since fetches never write the flag and only an
+// ack clears it.
+//
+// The PRIMARY watermark is the message's server-owned seq compared against the
+// read state's lastReadSeq: one database-assigned total order tied to both the
+// write and the acknowledgment -- no wall clock, nothing a bot can supply, and
+// immune to late delivery (a pre-ack message broadcast late still carries its
+// pre-ack seq). The TIME tier survives only as a fallback for events from
+// servers that predate the seq migration.
+// flagRaised records the newest watermark that raised each flag on both axes;
+// a committed read state covering either axis clears the flag.
+const flagRaised = new Map<string, { seq: number | null; at: number | null }>();
 
 const toMap = (list: ReadState[]) => {
   const map: Record<string, ReadState> = {};
@@ -85,17 +91,26 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
         // lastReadAt at or beyond the message that raised a flag means the user
         // has read it (possibly from another device, possibly an ack this flag's
         // delayed notification predated).
-        // Reconcile the unread FLAG with the committed truth: a server-minted
-        // lastReadAt at or beyond the message that raised a flag means the user
-        // has read it (possibly from another device, possibly an ack this flag's
-        // delayed notification predated).
+        // Reconcile the unread FLAG with the committed truth: a committed read
+        // watermark at or beyond what raised the flag means the user has read
+        // it (possibly from another device, possibly an ack this flag's delayed
+        // notification predated). The seq axis decides when both sides have it;
+        // the time axis only covers fallback-tier raises.
         set((state) => {
           const newUnread = new Set(state.unreadChannels);
           for (const rs of outcome.list) {
-            const raised = flagRaisedAt.get(rs.channelId);
-            if (raised !== undefined && rs.lastReadAt && Date.parse(rs.lastReadAt) >= raised) {
+            const raised = flagRaised.get(rs.channelId);
+            if (!raised) continue;
+            const seqCovered =
+              raised.seq != null && rs.lastReadSeq !== undefined && rs.lastReadSeq >= raised.seq;
+            const atCovered =
+              raised.seq == null &&
+              raised.at != null &&
+              !!rs.lastReadAt &&
+              Date.parse(rs.lastReadAt) >= raised.at;
+            if (seqCovered || atCovered) {
               newUnread.delete(rs.channelId);
-              flagRaisedAt.delete(rs.channelId);
+              flagRaised.delete(rs.channelId);
             }
           }
           return { readStates: toMap(outcome.list), unreadChannels: newUnread };
@@ -122,7 +137,7 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
         // Clear the unread flag only if nothing new arrived during the flight.
         if ((activityEpochs.get(channelId) ?? 0) === epochAtEntry) {
           newUnread.delete(channelId);
-          flagRaisedAt.delete(channelId);
+          flagRaised.delete(channelId);
         }
         // OPTIMISTIC zero, gated on nothing having moved since entry (no new
         // activity, no authoritative rebase): if anything moved, leave the count
@@ -159,18 +174,32 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
   },
 
   // markUnread needs no follow-up fetch (there is no server count to sync), but
-  // it is server-clock aware: a message already covered by the known
-  // server-minted lastReadAt is not unread (its notification was delayed past
-  // the ack that read it), and the raise is recorded so a LATER committed
-  // lastReadAt can retire the flag.
-  markUnread: (channelId: string, createdAt?: string) => {
+  // it is watermark-aware: a message already covered by the read watermark is
+  // not unread (its notification was delayed past the ack that read it), and
+  // the raise is recorded so a LATER committed watermark can retire the flag.
+  markUnread: (channelId: string, mark?: { seq?: number; at?: string }) => {
     bumpActivity(channelId);
-    const raisedAt = createdAt ? Date.parse(createdAt) : NaN;
-    if (!Number.isNaN(raisedAt)) {
-      const lastReadAt = get().readStates[channelId]?.lastReadAt;
-      if (lastReadAt && Date.parse(lastReadAt) >= raisedAt) return; // already read
-      const prev = flagRaisedAt.get(channelId);
-      flagRaisedAt.set(channelId, prev === undefined ? raisedAt : Math.max(prev, raisedAt));
+    const rs = get().readStates[channelId];
+    const seq = mark?.seq;
+    if (seq !== undefined) {
+      // Primary tier: the server-owned sequence.
+      if (rs?.lastReadSeq !== undefined && seq <= rs.lastReadSeq) return; // covered by the ack
+      const prev = flagRaised.get(channelId);
+      flagRaised.set(channelId, {
+        seq: prev?.seq == null ? seq : Math.max(prev.seq, seq),
+        at: prev?.at ?? null,
+      });
+    } else {
+      // Fallback tier (pre-seq servers): server-minted times on one clock.
+      const raisedAt = mark?.at ? Date.parse(mark.at) : NaN;
+      if (!Number.isNaN(raisedAt)) {
+        if (rs?.lastReadAt && Date.parse(rs.lastReadAt) >= raisedAt) return; // already read
+        const prev = flagRaised.get(channelId);
+        flagRaised.set(channelId, {
+          seq: prev?.seq ?? null,
+          at: prev?.at == null ? raisedAt : Math.max(prev.at, raisedAt),
+        });
+      }
     }
     set((state) => {
       const newUnread = new Set(state.unreadChannels);
@@ -215,7 +244,7 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
   reset: () => {
     readStateLineage.reset(); // held fetches must not repopulate; no cross-account leakage
     activityEpochs.clear();
-    flagRaisedAt.clear();
+    flagRaised.clear();
     resetEpoch += 1;
     set({ readStates: {}, unreadChannels: new Set() });
   },

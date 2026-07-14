@@ -503,14 +503,14 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 		`WITH new_msg AS (
 			INSERT INTO messages (channel_id, author_id, content, reply_to_id, embeds, created_at)
 			VALUES ($1, $2, $3, $4, $5, COALESCE($6, NOW()))
-			RETURNING id, channel_id, author_id, content, edited_at, reply_to_id, embeds, created_at
+			RETURNING id, channel_id, author_id, content, edited_at, reply_to_id, embeds, created_at, seq
 		)
-		SELECT m.id, m.channel_id, m.content, m.edited_at, m.reply_to_id, m.created_at,
+		SELECT m.id, m.channel_id, m.content, m.edited_at, m.reply_to_id, m.created_at, m.seq,
 			   u.id, u.username, u.display_name, u.avatar_url, u.is_bot, m.embeds
 		FROM new_msg m
 		INNER JOIN users u ON u.id = m.author_id`,
 		channelID, userID, req.Content, req.ReplyToID, embedsJSON, req.CreatedAt,
-	).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.ReplyToID, &msg.CreatedAt,
+	).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.ReplyToID, &msg.CreatedAt, &msg.Seq,
 		&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL, &author.IsBot, &embedsJSON)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to insert message")
@@ -559,7 +559,7 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 
 	// Process @mentions (only for server channels, not DMs)
 	if serverID != nil {
-		h.processMentions(r, *serverID, channelID, userID, req.Content)
+		h.processMentions(r, *serverID, channelID, userID, req.Content, msg.Seq)
 	}
 
 	writeJSON(w, http.StatusCreated, msg)
@@ -733,7 +733,7 @@ func (h *MessageHandler) Delete(w http.ResponseWriter, r *http.Request) {
 }
 
 // processMentions parses @mentions from message content and sends notifications.
-func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, authorID uuid.UUID, content string) {
+func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, authorID uuid.UUID, content string, msgSeq int64) {
 	matches := mentionRegex.FindAllStringSubmatch(content, -1)
 	if len(matches) == 0 {
 		return
@@ -833,10 +833,12 @@ func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, a
 				"senderName":   senderName,
 				"channelName":  channelName,
 				"content":      snippet,
-				// The notification's own EMISSION time -- deliberately not the
-				// message's createdAt, which bots may backdate: unread
-				// reconciliation compares this against lastReadAt, and both must
-				// be server-minted, non-overridable times.
+				// The triggering message's database-assigned seq IS the causal
+				// watermark: comparable against the read watermark (also a seq),
+				// no wall clock involved, not part of any request surface.
+				"seq": msgSeq,
+				// Emission time, display/fallback only -- deliberately not the
+				// message's createdAt, which bots may backdate.
 				"createdAt": time.Now().UTC(),
 			},
 		})
@@ -943,9 +945,9 @@ func (h *MessageHandler) BulkImport(w http.ResponseWriter, r *http.Request) {
 		err = tx.QueryRow(r.Context(),
 			`INSERT INTO messages (channel_id, author_id, content, embeds, author_override, created_at)
 			 VALUES ($1, $2, $3, $4, $5, COALESCE($6, NOW()))
-			 RETURNING id, channel_id, content, edited_at, embeds, author_override, created_at`,
+			 RETURNING id, channel_id, content, edited_at, embeds, author_override, created_at, seq`,
 			channelID, userID, m.Content, embedsJSON, authorOverrideJSON, m.CreatedAt,
-		).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &returnedEmbeds, &returnedOverride, &msg.CreatedAt)
+		).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &returnedEmbeds, &returnedOverride, &msg.CreatedAt, &msg.Seq)
 		if err != nil {
 			log.Error().Err(err).Msg("failed to insert imported message")
 			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))

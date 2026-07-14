@@ -57,9 +57,9 @@ export const useWSStore = create<WSState>((set) => ({
         const selectedDMId = useDMStore.getState().selectedDMId;
         const activeChannelId = selectedChannelId || selectedDMId;
         if (message.channelId !== activeChannelId) {
-          // Server-minted event time: lets the store drop a DELAYED notification
-          // whose message an ack already covered (and reconcile the flag later).
-          useUnreadStore.getState().markUnread(message.channelId, eventAt);
+          // Server-owned watermark first (message.seq); server-minted time as
+          // the fallback tier for pre-seq servers.
+          useUnreadStore.getState().markUnread(message.channelId, { seq: message.seq, at: eventAt });
         }
 
         // A message in a channel is proof a DM is ALIVE: clear any DM
@@ -154,13 +154,13 @@ export const useWSStore = create<WSState>((set) => ({
 
     wsClient.on('NOTIFICATION', (data: unknown) => {
       const payload = data as {
-        channelId: string; mentionCount?: number; createdAt?: string;
+        channelId: string; mentionCount?: number; seq?: number; createdAt?: string;
         senderName?: string; channelName?: string; content?: string;
       };
       if (payload.channelId) {
-        // Server-minted message time (same contract as MESSAGE_CREATE): a
+        // Server-owned watermark first (same contract as MESSAGE_CREATE): a
         // delayed notification whose message an ack already covered is dropped.
-        useUnreadStore.getState().markUnread(payload.channelId, payload.createdAt);
+        useUnreadStore.getState().markUnread(payload.channelId, { seq: payload.seq, at: payload.createdAt });
         if (payload.mentionCount) {
           useUnreadStore.getState().incrementMention(payload.channelId);
         }

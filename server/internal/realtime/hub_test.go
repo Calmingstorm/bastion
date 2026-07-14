@@ -328,3 +328,26 @@ func TestCloseSlowIdempotentUnderFlood(t *testing.T) {
 		t.Fatalf("broadcasting stalled under flood: 500 broadcasts took %v", elapsed)
 	}
 }
+
+// TestRemoveChannelDropsSubscriberSet: a deleted channel's subscriptions must
+// not outlive the row -- they would pin client pointers until those clients
+// disconnect, and channel ids are never reused.
+func TestRemoveChannelDropsSubscriberSet(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	userID := uuid.New()
+	channelID := uuid.New()
+	client := newDroppingClient(userID)
+
+	hub.RegisterUser(client)
+	hub.Subscribe(channelID, client)
+	if !channelHas(hub, channelID, client) {
+		t.Fatal("subscribe should be visible")
+	}
+	hub.RemoveChannel(channelID)
+	if channelHas(hub, channelID, client) {
+		t.Fatal("RemoveChannel must drop the channel's subscriber set")
+	}
+}

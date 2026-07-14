@@ -1385,10 +1385,49 @@ describe('session-boundary guards', () => {
       },
       unreadChannels: new Set(),
     });
-    useUnreadStore.getState().markUnread('c1', '2026-07-14T12:00:05Z'); // older than lastReadAt
+    useUnreadStore.getState().markUnread('c1', { at: '2026-07-14T12:00:05Z' }); // older than lastReadAt
     expect(useUnreadStore.getState().isUnread('c1')).toBe(false); // not resurrected
-    useUnreadStore.getState().markUnread('c1', '2026-07-14T12:00:15Z'); // genuinely newer
+    useUnreadStore.getState().markUnread('c1', { at: '2026-07-14T12:00:15Z' }); // genuinely newer
     expect(useUnreadStore.getState().isUnread('c1')).toBe(true);
+    useUnreadStore.getState().reset();
+  });
+
+  it('a pre-ack message broadcast LATE cannot resurrect unread state (seq watermark)', async () => {
+    // Odin round 30 blocker 3: emission time says when the packet left, not
+    // whether its message was covered by an acknowledgment. The seq is assigned
+    // at the WRITE and the ack stores the acked message's seq -- a pre-ack
+    // message delivered late still carries its pre-ack seq and is dropped, no
+    // matter how fresh its timestamps look.
+    useUnreadStore.setState({
+      readStates: {
+        c7: { userId: '', channelId: 'c7', lastMessageId: 'm9', lastReadAt: '2026-07-14T12:00:10Z', lastReadSeq: 90, mentionCount: 0 },
+      },
+      unreadChannels: new Set(),
+    });
+    useUnreadStore.getState().markUnread('c7', { seq: 85, at: '2026-07-14T12:00:15Z' }); // late packet, pre-ack write
+    expect(useUnreadStore.getState().isUnread('c7')).toBe(false); // covered by the ack
+    useUnreadStore.getState().markUnread('c7', { seq: 91, at: '2026-07-14T11:00:00Z' }); // post-ack write, backdated time
+    expect(useUnreadStore.getState().isUnread('c7')).toBe(true); // the seq decides, not the clock
+    useUnreadStore.getState().reset();
+  });
+
+  it('a committed lastReadSeq retires a flag raised on the seq axis', async () => {
+    useUnreadStore.setState({
+      readStates: {
+        c8: { userId: '', channelId: 'c8', lastMessageId: 'm1', lastReadAt: '2026-07-14T12:00:00Z', lastReadSeq: 50, mentionCount: 0 },
+      },
+      unreadChannels: new Set(),
+    });
+    useUnreadStore.getState().markUnread('c8', { seq: 55, at: '2026-07-14T12:00:05Z' }); // genuinely new
+    expect(useUnreadStore.getState().isUnread('c8')).toBe(true);
+    const dFetch = deferred<unknown>();
+    vi.mocked(client.apiGetReadStates).mockReturnValue(dFetch.promise as never);
+    const pFetch = useUnreadStore.getState().fetchReadStates();
+    dFetch.resolve([
+      { channelId: 'c8', lastMessageId: 'm9', lastReadAt: '2026-07-14T12:00:10Z', lastReadSeq: 60, mentionCount: 0 },
+    ]); // an ack (this device or another) covered seq 55
+    await pFetch;
+    expect(useUnreadStore.getState().isUnread('c8')).toBe(false); // retired by the watermark
     useUnreadStore.getState().reset();
   });
 
@@ -1401,7 +1440,7 @@ describe('session-boundary guards', () => {
       },
       unreadChannels: new Set(),
     });
-    useUnreadStore.getState().markUnread('c2', '2026-07-14T12:00:05Z'); // newer than known lastReadAt
+    useUnreadStore.getState().markUnread('c2', { at: '2026-07-14T12:00:05Z' }); // newer than known lastReadAt
     expect(useUnreadStore.getState().isUnread('c2')).toBe(true);
     const dFetch = deferred<unknown>();
     vi.mocked(client.apiGetReadStates).mockReturnValue(dFetch.promise as never);

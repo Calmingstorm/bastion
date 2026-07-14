@@ -58,22 +58,25 @@ func (h *ReadStateHandler) Ack(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The acked message must belong to this channel, so a message ID from another
-	// channel cannot be recorded against this one.
-	var msgExists bool
+	// channel cannot be recorded against this one. Its database-assigned seq is
+	// the READ WATERMARK: everything at or below it is covered by this ack.
+	var msgSeq int64
 	if err := h.db.QueryRow(r.Context(),
-		`SELECT EXISTS(SELECT 1 FROM messages WHERE id = $1 AND channel_id = $2)`,
+		`SELECT seq FROM messages WHERE id = $1 AND channel_id = $2`,
 		messageID, channelID,
-	).Scan(&msgExists); err != nil || !msgExists {
+	).Scan(&msgSeq); err != nil {
 		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "message not found"))
 		return
 	}
 
 	_, err = h.db.Exec(r.Context(),
-		`INSERT INTO read_states (user_id, channel_id, last_message_id, last_read_at, mention_count)
-		 VALUES ($1, $2, $3, NOW(), 0)
+		`INSERT INTO read_states (user_id, channel_id, last_message_id, last_read_at, last_read_seq, mention_count)
+		 VALUES ($1, $2, $3, NOW(), $4, 0)
 		 ON CONFLICT (user_id, channel_id)
-		 DO UPDATE SET last_message_id = $3, last_read_at = NOW(), mention_count = 0`,
-		userID, channelID, messageID,
+		 DO UPDATE SET last_message_id = $3, last_read_at = NOW(),
+		   last_read_seq = GREATEST(COALESCE(read_states.last_read_seq, 0), $4),
+		   mention_count = 0`,
+		userID, channelID, messageID, msgSeq,
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to ack channel")
@@ -98,7 +101,7 @@ func (h *ReadStateHandler) ListReadStates(w http.ResponseWriter, r *http.Request
 	}
 
 	rows, err := h.db.Query(r.Context(),
-		`SELECT user_id, channel_id, last_message_id, last_read_at, mention_count
+		`SELECT user_id, channel_id, last_message_id, last_read_at, last_read_seq, mention_count
 		 FROM read_states WHERE user_id = $1 AND channel_id = ANY($2)`, userID, viewable,
 	)
 	if err != nil {
@@ -112,7 +115,7 @@ func (h *ReadStateHandler) ListReadStates(w http.ResponseWriter, r *http.Request
 	for rows.Next() {
 		var rs models.ReadState
 		if err := rows.Scan(&rs.UserID, &rs.ChannelID, &rs.LastMessageID,
-			&rs.LastReadAt, &rs.MentionCount); err != nil {
+			&rs.LastReadAt, &rs.LastReadSeq, &rs.MentionCount); err != nil {
 			log.Error().Err(err).Msg("failed to scan read state")
 			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return

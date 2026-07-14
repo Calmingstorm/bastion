@@ -124,6 +124,12 @@ func (h *ServerHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The creating owner may already be connected: subscribe their live sockets
+	// to the new server's channels, or messages there never reach them until
+	// reconnect (the same class of gap as an unsubscribed channel create).
+	channelIDs, _ := getServerChannelIDs(r.Context(), h.db, server.ID)
+	subscribeViewable(r.Context(), h.db, h.hub, userID, channelIDs)
+
 	writeJSON(w, http.StatusCreated, server)
 }
 

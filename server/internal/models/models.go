@@ -88,6 +88,7 @@ type Message struct {
 	Embeds         []Embed         `json:"embeds,omitempty"`
 	AuthorOverride *AuthorOverride `json:"authorOverride,omitempty"`
 	EditedAt       *time.Time      `json:"editedAt,omitempty"`
+	Seq            int64           `json:"seq,omitempty"`
 	ReplyToID      *uuid.UUID      `json:"replyToId,omitempty"`
 	ReplyTo        *ReplyInfo      `json:"replyTo,omitempty"`
 	Attachments    []Attachment    `json:"attachments,omitempty"`
@@ -157,7 +158,9 @@ type ReadState struct {
 	ChannelID     uuid.UUID  `json:"channelId"`
 	LastMessageID *uuid.UUID `json:"lastMessageId,omitempty"`
 	LastReadAt    time.Time  `json:"lastReadAt"`
-	MentionCount  int        `json:"mentionCount"`
+	// The server-owned read watermark: the seq of the acknowledged message.
+	LastReadSeq  *int64 `json:"lastReadSeq,omitempty"`
+	MentionCount int    `json:"mentionCount"`
 }
 
 type MemberWithUser struct {

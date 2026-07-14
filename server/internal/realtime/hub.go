@@ -238,6 +238,15 @@ func (h *Hub) GetClientChannels(client *Client) []uuid.UUID {
 	return ids
 }
 
+// RemoveChannel drops a channel's entire subscriber set: a deleted channel's
+// subscriptions must not outlive the row (they would pin client pointers until
+// those clients disconnect, and ids are never reused).
+func (h *Hub) RemoveChannel(channelID uuid.UUID) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.channels, channelID)
+}
+
 // SubscribeUser subscribes all of a user's connected clients to a channel
 // synchronously (under the hub lock), so the subscription is in effect the
 // instant the call returns.

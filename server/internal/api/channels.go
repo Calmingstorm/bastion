@@ -22,6 +22,13 @@ type ChannelHandler struct {
 	hub *realtime.Hub
 }
 
+// AfterChannelDeleteExecForTest runs between the delete commit and the
+// recipient computation (nil in production). Tests use it to mutate
+// authorization inside that window and prove the recipient set is evaluated at
+// DELIVERY time, not captured earlier -- the interleaving is otherwise only
+// reachable with a locked-row race.
+var AfterChannelDeleteExecForTest func()
+
 func NewChannelHandler(db *pgxpool.Pool, hub *realtime.Hub) *ChannelHandler {
 	return &ChannelHandler{db: db, hub: hub}
 }
@@ -227,11 +234,19 @@ func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Broadcast to all server channels so every connected user sees the new channel
+	// A new channel must be USABLE by already-connected clients, not just
+	// announced: subscribe every authorized member's live sockets first, then
+	// broadcast the create to the same set -- without the subscription,
+	// subsequent messages in this channel would silently never reach them until
+	// reconnect. One recipient computation keeps subscribe and announce coherent.
+	recipients := h.authorizedMemberIDs(r, serverID)
+	for _, uid := range recipients {
+		h.hub.SubscribeUser(uid, ch.ID)
+	}
 	h.broadcastToServer(r, serverID, realtime.Event{
 		Type: realtime.EventChannelCreate,
 		Data: ch,
-	})
+	}, recipients)
 
 	writeJSON(w, http.StatusCreated, ch)
 }
@@ -382,11 +397,6 @@ func (h *ChannelHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	var channelName string
 	h.db.QueryRow(r.Context(), `SELECT name FROM channels WHERE id = $1 AND server_id = $2`, channelID, serverID).Scan(&channelName)
 
-	// Capture the authorized recipient set BEFORE the delete: the event is
-	// broadcast only after the commit, but its audience is defined by the world
-	// in which the channel still existed.
-	recipients := h.authorizedMemberIDs(r, serverID)
-
 	result, err := h.db.Exec(r.Context(),
 		`DELETE FROM channels WHERE id = $1 AND server_id = $2`, channelID, serverID,
 	)
@@ -406,13 +416,22 @@ func (h *ChannelHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	// and commit could read the channel back into existence, and a delete that
 	// FAILED after broadcasting left every connected client having removed a
 	// channel that still exists, with no event that would ever correct them.
+	// Authorization is evaluated at DELIVERY time: the recipient set is computed
+	// here, after the commit, so a member whose access was revoked between the
+	// request and the commit receives nothing. (Visibility is server-scoped, so
+	// the deleted row's absence changes no one's authorization.) The hub also
+	// forgets the channel -- its subscriber set must not outlive the row.
+	if AfterChannelDeleteExecForTest != nil {
+		AfterChannelDeleteExecForTest()
+	}
 	h.broadcastToServer(r, serverID, realtime.Event{
 		Type: realtime.EventChannelDelete,
 		Data: map[string]string{
 			"channelId": channelID.String(),
 			"serverId":  serverID.String(),
 		},
-	}, recipients)
+	})
+	h.hub.RemoveChannel(channelID)
 
 	// Audit log
 	writeAuditLog(h.db, r.Context(), serverID, userID, "CHANNEL_DELETE", "channel", channelID, map[string]any{
