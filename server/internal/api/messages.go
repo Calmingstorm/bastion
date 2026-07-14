@@ -353,7 +353,7 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 		// Get the created_at of the cursor message
 		var cursorTime time.Time
 		err = h.db.QueryRow(r.Context(),
-			`SELECT created_at FROM messages WHERE id = $1`, beforeID,
+			`SELECT created_at FROM messages WHERE id = $1 AND channel_id = $2`, beforeID, channelID,
 		).Scan(&cursorTime)
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "cursor message not found"))
@@ -484,26 +484,36 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 		// scroll showed attachment messages without their attachments.
 		attachmentRows, err := h.db.Query(r.Context(),
 			`SELECT id, message_id, filename, stored_name, content_type, size, url, created_at
-			 FROM attachments WHERE message_id = ANY($1) ORDER BY created_at ASC`,
+			 FROM attachments WHERE message_id = ANY($1)
+			 ORDER BY message_id ASC, position ASC, id ASC`,
 			messageIDs,
 		)
-		if err == nil {
-			defer attachmentRows.Close()
-			attachmentMap := make(map[uuid.UUID][]models.Attachment)
-			for attachmentRows.Next() {
-				var att models.Attachment
-				if err := attachmentRows.Scan(&att.ID, &att.MessageID, &att.Filename, &att.StoredName,
-					&att.ContentType, &att.Size, &att.URL, &att.CreatedAt); err == nil {
-					attachmentMap[att.MessageID] = append(attachmentMap[att.MessageID], att)
-				}
+		if err != nil {
+			log.Error().Err(err).Msg("failed to list attachments for messages")
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+			return
+		}
+		defer attachmentRows.Close()
+
+		attachmentMap := make(map[uuid.UUID][]models.Attachment)
+		for attachmentRows.Next() {
+			var att models.Attachment
+			if err := attachmentRows.Scan(&att.ID, &att.MessageID, &att.Filename, &att.StoredName,
+				&att.ContentType, &att.Size, &att.URL, &att.CreatedAt); err != nil {
+				log.Error().Err(err).Msg("failed to scan attachment for message list")
+				writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+				return
 			}
-			if err := attachmentRows.Err(); err != nil {
-				log.Error().Err(err).Msg("failed to read attachments for message list")
-			}
-			for i := range messages {
-				if attachments, ok := attachmentMap[messages[i].ID]; ok {
-					messages[i].Attachments = attachments
-				}
+			attachmentMap[att.MessageID] = append(attachmentMap[att.MessageID], att)
+		}
+		if err := attachmentRows.Err(); err != nil {
+			log.Error().Err(err).Msg("failed to read attachments for message list")
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+			return
+		}
+		for i := range messages {
+			if attachments, ok := attachmentMap[messages[i].ID]; ok {
+				messages[i].Attachments = attachments
 			}
 		}
 	}

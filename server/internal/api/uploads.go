@@ -148,13 +148,13 @@ func (h *UploadHandler) SendWithAttachments(w http.ResponseWriter, r *http.Reque
 			&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL, &author.IsBot); err != nil {
 			return err
 		}
-		for _, sf := range saved {
+		for position, sf := range saved {
 			var att models.Attachment
 			if err := tx.QueryRow(r.Context(),
-				`INSERT INTO attachments (message_id, filename, stored_name, content_type, size, url)
-				 VALUES ($1, $2, $3, $4, $5, $6)
+				`INSERT INTO attachments (message_id, filename, stored_name, content_type, size, url, position)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7)
 				 RETURNING id, message_id, filename, stored_name, content_type, size, url, created_at`,
-				msg.ID, sf.filename, sf.storedName, sf.contentType, sf.size, sf.url,
+				msg.ID, sf.filename, sf.storedName, sf.contentType, sf.size, sf.url, position,
 			).Scan(&att.ID, &att.MessageID, &att.Filename, &att.StoredName,
 				&att.ContentType, &att.Size, &att.URL, &att.CreatedAt); err != nil {
 				return err
