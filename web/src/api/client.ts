@@ -134,17 +134,25 @@ let refreshGeneration = -1;
 let failedQueue: Array<{
   resolve: (token: string) => void;
   reject: (error: unknown) => void;
+  generation: number;
 }> = [];
 
-function processQueue(error: unknown, token: string | null = null): void {
+// Settle only the queued requests belonging to `generation` -- the refresh they were
+// queued behind. failedQueue is shared across refreshes, so a superseded refresh
+// settling must drain ITS OWN waiters (so they never hang) without disturbing the
+// waiters of the replacement refresh that took over.
+function processQueue(error: unknown, token: string | null, generation: number): void {
+  const keep: typeof failedQueue = [];
   failedQueue.forEach((prom) => {
-    if (error) {
+    if (prom.generation !== generation) {
+      keep.push(prom);
+    } else if (error) {
       prom.reject(error);
     } else if (token) {
       prom.resolve(token);
     }
   });
-  failedQueue = [];
+  failedQueue = keep;
 }
 
 apiClient.interceptors.response.use(
@@ -172,15 +180,17 @@ apiClient.interceptors.response.use(
 
       // If a refresh is in flight but belongs to a session that has since ended, do
       // not let current-session requests queue behind it and inherit its dead-session
-      // outcome. Drop it and start a fresh refresh for the current session.
+      // outcome. Drop it (rejecting its own stale waiters) and start a fresh refresh
+      // for the current session.
       if (isRefreshing && !isSessionGenerationCurrent(refreshGeneration)) {
-        processQueue(new Error('session changed'), null);
+        processQueue(new Error('session changed'), null, refreshGeneration);
         isRefreshing = false;
       }
 
       if (isRefreshing) {
+        const queuedGeneration = refreshGeneration;
         return new Promise<string>((resolve, reject) => {
-          failedQueue.push({ resolve, reject });
+          failedQueue.push({ resolve, reject, generation: queuedGeneration });
         }).then((token) => {
           if (originalRequest.headers) {
             originalRequest.headers.Authorization = `Bearer ${token}`;
@@ -201,7 +211,7 @@ apiClient.interceptors.response.use(
         // Drain any queued requests and clear the refreshing flag, otherwise a
         // concurrent 401 that queued behind this one waits forever and every
         // later request skips refresh (isRefreshing stuck true).
-        processQueue(error, null);
+        processQueue(error, null, generationAtRefresh);
         isRefreshing = false;
         clearTokens();
         onAuthFailure();
@@ -214,27 +224,27 @@ apiClient.interceptors.response.use(
           { refreshToken }
         );
         // A logout during the in-flight refresh must remain authoritative: do not
-        // write the new tokens back or update the socket. Do NOT touch failedQueue
-        // either -- it now belongs to whatever refresh replaced this stale one; a
-        // superseded refresh must not drain the current refresh's waiters.
+        // write the new tokens back or update the socket. Reject this refresh's own
+        // stale waiters (matched by generation) so they don't hang, but leave a
+        // replacement refresh's waiters -- which carry a newer generation -- untouched.
         if (!isSessionGenerationCurrent(generationAtRefresh)) {
+          processQueue(new Error('session changed'), null, generationAtRefresh);
           return Promise.reject(error);
         }
         const { accessToken } = response.data;
         setTokens(accessToken, refreshToken);
         wsClient.updateToken(accessToken);
-        processQueue(null, accessToken);
+        processQueue(null, accessToken, generationAtRefresh);
 
         if (originalRequest.headers) {
           originalRequest.headers.Authorization = `Bearer ${accessToken}`;
         }
         return apiClient(originalRequest);
       } catch (refreshError) {
-        // Only drain the queue if this is still the current refresh; a superseded
-        // refresh failing must not reject the requests waiting on its replacement.
-        if (isSessionGenerationCurrent(generationAtRefresh)) {
-          processQueue(refreshError, null);
-        }
+        // Reject this refresh's own queued waiters (matched by generation) so they
+        // never hang -- whether or not the session has since moved on. A replacement
+        // refresh's waiters carry a different generation and are left untouched.
+        processQueue(refreshError, null, generationAtRefresh);
         // Only end the session when the refresh token itself is rejected. A
         // transient failure (network drop, 5xx) must not force a logout — leave
         // the tokens in place so the next request can retry. And only if this
@@ -251,10 +261,12 @@ apiClient.interceptors.response.use(
         }
         return Promise.reject(refreshError);
       } finally {
-        // Only clear the flag if this refresh is still the current one. If the
-        // session changed mid-refresh, a newer refresh may have taken over
-        // isRefreshing; a stale refresh settling must not clear it out from under it.
-        if (isSessionGenerationCurrent(generationAtRefresh)) {
+        // Clear the flag only if this refresh still owns it -- i.e. no replacement
+        // took over. A replacement always starts under a newer generation and
+        // reassigns refreshGeneration, so an unchanged refreshGeneration means we
+        // still own isRefreshing, even if the session ended with no replacement
+        // starting (in which case we DO clear it, rather than leaving it stuck true).
+        if (refreshGeneration === generationAtRefresh) {
           isRefreshing = false;
         }
       }

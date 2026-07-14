@@ -331,4 +331,53 @@ describe('session invalidation', () => {
     await rb;
     postSpy.mockRestore();
   });
+
+  // F38 round 5 (blocker 1): a request queued behind a refresh that then goes stale and
+  // rejects must itself reject -- not hang forever. Even with NO replacement refresh to
+  // reset the queue, the stale refresh must drain ITS OWN generation's waiters.
+  it('rejects an old-session request queued behind a refresh that goes stale', async () => {
+    storage.setItem('accessToken', 'a-access');
+    storage.setItem('refreshToken', 'a-refresh');
+
+    let rejectRefresh!: (e: unknown) => void;
+    let refreshStarted!: () => void;
+    const refreshInFlight = new Promise<void>((r) => (refreshStarted = r));
+    const postSpy = vi.spyOn(axios, 'post').mockImplementation(
+      () =>
+        new Promise((_res, rej) => {
+          refreshStarted();
+          rejectRefresh = rej;
+        })
+    );
+
+    // Every request 401s; the refresh never succeeds (held, then rejected).
+    apiClient.defaults.adapter = (async (config) => {
+      const err = new Error('Unauthorized') as Error & Record<string, unknown>;
+      err.config = config;
+      err.response = { status: 401, data: {} };
+      err.isAxiosError = true;
+      throw err;
+    }) as AxiosAdapter;
+
+    const leader = apiClient.get('/leader'); // 401 -> starts refresh A (held)
+    const leaderSettled = leader.then(() => 'resolved', () => 'rejected');
+    await refreshInFlight;
+
+    const queued = apiClient.get('/queued'); // 401 -> queues behind refresh A
+    const queuedSettled = queued.then(() => 'resolved', () => 'rejected');
+    // Let the queued request genuinely 401 and land on failedQueue (async adapter).
+    await new Promise((r) => setTimeout(r, 0));
+
+    invalidateSession(); // session ends; refresh A is now stale, no replacement starts
+    rejectRefresh(new Error('refresh failed'));
+
+    // The queued request must settle (reject), not hang past the timeout.
+    const outcome = await Promise.race([
+      queuedSettled,
+      new Promise((r) => setTimeout(() => r('pending'), 50)),
+    ]);
+    expect(outcome).toBe('rejected');
+    expect(await leaderSettled).toBe('rejected');
+    postSpy.mockRestore();
+  });
 });

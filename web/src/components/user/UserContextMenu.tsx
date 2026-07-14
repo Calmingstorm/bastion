@@ -1,9 +1,9 @@
 import * as ContextMenu from '@radix-ui/react-context-menu';
-import { apiCreateDM, apiKickMember, apiBanMember, apiTimeoutMember, apiExecuteInteraction } from '../../api/client';
+import { apiKickMember, apiBanMember, apiTimeoutMember, apiExecuteInteraction } from '../../api/client';
 import { useAuthStore } from '../../stores/authStore';
-import { useDMStore } from '../../stores/dmStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useCommandStore } from '../../stores/commandStore';
+import { openDirectMessage } from '../../stores/dmActions';
 
 interface UserContextMenuProps {
   userId: string;
@@ -19,11 +19,9 @@ export function UserContextMenu({ userId, username, serverId, isOwner, canModera
   const isSelf = currentUser?.id === userId;
 
   const handleSendMessage = async () => {
-    try {
-      const dm = await apiCreateDM([userId]);
-      useServerStore.setState({ selectedServerId: null, selectedChannelId: null });
-      useDMStore.getState().selectDM(dm.id);
-    } catch { /* handled */ }
+    // Session-guarded create + switch: a DM created for the previous account is never
+    // selected in the new session (openDirectMessage returns undefined on a change).
+    try { await openDirectMessage([userId]); } catch { /* handled */ }
   };
 
   const handleCopyUsername = () => {

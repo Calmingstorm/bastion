@@ -1,9 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import * as Popover from '@radix-ui/react-popover';
-import { apiGetUser, apiCreateDM, apiKickMember, apiBanMember, apiTimeoutMember } from '../../api/client';
+import { apiGetUser, apiKickMember, apiBanMember, apiTimeoutMember } from '../../api/client';
 import { useAuthStore } from '../../stores/authStore';
-import { useDMStore } from '../../stores/dmStore';
-import { useServerStore } from '../../stores/serverStore';
+import { openDirectMessage } from '../../stores/dmActions';
 import { resolveMediaUrl } from '../../platform';
 import { PresenceDot } from './PresenceDot';
 import type { User, RoleInfo } from '../../types';
@@ -22,7 +21,6 @@ export function UserProfileCard({ userId, roles, joinedAt, serverId, canModerate
   const [user, setUser] = useState<User | null>(null);
   const [open, setOpen] = useState(false);
   const currentUser = useAuthStore((s) => s.user);
-  const { selectDM } = useDMStore();
 
   useEffect(() => {
     if (open && !user) {
@@ -31,12 +29,12 @@ export function UserProfileCard({ userId, roles, joinedAt, serverId, canModerate
   }, [open, userId, user]);
 
   const handleMessage = async () => {
+    // Session-guarded create + switch to DM view. openDirectMessage returns undefined
+    // if the session changed mid-create, so a DM for the previous account is never
+    // selected; only close the card once a current-session DM is actually opened.
     try {
-      const dm = await apiCreateDM([userId]);
-      // Switch to DM view
-      useServerStore.setState({ selectedServerId: null, selectedChannelId: null });
-      selectDM(dm.id);
-      setOpen(false);
+      const dm = await openDirectMessage([userId]);
+      if (dm) setOpen(false);
     } catch {
       // Error handling
     }

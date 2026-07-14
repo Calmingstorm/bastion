@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
-import { apiSearchUsers, apiCreateDM } from '../../api/client';
+import { apiSearchUsers } from '../../api/client';
 import { useDMStore } from '../../stores/dmStore';
 import { resolveMediaUrl } from '../../platform';
 import type { MessageAuthor } from '../../types';
@@ -21,6 +21,7 @@ export function NewDMDialog({ open, onOpenChange }: NewDMDialogProps) {
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const selectDM = useDMStore((s) => s.selectDM);
   const fetchDMs = useDMStore((s) => s.fetchDMs);
+  const createDM = useDMStore((s) => s.createDM);
 
   useEffect(() => {
     if (open) {
@@ -72,7 +73,10 @@ export function NewDMDialog({ open, onOpenChange }: NewDMDialogProps) {
     setIsCreating(true);
     setError(null);
     try {
-      const dm = await apiCreateDM(selected.map((u) => u.id));
+      // Route through the guarded store action: if the session changes mid-create it
+      // returns undefined, and we must not select a DM created for the old account.
+      const dm = await createDM(selected.map((u) => u.id));
+      if (!dm) return;
       await fetchDMs();
       selectDM(dm.id);
       onOpenChange(false);
