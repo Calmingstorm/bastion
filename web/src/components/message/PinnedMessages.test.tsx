@@ -94,6 +94,42 @@ describe('PinnedMessages session ownership', () => {
     expect(screen.queryByText(/to-be-unpinned/)).toBeNull();
   });
 
+  it('an older pre-unpin refresh cannot resurrect a successfully unpinned message', async () => {
+    let resolveInitial!: (p: PinnedMessage[]) => void;
+    let resolveStaleRefresh!: (p: PinnedMessage[]) => void;
+    vi.spyOn(client, 'apiGetPinnedMessages')
+      .mockImplementationOnce(
+        () => new Promise((res) => { resolveInitial = res as (p: PinnedMessage[]) => void; })
+      )
+      .mockImplementationOnce(
+        () => new Promise((res) => { resolveStaleRefresh = res as (p: PinnedMessage[]) => void; })
+      );
+    vi.spyOn(client, 'apiUnpinMessage').mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(<PinnedMessages open onOpenChange={vi.fn()} channelId="c1" />);
+    await act(async () => {
+      resolveInitial([pin('m1', 'doomed-pin')]);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await screen.findByText(/doomed-pin/);
+
+    await act(async () => {
+      eventBus.emit('bastion:pin-update', {}); // a refresh starts BEFORE the unpin (held)
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await user.click(screen.getByRole('button', { name: 'Unpin' })); // unpin commits
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.queryByText(/doomed-pin/)).toBeNull(); // removed
+
+    await act(async () => {
+      resolveStaleRefresh([pin('m1', 'doomed-pin')]); // the PRE-unpin snapshot settles late
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.queryByText(/doomed-pin/)).toBeNull(); // and cannot resurrect it
+  });
+
   it('a stale unpin completion does not edit the current session list', async () => {
     vi.spyOn(client, 'apiGetPinnedMessages').mockResolvedValue([pin('m1', 'still-pinned')]);
     let resolveUnpin!: () => void;

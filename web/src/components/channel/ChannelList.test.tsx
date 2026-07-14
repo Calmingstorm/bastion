@@ -75,3 +75,38 @@ describe('ChannelList category-delete focus-return wiring', () => {
     expect(confirmProps?.isPending).toBe(true); // dialog is now locked
   });
 });
+
+// F38 round 17: category fetches are recency-owned within a session -- an OLDER
+// request settling after a newer one must not overwrite its categories.
+describe('ChannelList category fetch recency', () => {
+  it('an older categories response cannot overwrite a newer one', async () => {
+    useAuthStore.setState({ user: { id: 'owner-1' } as never });
+    useServerStore.setState({
+      servers: [{ id: 's1', name: 'S', ownerId: 'owner-1' } as Server],
+      selectedServerId: 's1',
+      channels: [],
+    });
+    let resolveOld!: (c: unknown[]) => void;
+    let resolveNew!: (c: unknown[]) => void;
+    vi.mocked((await import('../../api/client')).apiGetCategories)
+      .mockImplementationOnce(() => new Promise((res) => { resolveOld = res; }) as never)
+      .mockImplementationOnce(() => new Promise((res) => { resolveNew = res; }) as never);
+
+    render(<ChannelList />); // mount fetch (held: OLD)
+
+    const { eventBus } = await import('../../utils/eventBus');
+    await act(async () => {
+      eventBus.emit('bastion:category-update', {}); // refetch (held: NEW)
+      resolveNew([{ id: 'cat-n', name: 'NewCat', position: 0 }]); // newer settles first
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.getByText(/NewCat/)).toBeInTheDocument();
+
+    await act(async () => {
+      resolveOld([{ id: 'cat-o', name: 'OldCat', position: 0 }]); // older settles last
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.getByText(/NewCat/)).toBeInTheDocument(); // newer kept
+    expect(screen.queryByText(/OldCat/)).toBeNull(); // older discarded
+  });
+});

@@ -75,6 +75,9 @@ export function PinnedMessages({ open, onOpenChange, channelId }: PinnedMessages
       await apiUnpinMessage(channelId, messageId);
       if (!isSessionGenerationCurrent(generation)) return;
       setPins((prev) => prev.filter((p) => p.id !== messageId));
+      // The COMMITTED mutation supersedes every in-flight read that predates it:
+      // an older (pre-unpin) refresh settling later must not resurrect the pin.
+      fetchSeqRef.current += 1;
     } catch { /* handled */ }
   };
 

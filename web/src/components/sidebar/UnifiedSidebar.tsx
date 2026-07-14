@@ -92,13 +92,16 @@ export function UnifiedSidebar() {
     }
   }, [selectedServerId]);
 
+  const categoriesSeqRef = useRef(0);
   const fetchCategories = useCallback(() => {
     if (!expandedServerId) return;
-    // This component survives identity boundaries; a fetch settling after one must
-    // not populate the new session's sidebar with the old account's categories.
+    // Owned by session AND recency: a fetch settling after an identity boundary
+    // must not populate the new session's sidebar, and an OLDER fetch settling
+    // after a newer one must not overwrite its categories.
     const generation = captureSessionGeneration();
+    const seq = ++categoriesSeqRef.current;
     apiGetCategories(expandedServerId).then((cats) => {
-      if (!isSessionGenerationCurrent(generation)) return;
+      if (seq !== categoriesSeqRef.current || !isSessionGenerationCurrent(generation)) return;
       const safeCats = Array.isArray(cats) ? cats : [];
       setCategories(safeCats.sort((a, b) => a.position - b.position));
     }).catch(() => {});

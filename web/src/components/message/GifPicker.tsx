@@ -31,12 +31,13 @@ export function GifPicker({ onSelect }: GifPickerProps) {
     return () => document.removeEventListener('mousedown', handleClick);
   }, [open]);
 
-  // Only the LATEST fired request owns the grid (session + query recency): a
-  // slower older query must not overwrite newer results.
+  // Only the LATEST query lineage owns the grid (session + query recency). The
+  // lineage is claimed on EVERY query change -- not when the debounced request
+  // fires -- so an already-fired older request cannot publish beneath a newly
+  // typed query during the debounce gap.
   const gifSeqRef = useRef(0);
-  const ownedFetch = useCallback((fetcher: () => Promise<GifResult[]>) => {
+  const fireOwned = useCallback((seq: number, fetcher: () => Promise<GifResult[]>) => {
     const generation = captureSessionGeneration();
-    const seq = ++gifSeqRef.current;
     const owns = () => seq === gifSeqRef.current && isSessionGenerationCurrent(generation);
     setLoading(true);
     fetcher()
@@ -52,21 +53,22 @@ export function GifPicker({ onSelect }: GifPickerProps) {
   // Load trending when opened
   useEffect(() => {
     if (!open) return;
-    ownedFetch(() => apiTrendingGifs(20));
-  }, [open, ownedFetch]);
+    fireOwned(++gifSeqRef.current, () => apiTrendingGifs(20));
+  }, [open, fireOwned]);
 
   // Debounced search
   const handleSearch = useCallback((q: string) => {
     setQuery(q);
+    const seq = ++gifSeqRef.current; // every keystroke supersedes in-flight work
     if (debounceRef.current) clearTimeout(debounceRef.current);
     if (!q.trim()) {
-      ownedFetch(() => apiTrendingGifs(20));
+      fireOwned(seq, () => apiTrendingGifs(20));
       return;
     }
     debounceRef.current = setTimeout(() => {
-      ownedFetch(() => apiSearchGifs(q.trim(), 20));
+      fireOwned(seq, () => apiSearchGifs(q.trim(), 20));
     }, 300);
-  }, [ownedFetch]);
+  }, [fireOwned]);
 
   return (
     <div ref={containerRef} className="relative">

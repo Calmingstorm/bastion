@@ -3,6 +3,7 @@ import { render, screen, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import * as client from '../../api/client';
 import { UserProfileCard } from './UserProfileCard';
+import { useAuthStore } from '../../stores/authStore';
 import { invalidateSession } from '../../api/session';
 import type { User } from '../../types';
 
@@ -32,6 +33,35 @@ describe('UserProfileCard session ownership', () => {
     });
 
     expect(screen.queryByText(/old-account-profile/)).toBeNull();
+  });
+
+  it('a stale moderation completion does not close the reused card', async () => {
+    const user = userEvent.setup();
+    useAuthStore.setState({ user: { id: 'me' } as User });
+    vi.spyOn(client, 'apiGetUser').mockResolvedValue({ id: 'u1', username: 'target-user' } as User);
+    let resolveKick!: () => void;
+    vi.spyOn(client, 'apiKickMember').mockImplementation(
+      () => new Promise<void>((res) => { resolveKick = () => res(); })
+    );
+    render(
+      <UserProfileCard userId="u1" serverId="s1" canModerate>
+        <button>open profile</button>
+      </UserProfileCard>
+    );
+    await user.click(screen.getByRole('button', { name: 'open profile' }));
+    await screen.findAllByText(/target-user/); // (name renders twice: title + @handle)
+
+    await user.click(screen.getByRole('button', { name: 'Kick' })); // held
+
+    await act(async () => {
+      invalidateSession(); // a new account logs in while the kick is in flight
+      resolveKick();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // onDone() must not run: the card (reused by the new session) stays open.
+    expect(screen.getAllByText(/target-user/).length).toBeGreaterThan(0);
+    useAuthStore.setState({ user: null });
   });
 
   it('a userId change clears the old profile, refetches, and ignores the older response', async () => {

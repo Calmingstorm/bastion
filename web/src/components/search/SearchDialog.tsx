@@ -35,6 +35,14 @@ export function SearchDialog({ open, onClose }: SearchDialogProps) {
   const selectedServerId = useServerStore((s) => s.selectedServerId);
   const selectChannel = useServerStore((s) => s.selectChannel);
 
+  // A server switch changes the search SCOPE: it supersedes any in-flight search
+  // and clears results, so server A's matches never render under server B.
+  useEffect(() => {
+    searchSeqRef.current += 1;
+    setResults([]);
+    setLoading(false);
+  }, [selectedServerId]);
+
   useEffect(() => {
     if (open) {
       // The reset supersedes any in-flight search: an already-fired request must

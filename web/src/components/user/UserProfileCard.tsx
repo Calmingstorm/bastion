@@ -204,7 +204,31 @@ function ModActions({ serverId, userId, onDone }: { serverId: string; userId: st
   }, [showTimeoutPicker]);
 
   const handleTimeout = async (seconds: number) => {
-    try { await apiTimeoutMember(serverId, userId, seconds); onDone(); } catch { /* ignored */ }
+    // A stale completion must not call onDone() and close the NEW session's card.
+    const generation = captureSessionGeneration();
+    try {
+      await apiTimeoutMember(serverId, userId, seconds);
+      if (!isSessionGenerationCurrent(generation)) return;
+      onDone();
+    } catch { /* ignored */ }
+  };
+
+  const handleKick = async () => {
+    const generation = captureSessionGeneration();
+    try {
+      await apiKickMember(serverId, userId);
+      if (!isSessionGenerationCurrent(generation)) return;
+      onDone();
+    } catch { /* ignored */ }
+  };
+
+  const handleBan = async () => {
+    const generation = captureSessionGeneration();
+    try {
+      await apiBanMember(serverId, userId);
+      if (!isSessionGenerationCurrent(generation)) return;
+      onDone();
+    } catch { /* ignored */ }
   };
 
   const btnClass = "flex-1 rounded-[3px] border border-[var(--border)] py-1.5 text-xs font-medium text-[var(--danger)] hover:bg-[var(--danger)]/10";
@@ -215,10 +239,10 @@ function ModActions({ serverId, userId, onDone }: { serverId: string; userId: st
         <button onClick={() => setShowTimeoutPicker(!showTimeoutPicker)} className={btnClass}>
           Timeout
         </button>
-        <button onClick={async () => { try { await apiKickMember(serverId, userId); onDone(); } catch { /* ignored */ } }} className={btnClass}>
+        <button onClick={handleKick} className={btnClass}>
           Kick
         </button>
-        <button onClick={async () => { try { await apiBanMember(serverId, userId); onDone(); } catch { /* ignored */ } }} className={btnClass}>
+        <button onClick={handleBan} className={btnClass}>
           Ban
         </button>
       </div>

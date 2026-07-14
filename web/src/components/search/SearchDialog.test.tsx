@@ -3,6 +3,7 @@ import { render, screen, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import * as client from '../../api/client';
 import { SearchDialog } from './SearchDialog';
+import { useServerStore } from '../../stores/serverStore';
 import { invalidateSession } from '../../api/session';
 import type { SearchResult } from '../../types';
 
@@ -40,6 +41,29 @@ describe('SearchDialog session/query ownership', () => {
     });
 
     expect(screen.queryByText(/old-account-result/)).toBeNull();
+  });
+
+  it('a server switch supersedes an in-flight search and clears its scope', async () => {
+    const user = userEvent.setup();
+    useServerStore.setState({ selectedServerId: 'server-a' });
+    let resolveSearch!: (r: SearchResult[]) => void;
+    vi.spyOn(client, 'apiSearch').mockImplementation(
+      () => new Promise((res) => { resolveSearch = res as (r: SearchResult[]) => void; })
+    );
+    render(<SearchDialog open onClose={vi.fn()} />);
+    await user.type(screen.getByPlaceholderText('Search messages...'), 'query');
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 450)); // fired under server A (held)
+    });
+
+    await act(async () => {
+      useServerStore.setState({ selectedServerId: 'server-b' }); // scope changes
+      resolveSearch([result('m8', 'server-a-scoped-result')]);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(screen.queryByText(/server-a-scoped-result/)).toBeNull();
+    useServerStore.setState({ selectedServerId: null });
   });
 
   it('clearing the input supersedes an in-flight search', async () => {

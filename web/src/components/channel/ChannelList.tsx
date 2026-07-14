@@ -145,13 +145,16 @@ export function ChannelList() {
     }
   }, [channels, selectedServerId]);
 
+  const categoriesSeqRef = useRef(0);
   const fetchCategories = useCallback(() => {
     if (!selectedServerId) return;
-    // A fetch settling after an identity boundary must not populate the new
-    // session's UI with the old account's categories.
+    // Owned by session AND recency: a fetch settling after an identity boundary
+    // must not populate the new session's UI, and an OLDER fetch settling after a
+    // newer one must not overwrite its categories.
     const generation = captureSessionGeneration();
+    const seq = ++categoriesSeqRef.current;
     apiGetCategories(selectedServerId).then((cats) => {
-      if (!isSessionGenerationCurrent(generation)) return;
+      if (seq !== categoriesSeqRef.current || !isSessionGenerationCurrent(generation)) return;
       setCategories(cats.sort((a, b) => a.position - b.position));
     }).catch(() => {});
   }, [selectedServerId]);

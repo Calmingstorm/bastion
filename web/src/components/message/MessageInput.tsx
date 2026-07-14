@@ -35,6 +35,9 @@ export function MessageInput() {
 
   // Mention autocomplete state
   const [members, setMembers] = useState<MemberWithUser[]>([]);
+  // Shared recency for the initial and event-driven member fetches: only the
+  // LATEST fetch may populate the mention list.
+  const membersSeqRef = useRef(0);
   const [showMentions, setShowMentions] = useState(false);
   const [mentionQuery, setMentionQuery] = useState('');
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -69,11 +72,14 @@ export function MessageInput() {
       setMembers([]);
       return;
     }
-    // A stale response must not repopulate the mention list across a boundary.
+    // Owned by session AND recency: a stale response must not repopulate the
+    // mention list across a boundary, and an older fetch must not overwrite a
+    // newer one's members.
     const generation = captureSessionGeneration();
+    const seq = ++membersSeqRef.current;
     apiGetMembers(selectedServerId)
       .then((m) => {
-        if (isSessionGenerationCurrent(generation)) setMembers(m);
+        if (seq === membersSeqRef.current && isSessionGenerationCurrent(generation)) setMembers(m);
       })
       .catch(() => {});
   }, [selectedServerId]);
@@ -92,9 +98,10 @@ export function MessageInput() {
     if (!selectedServerId) return;
     const handler = () => {
       const generation = captureSessionGeneration();
+      const seq = ++membersSeqRef.current;
       apiGetMembers(selectedServerId)
         .then((m) => {
-          if (isSessionGenerationCurrent(generation)) setMembers(m);
+          if (seq === membersSeqRef.current && isSessionGenerationCurrent(generation)) setMembers(m);
         })
         .catch(() => {});
     };
