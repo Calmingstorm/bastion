@@ -28,6 +28,9 @@ export function UserProfileCard({ userId, roles, joinedAt, serverId, canModerate
   // clears the previous profile instead of showing the wrong user while loading.
   const profileSeqRef = useRef(0);
   const shownForRef = useRef<string | null>(null);
+  // Latest-prop mirror of the card's target user (assigned during render).
+  const cardTargetRef = useRef(userId);
+  cardTargetRef.current = userId;
 
   useEffect(() => {
     if (!open) return;
@@ -45,12 +48,16 @@ export function UserProfileCard({ userId, roles, joinedAt, serverId, canModerate
   }, [open, userId]);
 
   const handleMessage = async () => {
-    // Session-guarded create + switch to DM view. openDirectMessage returns undefined
-    // if the session changed mid-create, so a DM for the previous account is never
-    // selected; only close the card once a current-session DM is actually opened.
+    // Session-guarded create + switch to DM view, owned by the card's TARGET too:
+    // the card is reused across users, and a DM opened for the previous target
+    // must neither be selected nor close the retargeted card.
+    const targetAtStart = userId;
     try {
-      const dm = await openDirectMessage([userId]);
-      if (dm) setOpen(false);
+      const dm = await openDirectMessage(
+        [userId],
+        () => cardTargetRef.current === targetAtStart
+      );
+      if (dm && cardTargetRef.current === targetAtStart) setOpen(false);
     } catch {
       // Error handling
     }

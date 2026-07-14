@@ -15,12 +15,18 @@ import { captureSessionGeneration, isSessionGenerationCurrent } from '../api/ses
 // apiCreateDM, which has no session ownership and would select a DM created for the
 // account that just logged out.
 export async function openDirectMessage(
-  recipientIds: string[]
+  recipientIds: string[],
+  stillValid: () => boolean = () => true
 ): Promise<DMChannel | undefined> {
   const generation = captureSessionGeneration();
   const dm = await useDMStore.getState().createDM(recipientIds);
-  if (!dm || !isSessionGenerationCurrent(generation)) return undefined;
-  useServerStore.setState({ selectedServerId: null, selectedChannelId: null });
+  // stillValid lets a reusable caller (e.g. a profile card retargeted to another
+  // user mid-flight) withdraw: a DM created for the previous target must not be
+  // selected -- nor its card closed -- under the new one.
+  if (!dm || !isSessionGenerationCurrent(generation) || !stillValid()) return undefined;
+  // Entering DM scope claims the channel lineage (a held selectServer must not
+  // shadow the newly opened DM).
+  useServerStore.getState().clearServerSelection();
   useDMStore.getState().selectDM(dm.id);
   return dm;
 }

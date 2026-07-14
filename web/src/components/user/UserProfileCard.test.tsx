@@ -64,6 +64,42 @@ describe('UserProfileCard session ownership', () => {
     useAuthStore.setState({ user: null });
   });
 
+  it('a DM opened for a previous target is not selected and does not close the retargeted card', async () => {
+    const user = userEvent.setup();
+    useAuthStore.setState({ user: { id: 'me' } as User });
+    vi.spyOn(client, 'apiGetUser').mockResolvedValue({ id: 'u1', username: 'target-user' } as User);
+    let resolveCreate!: (dm: unknown) => void;
+    vi.spyOn(client, 'apiCreateDM').mockImplementation(
+      () => new Promise((res) => { resolveCreate = res; }) as never
+    );
+    const { rerender } = render(
+      <UserProfileCard userId="u1">
+        <button>open profile</button>
+      </UserProfileCard>
+    );
+    await user.click(screen.getByRole('button', { name: 'open profile' }));
+    await screen.findAllByText(/target-user/);
+
+    await user.click(screen.getByRole('button', { name: 'Message' })); // DM create held for u1
+
+    rerender(
+      <UserProfileCard userId="u2">
+        <button>open profile</button>
+      </UserProfileCard>
+    ); // the card is retargeted to u2 mid-flight
+
+    const { useDMStore } = await import('../../stores/dmStore');
+    await act(async () => {
+      resolveCreate({ id: 'dm-u1' }); // the u1 DM then resolves
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(useDMStore.getState().selectedDMId).not.toBe('dm-u1'); // not selected
+    expect(screen.getAllByText(/target-user/).length).toBeGreaterThan(0); // card not closed
+    useAuthStore.setState({ user: null });
+    useDMStore.getState().reset();
+  });
+
   it('a moderation completion for a previous target does not close the retargeted card', async () => {
     const user = userEvent.setup();
     useAuthStore.setState({ user: { id: 'me' } as User });

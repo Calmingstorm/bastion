@@ -189,10 +189,9 @@ export const useWSStore = create<WSState>((set) => ({
     wsClient.on('DM_CREATE', (data: unknown) => {
       const dm = data as DMChannel;
       if (dm && dm.id) {
-        const { dmChannels } = useDMStore.getState();
-        const exists = dmChannels.some((d) => d.id === dm.id);
+        const exists = useDMStore.getState().dmChannels.some((d) => d.id === dm.id);
         if (!exists) {
-          useDMStore.setState({ dmChannels: [dm, ...dmChannels] });
+          useDMStore.getState().addDM(dm); // claims the list lineage (commit supersession)
         }
       }
     });

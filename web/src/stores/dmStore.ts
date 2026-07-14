@@ -11,6 +11,7 @@ interface DMState {
   error: string | null;
   fetchDMs: () => Promise<void>;
   createDM: (recipientIds: string[]) => Promise<DMChannel | undefined>;
+  addDM: (dm: DMChannel) => void;
   closeDM: (channelId: string) => Promise<void>;
   selectDM: (channelId: string | null) => void;
   reset: () => void;
@@ -48,6 +49,7 @@ export const useDMStore = create<DMState>((set) => ({
     set((state) => {
       const exists = state.dmChannels.some((d) => d.id === dm.id);
       if (!exists) {
+        fetchDMsSeq += 1; // commit supersession: an older fetch snapshot must not erase it
         return { dmChannels: [dm, ...state.dmChannels] };
       }
       return {};
@@ -72,10 +74,23 @@ export const useDMStore = create<DMState>((set) => ({
     // Deliberately a silent return (not a SessionSupersededError like the server
     // mutations): fire-and-forget callers have no success UI to mislead.
     if (!isSessionGenerationCurrent(generation)) return;
-    set((state) => ({
-      dmChannels: state.dmChannels.filter((d) => d.id !== channelId),
-      selectedDMId: state.selectedDMId === channelId ? null : state.selectedDMId,
-    }));
+    set((state) => {
+      fetchDMsSeq += 1; // commit supersession: an older snapshot must not resurrect it
+      return {
+        dmChannels: state.dmChannels.filter((d) => d.id !== channelId),
+        selectedDMId: state.selectedDMId === channelId ? null : state.selectedDMId,
+      };
+    });
+  },
+
+  // Realtime DM_CREATE commits through here: the write claims the list lineage
+  // (commit supersession) so an older fetch snapshot settling later cannot erase it.
+  addDM: (dm: DMChannel) => {
+    set((state) => {
+      if (state.dmChannels.some((d) => d.id === dm.id)) return {};
+      fetchDMsSeq += 1;
+      return { dmChannels: [dm, ...state.dmChannels] };
+    });
   },
 
   selectDM: (channelId: string | null) => {

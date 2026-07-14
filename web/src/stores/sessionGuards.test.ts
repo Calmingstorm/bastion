@@ -232,6 +232,116 @@ describe('session-boundary guards', () => {
     useDMStore.getState().reset();
   });
 
+  // F38 round 20: empty scope invalidates an active selection; lineages are
+  // per-resource; and mutations/realtime commits supersede in-flight snapshots.
+  it('a held selectServer settling after entering DM scope installs nothing', async () => {
+    useServerStore.setState({ servers: [], selectedServerId: null, channels: [], selectedChannelId: null });
+    const d = deferred<Channel[]>();
+    vi.mocked(client.apiGetChannels).mockReturnValue(d.promise);
+    vi.mocked(client.apiGetMemberPermissions).mockResolvedValue({ permissions: 0 });
+
+    const p = useServerStore.getState().selectServer('srv-a'); // held
+    useServerStore.getState().clearServerSelection(); // user opens the DM view
+    d.resolve([{ id: 'chan-a', name: 'a', serverId: 'srv-a', position: 0 } as Channel]);
+    await p;
+
+    expect(useServerStore.getState().selectedServerId).toBeNull();
+    expect(useServerStore.getState().channels).toEqual([]); // nothing installed
+    expect(useServerStore.getState().selectedChannelId).toBeNull(); // nothing to shadow the DM
+    useServerStore.getState().reset();
+  });
+
+  it('a later fetchServers does not strand an active selectServer loading state', async () => {
+    useServerStore.setState({ servers: [], selectedServerId: null, channels: [] });
+    const dChan = deferred<Channel[]>();
+    vi.mocked(client.apiGetChannels).mockReturnValue(dChan.promise);
+    vi.mocked(client.apiGetMemberPermissions).mockResolvedValue({ permissions: 0 });
+    const dList = deferred<Server[]>();
+    vi.mocked(client.apiGetServers).mockReturnValue(dList.promise);
+
+    const pSel = useServerStore.getState().selectServer('srv-a'); // channel fetch held
+    const pList = useServerStore.getState().fetchServers(); // different resource
+    dList.resolve([{ id: 'srv-a', name: 'A' } as Server]);
+    await pList;
+    dChan.resolve([{ id: 'chan-a', name: 'a', serverId: 'srv-a', position: 0 } as Channel]);
+    await pSel;
+
+    expect(useServerStore.getState().channels.map((c) => c.id)).toEqual(['chan-a']); // committed
+    expect(useServerStore.getState().isLoadingChannels).toBe(false); // not stranded
+    expect(useServerStore.getState().isLoadingServers).toBe(false);
+    useServerStore.getState().reset();
+  });
+
+  it('a realtime-created channel survives an older channels snapshot', async () => {
+    useServerStore.setState({ servers: [], selectedServerId: null, channels: [] });
+    const d = deferred<Channel[]>();
+    vi.mocked(client.apiGetChannels).mockReturnValue(d.promise);
+    vi.mocked(client.apiGetMemberPermissions).mockResolvedValue({ permissions: 0 });
+
+    const p = useServerStore.getState().selectServer('srv-a'); // snapshot held
+    useServerStore.getState().addChannel({ id: 'chan-rt', name: 'rt', serverId: 'srv-a', position: 5 } as Channel);
+    d.resolve([{ id: 'chan-old', name: 'old', serverId: 'srv-a', position: 0 } as Channel]); // pre-create snapshot
+    await p;
+
+    const ids = useServerStore.getState().channels.map((c) => c.id);
+    expect(ids).toContain('chan-rt'); // not erased by the stale snapshot
+    expect(useServerStore.getState().isLoadingChannels).toBe(false);
+    useServerStore.getState().reset();
+  });
+
+  it('a newly created DM survives an older fetchDMs snapshot', async () => {
+    useDMStore.setState({ dmChannels: [] });
+    const dFetch = deferred<DMChannel[]>();
+    vi.mocked(client.apiGetDMs).mockReturnValue(dFetch.promise);
+    vi.mocked(client.apiCreateDM).mockResolvedValue({ id: 'dm-new' } as DMChannel);
+
+    const pFetch = useDMStore.getState().fetchDMs(); // snapshot held
+    await useDMStore.getState().createDM(['u2']); // commits + supersedes
+    dFetch.resolve([]); // pre-create snapshot settles late
+    await pFetch;
+
+    expect(useDMStore.getState().dmChannels.map((d2) => d2.id)).toContain('dm-new');
+    useDMStore.getState().reset();
+  });
+
+  it('a realtime DM_CREATE survives an older fetchDMs snapshot', async () => {
+    useDMStore.setState({ dmChannels: [] });
+    const dFetch = deferred<DMChannel[]>();
+    vi.mocked(client.apiGetDMs).mockReturnValue(dFetch.promise);
+
+    const pFetch = useDMStore.getState().fetchDMs(); // snapshot held
+    useDMStore.getState().addDM({ id: 'dm-rt' } as DMChannel); // realtime commit
+    dFetch.resolve([]);
+    await pFetch;
+
+    expect(useDMStore.getState().dmChannels.map((d2) => d2.id)).toContain('dm-rt');
+    useDMStore.getState().reset();
+  });
+
+  it('a successfully closed DM is not resurrected by an older snapshot', async () => {
+    useDMStore.setState({ dmChannels: [{ id: 'dm-x' } as DMChannel] });
+    const dFetch = deferred<DMChannel[]>();
+    vi.mocked(client.apiGetDMs).mockReturnValue(dFetch.promise);
+    vi.mocked(client.apiCloseDM).mockResolvedValue(undefined);
+
+    const pFetch = useDMStore.getState().fetchDMs(); // pre-close snapshot held
+    await useDMStore.getState().closeDM('dm-x'); // commits + supersedes
+    dFetch.resolve([{ id: 'dm-x' } as DMChannel]); // stale snapshot with the closed DM
+    await pFetch;
+
+    expect(useDMStore.getState().dmChannels.map((d2) => d2.id)).not.toContain('dm-x');
+    useDMStore.getState().reset();
+  });
+
+  it('setChannelsScoped commits nothing for a server that is no longer selected', async () => {
+    useServerStore.setState({ servers: [], selectedServerId: 'srv-b', channels: [{ id: 'chan-b', name: 'b', serverId: 'srv-b', position: 0 } as Channel] });
+    useServerStore.getState().setChannelsScoped('srv-a', [
+      { id: 'chan-a', name: 'a', serverId: 'srv-a', position: 0 } as Channel,
+    ]); // an old-server reorder revert / refresh
+    expect(useServerStore.getState().channels.map((c) => c.id)).toEqual(['chan-b']); // untouched
+    useServerStore.getState().reset();
+  });
+
   // F38 round 11: overlapping startup validations share one generation (React
   // StrictMode double-effects), so recency must order them -- an OLDER validation
   // failing after a newer one succeeded must not log the validated session out.

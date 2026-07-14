@@ -27,6 +27,8 @@ interface ServerState {
   fetchServers: () => Promise<void>;
   selectServer: (id: string) => Promise<void>;
   selectChannel: (id: string) => void;
+  clearServerSelection: () => void;
+  setChannelsScoped: (serverId: string, channels: Channel[]) => void;
   createServer: (name: string) => Promise<void>;
   createChannel: (serverId: string, name: string, topic?: string, categoryId?: string) => Promise<void>;
   updateServer: (server: Server) => void;
@@ -39,11 +41,13 @@ interface ServerState {
   reset: () => void;
 }
 
-// One recency lineage for the (selectedServerId, channels) resource: fetchServers'
-// auto-select branch and selectServer both write it, so they share the counter --
-// whichever starts LAST owns the resource, and an older continuation (e.g.
-// selectServer(A) settling after selectServer(B)) commits nothing.
-let serverScopeSeq = 0;
+// One recency lineage PER RESOURCE. The server LIST (servers, isLoadingServers)
+// and the channel SELECTION (selectedServerId, channels, isLoadingChannels) are
+// distinct resources: sharing one counter let a later fetchServers supersede an
+// active selectServer without assuming its channel-loading responsibility,
+// stranding the spinner (and vice versa).
+let serverListSeq = 0;
+let channelScopeSeq = 0;
 export const useServerStore = create<ServerState>((set, get) => ({
   servers: [],
   selectedServerId: null,
@@ -54,22 +58,23 @@ export const useServerStore = create<ServerState>((set, get) => ({
   error: null,
 
   fetchServers: async () => {
-    // Capture the session at entry; after every await, bail if an identity
-    // boundary has passed so a late response never writes the old account's data.
-    // Claim the scope lineage too: this call's channel-writes are superseded by
-    // any later selectServer/fetchServers.
+    // Session ownership + LIST-resource recency at entry. The auto-select branch
+    // additionally claims the channel-selection lineage when (and only when) it
+    // takes over that resource.
     const generation = captureSessionGeneration();
-    const seq = ++serverScopeSeq;
-    const owns = () => seq === serverScopeSeq && isSessionGenerationCurrent(generation);
+    const listSeq = ++serverListSeq;
+    const listOwns = () => listSeq === serverListSeq && isSessionGenerationCurrent(generation);
     set({ isLoadingServers: true, error: null });
     try {
       const rawServers = await apiGetServers();
-      if (!owns()) return;
+      if (!listOwns()) return;
       const servers = Array.isArray(rawServers) ? rawServers : [];
 
       // If no server is selected and we have servers, merge server list +
       // initial selection into a single state update to avoid cascading renders.
       if (!get().selectedServerId && servers.length > 0) {
+        const chanSeq = ++channelScopeSeq; // taking over the channel resource
+        const chanOwns = () => chanSeq === channelScopeSeq && isSessionGenerationCurrent(generation);
         set({
           servers,
           isLoadingServers: false,
@@ -86,7 +91,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
         // Fetch channels for the auto-selected server
         try {
           const rawChannels = await apiGetChannels(servers[0].id);
-          if (!owns()) return;
+          if (!chanOwns()) return;
           const sorted = (Array.isArray(rawChannels) ? rawChannels : []).sort((a, b) => a.position - b.position);
           set({
             channels: sorted,
@@ -94,25 +99,25 @@ export const useServerStore = create<ServerState>((set, get) => ({
             selectedChannelId: sorted.length > 0 ? sorted[0].id : null,
           });
         } catch {
-          if (!owns()) return;
+          if (!chanOwns()) return;
           set({ isLoadingChannels: false });
         }
       } else {
         set({ servers, isLoadingServers: false });
       }
     } catch (err: unknown) {
-      if (!owns()) return;
+      if (!listOwns()) return;
       const message = extractErrorMessage(err, 'Failed to load servers.');
       set({ isLoadingServers: false, error: message });
     }
   },
 
   selectServer: async (id: string) => {
-    // Owned by session AND scope recency: concurrent selectServer(A)/selectServer(B)
+    // Owned by session AND channel-scope recency: concurrent selectServer(A)/(B)
     // must leave the LAST selection's channels, never B selected with A's channels.
     const generation = captureSessionGeneration();
-    const seq = ++serverScopeSeq;
-    const owns = () => seq === serverScopeSeq && isSessionGenerationCurrent(generation);
+    const seq = ++channelScopeSeq;
+    const owns = () => seq === channelScopeSeq && isSessionGenerationCurrent(generation);
     set({
       selectedServerId: id,
       selectedChannelId: null,
@@ -141,6 +146,24 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
   selectChannel: (id: string) => {
     set({ selectedChannelId: id });
+  },
+
+  // Entering DM/empty scope INVALIDATES any in-flight server selection: a held
+  // selectServer settling afterward must not install its channels (and select one)
+  // while selectedServerId is null -- message rendering uses
+  // selectedChannelId || selectedDMId, so the stale channel would shadow the DM.
+  clearServerSelection: () => {
+    channelScopeSeq += 1;
+    set({ selectedServerId: null, selectedChannelId: null, channels: [] });
+  },
+
+  // Component write sites (optimistic reorder + its revert, sidebar channel-create
+  // refresh) commit through here: the write claims the channel lineage (commit
+  // supersession) and is scope-checked against the server it was computed for.
+  setChannelsScoped: (serverId: string, channels: Channel[]) => {
+    if (get().selectedServerId !== serverId) return;
+    channelScopeSeq += 1;
+    set({ channels });
   },
 
   // Superseded mutations REJECT (SessionSupersededError) rather than fulfilling: a
@@ -206,10 +229,16 @@ export const useServerStore = create<ServerState>((set, get) => ({
       if (state.selectedServerId === channel.serverId) {
         const exists = state.channels.some((c) => c.id === channel.id);
         if (!exists) {
+          // Commit supersession: this realtime write is newer truth than any
+          // in-flight channels fetch -- an older snapshot settling later must not
+          // erase it. (The superseded fetch's list is discarded; its loading flag
+          // is cleared here since its own finally can no longer run.)
+          channelScopeSeq += 1;
           return {
             channels: [...state.channels, channel].sort(
               (a, b) => a.position - b.position
             ),
+            isLoadingChannels: false,
           };
         }
       }
@@ -218,17 +247,23 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   updateChannel: (channel: Channel) => {
-    set((state) => ({
-      channels: state.channels.map((c) =>
-        c.id === channel.id ? { ...c, ...channel } : c
-      ),
-    }));
+    set((state) => {
+      if (!state.channels.some((c) => c.id === channel.id)) return {};
+      channelScopeSeq += 1; // commit supersession (see addChannel)
+      return {
+        channels: state.channels.map((c) =>
+          c.id === channel.id ? { ...c, ...channel } : c
+        ),
+      };
+    });
   },
 
   removeChannel: (channelId: string) => {
     set((state) => {
+      if (!state.channels.some((c) => c.id === channelId)) return {};
+      channelScopeSeq += 1; // commit supersession (see addChannel)
       const remaining = state.channels.filter((c) => c.id !== channelId);
-      const updates: Partial<ServerState> = { channels: remaining };
+      const updates: Partial<ServerState> = { channels: remaining, isLoadingChannels: false };
       // Auto-select next channel if the deleted one was selected
       if (state.selectedChannelId === channelId) {
         updates.selectedChannelId = remaining.length > 0 ? remaining[0].id : null;

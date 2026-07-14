@@ -218,7 +218,10 @@ export function UnifiedSidebar() {
       if (!isSessionGenerationCurrent(generation)) return;
       const updated = await apiGetChannels(serverId);
       if (!isSessionGenerationCurrent(generation)) return;
-      useServerStore.setState({ channels: (Array.isArray(updated) ? updated : []).sort((a, b) => a.position - b.position) });
+      // Scoped, lineage-claiming write: an old-server refresh settling after a
+      // switch must not replace the new server's channels.
+      useServerStore.getState().setChannelsScoped(serverId,
+        (Array.isArray(updated) ? updated : []).sort((a, b) => a.position - b.position));
       setNewChannelName('');
       setShowCreateChannel(false);
       setCreateChannelInCategory(null);
@@ -250,7 +253,9 @@ export function UnifiedSidebar() {
 
   const handleSelectDM = useCallback((channelId: string) => {
     selectDM(channelId);
-    useServerStore.setState({ selectedChannelId: null });
+    // Claim the channel lineage: a held selectServer settling after we entered DM
+    // scope must not select a server channel that would shadow this DM.
+    useServerStore.getState().clearServerSelection();
   }, [selectDM]);
 
   const handleSelectChannel = useCallback((channelId: string) => {

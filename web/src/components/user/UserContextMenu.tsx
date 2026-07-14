@@ -1,3 +1,4 @@
+import { useRef } from 'react';
 import * as ContextMenu from '@radix-ui/react-context-menu';
 import { apiKickMember, apiBanMember, apiTimeoutMember, apiExecuteInteraction } from '../../api/client';
 import { useAuthStore } from '../../stores/authStore';
@@ -18,10 +19,17 @@ export function UserContextMenu({ userId, username, serverId, isOwner, canModera
   const currentUser = useAuthStore((s) => s.user);
   const isSelf = currentUser?.id === userId;
 
+  // Latest-prop mirror (assigned during render) for target ownership.
+  const menuTargetRef = useRef(userId);
+  menuTargetRef.current = userId;
+
   const handleSendMessage = async () => {
-    // Session-guarded create + switch: a DM created for the previous account is never
-    // selected in the new session (openDirectMessage returns undefined on a change).
-    try { await openDirectMessage([userId]); } catch { /* handled */ }
+    // Session-guarded create + switch, owned by the menu's target: a DM opened for
+    // a previous target (list reordering can retarget the row) is never selected.
+    const targetAtStart = userId;
+    try {
+      await openDirectMessage([userId], () => menuTargetRef.current === targetAtStart);
+    } catch { /* handled */ }
   };
 
   const handleCopyUsername = () => {

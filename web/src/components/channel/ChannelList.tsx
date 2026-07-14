@@ -124,11 +124,11 @@ export function ChannelList() {
     const newIndex = channels.findIndex((c) => c.id === over.id);
     if (oldIndex === -1 || newIndex === -1) return;
 
-    // Optimistic reorder in store
+    // Optimistic reorder in store -- a scoped, lineage-claiming write.
     const reordered = [...channels];
     const [moved] = reordered.splice(oldIndex, 1);
     reordered.splice(newIndex, 0, moved);
-    useServerStore.setState({ channels: reordered });
+    useServerStore.getState().setChannelsScoped(selectedServerId, reordered);
 
     // Persist to backend
     const positions = reordered.map((c, i) => ({ id: c.id, position: i }));
@@ -136,11 +136,11 @@ export function ChannelList() {
     try {
       await apiReorderChannels(selectedServerId, positions);
     } catch {
-      // Revert on failure -- but never into a different session: a late failure
-      // after an identity boundary would write the OLD channel list into the new
-      // session's store.
+      // Revert on failure -- but never into a different session OR server scope: a
+      // late failure after a switch must not restore the OLD server's channel list
+      // over the new one. setChannelsScoped enforces the scope check.
       if (isSessionGenerationCurrent(generation)) {
-        useServerStore.setState({ channels });
+        useServerStore.getState().setChannelsScoped(selectedServerId, channels);
       }
     }
   }, [channels, selectedServerId]);
