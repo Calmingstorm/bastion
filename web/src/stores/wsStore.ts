@@ -56,6 +56,11 @@ export const useWSStore = create<WSState>((set) => ({
           useUnreadStore.getState().markUnread(message.channelId);
         }
 
+        // A message in a channel is proof the channel is ALIVE: clear any DM
+        // close-tombstone BEFORE the refetch below, or the authoritative
+        // response revealing a reopened DM gets filtered as a stale read.
+        useDMStore.getState().noteChannelAlive(message.channelId);
+
         // If this message is for a channel not in our lists, refetch DMs
         // (handles reopened DMs where the user had closed the conversation)
         const { channels } = useServerStore.getState();

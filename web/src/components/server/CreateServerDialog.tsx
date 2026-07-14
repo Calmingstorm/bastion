@@ -22,7 +22,7 @@ export function CreateServerDialog({
   const [inviteCode, setInviteCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const { createServer, selectServer, fetchServers } = useServerStore();
+  const { createServer, selectServer, fetchServers, addServer } = useServerStore();
 
   const handleCreate = async (e: FormEvent) => {
     e.preventDefault();
@@ -86,6 +86,10 @@ export function CreateServerDialog({
     try {
       const server = await apiJoinViaInvite(code);
       if (!isSessionGenerationCurrent(generation)) return;
+      // The join response asserts the server's existence: commit it BEFORE the
+      // list fetch so a tombstone from an earlier leave/kick/ban is cleared and
+      // the rejoined server is visible immediately (same as InvitePage).
+      addServer(server);
       await fetchServers();
       if (!isSessionGenerationCurrent(generation)) return;
       await selectServer(server.id);

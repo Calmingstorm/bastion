@@ -783,22 +783,104 @@ describe('session-boundary guards', () => {
     useServerStore.getState().reset();
   });
 
-  it('a DM tombstone retires after one fetch: a server-driven reopen becomes visible', async () => {
+  it('a message event reopens a closed DM on the very next fetch', async () => {
+    // The server reopens the DM BEFORE broadcasting MESSAGE_CREATE, and the
+    // resulting fetch is the ONE authoritative chance to reveal it -- the assert
+    // must clear the tombstone before that snapshot is filtered.
     useDMStore.setState({ dmChannels: [{ id: 'dm-r' } as DMChannel] });
     vi.mocked(client.apiCloseDM).mockResolvedValue(undefined as never);
     await useDMStore.getState().closeDM('dm-r'); // tombstoned
+    useDMStore.getState().noteChannelAlive('dm-r'); // MESSAGE_CREATE landed in it
+    const dFetch = deferred<DMChannel[]>();
+    vi.mocked(client.apiGetDMs).mockReturnValue(dFetch.promise);
+    const pFetch = useDMStore.getState().fetchDMs(); // the event-triggered refetch
+    dFetch.resolve([{ id: 'dm-r' } as DMChannel]);
+    await pFetch;
+    expect(useDMStore.getState().dmChannels.map((d2) => d2.id)).toEqual(['dm-r']); // visible NOW
+    useDMStore.getState().reset();
+  });
+
+  it('omission by a fetch retires a DM tombstone; presence does not', async () => {
+    useDMStore.setState({ dmChannels: [{ id: 'dm-o' } as DMChannel] });
+    vi.mocked(client.apiCloseDM).mockResolvedValue(undefined as never);
+    await useDMStore.getState().closeDM('dm-o'); // tombstoned
     const d1 = deferred<DMChannel[]>();
     const d2 = deferred<DMChannel[]>();
-    vi.mocked(client.apiGetDMs).mockReturnValueOnce(d1.promise).mockReturnValueOnce(d2.promise);
+    const d3 = deferred<DMChannel[]>();
+    vi.mocked(client.apiGetDMs)
+      .mockReturnValueOnce(d1.promise)
+      .mockReturnValueOnce(d2.promise)
+      .mockReturnValueOnce(d3.promise);
     const p1 = useDMStore.getState().fetchDMs();
-    d1.resolve([{ id: 'dm-r' } as DMChannel]); // race-window read: filtered once
+    d1.resolve([{ id: 'dm-o' } as DMChannel]); // STILL-STALE read: filtered, tombstone KEPT
     await p1;
     expect(useDMStore.getState().dmChannels).toEqual([]);
-    const p2 = useDMStore.getState().fetchDMs(); // the other side reopened it server-side
-    d2.resolve([{ id: 'dm-r' } as DMChannel]);
+    const p2 = useDMStore.getState().fetchDMs();
+    d2.resolve([{ id: 'dm-o' } as DMChannel]); // a second stale read cannot resurrect either
     await p2;
-    expect(useDMStore.getState().dmChannels.map((d3) => d3.id)).toEqual(['dm-r']); // NOT suppressed forever
+    expect(useDMStore.getState().dmChannels).toEqual([]);
+    const p3 = useDMStore.getState().fetchDMs();
+    d3.resolve([]); // the server CONFIRMS the close -- omission retires the tombstone
+    await p3;
+    const d4 = deferred<DMChannel[]>();
+    vi.mocked(client.apiGetDMs).mockReturnValue(d4.promise);
+    const p4 = useDMStore.getState().fetchDMs();
+    d4.resolve([{ id: 'dm-o' } as DMChannel]); // later genuine reappearance is honored
+    await p4;
+    expect(useDMStore.getState().dmChannels.map((d5) => d5.id)).toEqual(['dm-o']);
     useDMStore.getState().reset();
+  });
+
+  it('a second still-stale fetch cannot resurrect a deleted channel', async () => {
+    useServerStore.setState({
+      servers: [], selectedServerId: 'srv-a', selectedChannelId: 'c-a',
+      channels: [
+        { id: 'c-a', name: 'a', serverId: 'srv-a', position: 0 } as Channel,
+        { id: 'c-b', name: 'b', serverId: 'srv-a', position: 1 } as Channel,
+      ],
+    });
+    useServerStore.getState().removeChannel('c-b', 'srv-a');
+    const d1 = deferred<Channel[]>();
+    const d2 = deferred<Channel[]>();
+    vi.mocked(client.apiGetChannels).mockReturnValueOnce(d1.promise).mockReturnValueOnce(d2.promise);
+    const p1 = useServerStore.getState().refreshChannels('srv-a');
+    d1.resolve([
+      { id: 'c-a', name: 'a', serverId: 'srv-a', position: 0 } as Channel,
+      { id: 'c-b', name: 'b', serverId: 'srv-a', position: 1 } as Channel, // stale read #1
+    ]);
+    await p1;
+    expect(useServerStore.getState().channels.map((c) => c.id)).toEqual(['c-a']);
+    const p2 = useServerStore.getState().refreshChannels('srv-a');
+    d2.resolve([
+      { id: 'c-a', name: 'a', serverId: 'srv-a', position: 0 } as Channel,
+      { id: 'c-b', name: 'b', serverId: 'srv-a', position: 1 } as Channel, // stale read #2
+    ]);
+    await p2;
+    expect(useServerStore.getState().channels.map((c) => c.id)).toEqual(['c-a']); // STILL no ghost
+    useServerStore.getState().reset();
+  });
+
+  it('a fetch for another server cannot retire a channel deletion tombstone', async () => {
+    useServerStore.setState({
+      servers: [], selectedServerId: 'srv-a', selectedChannelId: null,
+      channels: [{ id: 'c-x', name: 'x', serverId: 'srv-a', position: 0 } as Channel],
+    });
+    useServerStore.getState().removeChannel('c-x', 'srv-a'); // tombstone scoped to srv-a
+    const dB = deferred<Channel[]>();
+    const dA = deferred<Channel[]>();
+    vi.mocked(client.apiGetChannels).mockReturnValueOnce(dB.promise).mockReturnValueOnce(dA.promise);
+    vi.mocked(client.apiGetMemberPermissions).mockResolvedValue({ permissions: 0 });
+    const pB = useServerStore.getState().selectServer('srv-b');
+    dB.resolve([{ id: 'c-bb', name: 'bb', serverId: 'srv-b', position: 0 } as Channel]); // omits c-x VACUOUSLY
+    await pB;
+    const pA = useServerStore.getState().selectServer('srv-a'); // back to A
+    dA.resolve([
+      { id: 'c-x', name: 'x', serverId: 'srv-a', position: 0 } as Channel, // stale read of the delete
+      { id: 'c-y', name: 'y', serverId: 'srv-a', position: 1 } as Channel,
+    ]);
+    await pA;
+    expect(useServerStore.getState().channels.map((c) => c.id)).toEqual(['c-y']); // B could not testify
+    useServerStore.getState().reset();
   });
 
   it('reset clears DM tombstones: one account cannot hide a shared DM from the next', async () => {

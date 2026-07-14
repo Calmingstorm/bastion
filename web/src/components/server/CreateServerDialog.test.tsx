@@ -86,4 +86,44 @@ describe('CreateServerDialog session ownership', () => {
     expect(selectSpy).not.toHaveBeenCalled();
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
   });
+
+  // F38 round 25: the in-app join must commit the joined server through
+  // addServer() BEFORE fetching, exactly like InvitePage -- rejoining a server
+  // whose leave/kick laid a tombstone must be visible immediately, not filtered
+  // out of the very fetch that was supposed to reveal it.
+  it('the in-app join commits the joined server before fetching (rejoin is visible)', async () => {
+    const user = userEvent.setup();
+    useServerStore.setState({
+      servers: [{ id: 'srv-j', name: 'J', ownerId: 'u1' } as Server],
+      selectedServerId: null,
+    });
+    useServerStore.getState().removeServer('srv-j'); // left/kicked earlier -- tombstoned
+    expect(useServerStore.getState().servers).toEqual([]);
+    vi.spyOn(client, 'apiJoinViaInvite').mockResolvedValue({
+      id: 'srv-j', name: 'J', ownerId: 'u1',
+    } as Server);
+    let listAtFetch: string[] = [];
+    const fetchSpy = vi.fn(async () => {
+      listAtFetch = useServerStore.getState().servers.map((sv) => sv.id);
+    });
+    const selectSpy = vi.fn(async () => {});
+    useServerStore.setState({ fetchServers: fetchSpy, selectServer: selectSpy });
+    const onOpenChange = vi.fn();
+
+    render(<CreateServerDialog open onOpenChange={onOpenChange} />);
+    await user.click(screen.getByRole('button', { name: 'Join via Invite' }));
+    await user.type(
+      screen.getByPlaceholderText('https://example.com/invite/abc123'),
+      'abc123'
+    );
+    await user.click(screen.getByRole('button', { name: 'Join Server' }));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(fetchSpy).toHaveBeenCalled();
+    expect(listAtFetch).toContain('srv-j'); // committed BEFORE the fetch ran
+    expect(useServerStore.getState().servers.map((sv) => sv.id)).toContain('srv-j');
+    expect(onOpenChange).toHaveBeenCalledWith(false); // success UI ran normally
+  });
 });

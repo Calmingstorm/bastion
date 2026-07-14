@@ -14,6 +14,7 @@ interface DMState {
   createDM: (recipientIds: string[]) => Promise<DMChannel | undefined>;
   addDM: (dm: DMChannel) => void;
   closeDM: (channelId: string) => Promise<void>;
+  noteChannelAlive: (channelId: string) => void;
   selectDM: (channelId: string | null) => void;
   reset: () => void;
 }
@@ -115,6 +116,15 @@ export const useDMStore = create<DMState>((set) => ({
     const apply = upsertDM(dm);
     dmLineage.claim(apply, { asserts: [dm.id] });
     set((state) => ({ dmChannels: apply(state.dmChannels) }));
+  },
+
+  // An event proved this channel is alive -- a message arrived in it (the server
+  // reopens a closed DM BEFORE broadcasting MESSAGE_CREATE). Clears any close
+  // tombstone so the refetch that same event triggers can SHOW the reopened
+  // conversation instead of filtering it. No journal write: there is no list
+  // application to make, only evidence to record.
+  noteChannelAlive: (channelId: string) => {
+    dmLineage.assert([channelId]);
   },
 
   selectDM: (channelId: string | null) => {

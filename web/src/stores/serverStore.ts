@@ -134,7 +134,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
       // If no server is selected and we have servers, merge server list +
       // initial selection into a single state update to avoid cascading renders.
       if (!get().selectedServerId && servers.length > 0) {
-        let chanToken = channelLineage.startFetch(); // taking over the channel resource
+        let chanToken = channelLineage.startFetch(servers[0].id); // taking over the channel resource
         set({
           servers,
           isLoadingServers: false,
@@ -159,7 +159,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
             );
             if (chanOutcome.kind === 'superseded') return;
             if (chanOutcome.kind === 'gap') {
-              chanToken = channelLineage.startFetch();
+              chanToken = channelLineage.startFetch(servers[0].id);
               continue;
             }
             set((state) => ({
@@ -193,7 +193,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
     // A fetch of the channel resource: a newer selection/barrier supersedes it;
     // mutations that overlap it are journaled and reconciled onto its snapshot.
     const generation = captureSessionGeneration();
-    let token = channelLineage.startFetch();
+    let token = channelLineage.startFetch(id); // scoped: this fetch enumerates `id`'s channels
     set({
       selectedServerId: id,
       selectedChannelId: null,
@@ -213,7 +213,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
         );
         if (outcome.kind === 'superseded') return;
         if (outcome.kind === 'gap') {
-          token = channelLineage.startFetch(); // retry with a fresh snapshot
+          token = channelLineage.startFetch(id); // retry with a fresh snapshot
           continue;
         }
         // Merge channels + selection into a single state update. The selection
@@ -275,7 +275,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
     // would strand a spinner neither request settles (the refresh scope-bails,
     // the selection is superseded).
     if (get().selectedServerId !== serverId) return;
-    let token = channelLineage.startFetch();
+    let token = channelLineage.startFetch(serverId); // scoped fetch
     try {
       for (;;) {
         const raw = await apiGetChannels(serverId);
@@ -286,7 +286,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
         const outcome = channelLineage.reconcile(token, sortChannels(Array.isArray(raw) ? raw : []));
         if (outcome.kind === 'superseded') return;
         if (outcome.kind === 'gap') {
-          token = channelLineage.startFetch(); // retry with a fresh snapshot
+          token = channelLineage.startFetch(serverId); // retry with a fresh snapshot
           continue;
         }
         set((state) => ({
@@ -417,9 +417,13 @@ export const useServerStore = create<ServerState>((set, get) => ({
     // a fetch STARTING after this event can still return a snapshot containing
     // the row -- the tombstone stops that resurrection where the journal (which
     // only covers post-start claims) cannot.
-    void serverId; // kept for caller symmetry with add/update; removals need no scope
+    // The tombstone is SCOPED to the channel's server: only a fetch enumerating
+    // that server's channels can retire it by omission -- a fetch for another
+    // server omits the id vacuously and must not testify. Callers inside the
+    // selected server may omit serverId; the selection supplies the scope.
+    const scope = serverId ?? get().selectedServerId ?? undefined;
     const apply = (list: Channel[]) => list.filter((c) => c.id !== channelId);
-    channelLineage.claim(apply, { removes: [channelId] });
+    channelLineage.claim(apply, { removes: [channelId], scope });
     set((state) => {
       const remaining = apply(state.channels);
       const updates: Partial<ServerState> = { channels: remaining };
