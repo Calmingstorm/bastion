@@ -32,6 +32,10 @@ export function InvitePage() {
     apiJoinViaInvite(code)
       .then(async (server) => {
         if (!isSessionGenerationCurrent(generation)) return;
+        // The join response asserts the server's existence: commit it BEFORE the
+        // list fetch so a tombstone from an earlier leave/kick/ban is cleared and
+        // the rejoined server is visible immediately.
+        useServerStore.getState().addServer(server);
         await fetchServers();
         if (!isSessionGenerationCurrent(generation)) return;
         await selectServer(server.id);

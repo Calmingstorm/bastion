@@ -33,6 +33,7 @@ interface ServerState {
   refreshChannels: (serverId: string) => Promise<void>;
   createServer: (name: string) => Promise<void>;
   createChannel: (serverId: string, name: string, topic?: string, categoryId?: string) => Promise<void>;
+  addServer: (server: Server) => void;
   updateServer: (server: Server) => void;
   addChannel: (channel: Channel) => void;
   updateChannel: (channel: Channel) => void;
@@ -108,6 +109,26 @@ export const useServerStore = create<ServerState>((set, get) => ({
         }
         servers = outcome.list;
         break;
+      }
+
+      // The SELECTION is reconciled with the committed list too: if the
+      // authoritative list no longer contains the selected server (kicked or the
+      // server deleted while this client was away -- no event to catch), the
+      // selection must not dangle over channels of a server we are not in.
+      const selectedAtCommit = get().selectedServerId;
+      if (selectedAtCommit && !servers.some((sv) => sv.id === selectedAtCommit)) {
+        channelLineage.barrier(); // its held channel fetch belongs to a dead scope
+        set({
+          servers,
+          isLoadingServers: false,
+          selectedServerId: servers[0]?.id ?? null,
+          selectedChannelId: null,
+          channels: [],
+          isLoadingChannels: false,
+        });
+        const next = get().selectedServerId;
+        if (next) void get().selectServer(next); // total: never rejects
+        return;
       }
 
       // If no server is selected and we have servers, merge server list +
@@ -249,6 +270,11 @@ export const useServerStore = create<ServerState>((set, get) => ({
   // and normalizes the selection the superseded fetch never got to make.
   refreshChannels: async (serverId: string) => {
     const generation = captureSessionGeneration();
+    // Scope check BEFORE claiming: a stale read-after-write callback for a server
+    // we no longer hold must not supersede the ACTIVE selection's fetch -- it
+    // would strand a spinner neither request settles (the refresh scope-bails,
+    // the selection is superseded).
+    if (get().selectedServerId !== serverId) return;
     let token = channelLineage.startFetch();
     try {
       for (;;) {
@@ -336,10 +362,23 @@ export const useServerStore = create<ServerState>((set, get) => ({
     }
   },
 
+  // Join-flow commit: the HTTP join response IS a server-existence assertion, so
+  // it clears any tombstone from an earlier leave/kick/ban -- a rejoin must show
+  // the server immediately, not after some later fetch cycles past the tombstone.
+  addServer: (server: Server) => {
+    const apply = upsertServer(server);
+    serverListLineage.claim(apply, { asserts: [server.id] });
+    set((state) => ({ servers: apply(state.servers) }));
+  },
+
   updateServer: (server: Server) => {
+    const present = get().servers.some((sv) => sv.id === server.id);
     const apply = (list: Server[]) =>
       list.map((sv) => (sv.id === server.id ? { ...sv, ...server } : sv));
-    serverListLineage.claim(apply, { asserts: [server.id] }); // an older snapshot cannot revert it
+    // Assert existence only when the update actually applied: a DELAYED no-op
+    // update (sent before a deletion, delivered after) must not clear the
+    // deletion's tombstone and reopen the resurrection window.
+    serverListLineage.claim(apply, present ? { asserts: [server.id] } : undefined);
     set((state) => ({ servers: apply(state.servers) }));
   },
 
@@ -356,11 +395,14 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
   updateChannel: (channel: Channel) => {
     if (get().selectedServerId !== channel.serverId) return; // other-server event
+    const present = get().channels.some((c) => c.id === channel.id);
     const apply = (list: Channel[]) =>
       list.some((c) => c.id === channel.id)
         ? sortChannels(list.map((c) => (c.id === channel.id ? { ...c, ...channel } : c)))
         : list;
-    channelLineage.claim(apply, { asserts: [channel.id] });
+    // Assert only when the target is present (see updateServer): a stale update
+    // for a just-deleted channel must not clear the deletion's tombstone.
+    channelLineage.claim(apply, present ? { asserts: [channel.id] } : undefined);
     set((state) => ({ channels: apply(state.channels) }));
   },
 
@@ -416,9 +458,11 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   removeServer: (serverId: string) => {
+    // Tombstoned, but tombstones are race covers, not permanence: leave, kick,
+    // and ban are all reversible -- fetch retirement (see lineage.ts) plus the
+    // join flow's addServer assertion keep a rejoin visible.
+    const wasSelected = get().selectedServerId === serverId;
     const apply = (list: Server[]) => list.filter((sv) => sv.id !== serverId);
-    // Journaled + tombstoned: an older snapshot (even one whose fetch starts
-    // after this event) cannot resurrect the removed server.
     serverListLineage.claim(apply, { removes: [serverId] });
     set((state) => {
       const remaining = apply(state.servers);
@@ -436,7 +480,11 @@ export const useServerStore = create<ServerState>((set, get) => ({
       }
       return { servers: remaining };
     });
-    // If we just cleared selection, auto-select first available server
+    // ONLY a removal of the selected server re-selects (its replacement needs
+    // channels fetched). Removing an unselected server must not churn the
+    // current view -- re-selecting it would clear channels, refetch, and yank
+    // the user back to the first channel.
+    if (!wasSelected) return;
     const { selectedServerId, servers } = get();
     if (selectedServerId && servers.length > 0) {
       get().selectServer(selectedServerId);
@@ -444,11 +492,11 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   reset: () => {
-    // Invalidate lineage-owned requests too: a fetch held across reset() must
-    // not repopulate the cleared store when it settles -- reset is a barrier on
-    // every resource this store owns, auth generation aside.
-    serverListLineage.barrier();
-    channelLineage.barrier();
+    // Full lineage reset, not just a barrier: held fetches are superseded AND
+    // accumulated tombstones/journal are dropped -- account A's removals must
+    // not filter account B's fetches on the same client.
+    serverListLineage.reset();
+    channelLineage.reset();
     set({
       servers: [],
       selectedServerId: null,

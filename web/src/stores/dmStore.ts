@@ -122,9 +122,10 @@ export const useDMStore = create<DMState>((set) => ({
   },
 
   reset: () => {
-    // Barrier the lineage: a fetch held across reset() must not repopulate the
-    // cleared store when it settles.
-    dmLineage.barrier();
+    // Full lineage reset, not just a barrier: held fetches are superseded AND
+    // accumulated tombstones are dropped -- account A closing a shared DM must
+    // not hide that same conversation from account B on this client.
+    dmLineage.reset();
     set({
       dmChannels: [],
       selectedDMId: null,

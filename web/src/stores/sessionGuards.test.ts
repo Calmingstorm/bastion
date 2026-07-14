@@ -762,6 +762,194 @@ describe('session-boundary guards', () => {
     useServerStore.getState().reset();
   });
 
+  // F38 round 24: tombstones are race covers, not permanence; refresh cannot
+  // claim a scope it does not hold; selection reconciles with the server list;
+  // unselected removals do not churn; reset drops accumulated evidence.
+  it('a stale wrong-server refresh does not strand the active selection', async () => {
+    useServerStore.setState({ servers: [], selectedServerId: null, channels: [] });
+    const dB = deferred<Channel[]>();
+    // The non-once fallback exists for the MUTANT path (a refresh that wrongly
+    // claims and fetches); correct code never consumes it -- a queued *Once here
+    // would leak into the next test that touches this mock.
+    vi.mocked(client.apiGetChannels).mockReturnValueOnce(dB.promise).mockResolvedValue([]);
+    vi.mocked(client.apiGetMemberPermissions).mockResolvedValue({ permissions: 0 });
+    const pB = useServerStore.getState().selectServer('srv-b'); // active selection, held
+    const pRef = useServerStore.getState().refreshChannels('srv-a'); // stale callback from the A era
+    await pRef; // must NOT have claimed the lineage (scope-bails before startFetch)
+    dB.resolve([{ id: 'c-b', name: 'b', serverId: 'srv-b', position: 0 } as Channel]);
+    await pB;
+    expect(useServerStore.getState().channels.map((c) => c.id)).toEqual(['c-b']); // B committed
+    expect(useServerStore.getState().isLoadingChannels).toBe(false); // no permanent spinner
+    useServerStore.getState().reset();
+  });
+
+  it('a DM tombstone retires after one fetch: a server-driven reopen becomes visible', async () => {
+    useDMStore.setState({ dmChannels: [{ id: 'dm-r' } as DMChannel] });
+    vi.mocked(client.apiCloseDM).mockResolvedValue(undefined as never);
+    await useDMStore.getState().closeDM('dm-r'); // tombstoned
+    const d1 = deferred<DMChannel[]>();
+    const d2 = deferred<DMChannel[]>();
+    vi.mocked(client.apiGetDMs).mockReturnValueOnce(d1.promise).mockReturnValueOnce(d2.promise);
+    const p1 = useDMStore.getState().fetchDMs();
+    d1.resolve([{ id: 'dm-r' } as DMChannel]); // race-window read: filtered once
+    await p1;
+    expect(useDMStore.getState().dmChannels).toEqual([]);
+    const p2 = useDMStore.getState().fetchDMs(); // the other side reopened it server-side
+    d2.resolve([{ id: 'dm-r' } as DMChannel]);
+    await p2;
+    expect(useDMStore.getState().dmChannels.map((d3) => d3.id)).toEqual(['dm-r']); // NOT suppressed forever
+    useDMStore.getState().reset();
+  });
+
+  it('reset clears DM tombstones: one account cannot hide a shared DM from the next', async () => {
+    useDMStore.setState({ dmChannels: [{ id: 'dm-shared' } as DMChannel] });
+    vi.mocked(client.apiCloseDM).mockResolvedValue(undefined as never);
+    await useDMStore.getState().closeDM('dm-shared'); // account A closes it
+    useDMStore.getState().reset(); // logout / account switch
+    const dFetch = deferred<DMChannel[]>();
+    vi.mocked(client.apiGetDMs).mockReturnValue(dFetch.promise);
+    const pFetch = useDMStore.getState().fetchDMs(); // account B's first fetch
+    dFetch.resolve([{ id: 'dm-shared' } as DMChannel]);
+    await pFetch;
+    expect(useDMStore.getState().dmChannels.map((d2) => d2.id)).toEqual(['dm-shared']); // visible to B
+    useDMStore.getState().reset();
+  });
+
+  it('reset clears server tombstones too', async () => {
+    useServerStore.setState({
+      servers: [{ id: 'srv-t', name: 'T', ownerId: 'u1' } as Server],
+      selectedServerId: null, channels: [],
+    });
+    useServerStore.getState().removeServer('srv-t'); // tombstoned
+    useServerStore.getState().reset();
+    useServerStore.setState({ selectedServerId: 'srv-t' }); // avoid the auto-select branch
+    const dList = deferred<Server[]>();
+    vi.mocked(client.apiGetServers).mockReturnValue(dList.promise);
+    const pList = useServerStore.getState().fetchServers();
+    dList.resolve([{ id: 'srv-t', name: 'T', ownerId: 'u1' } as Server]);
+    await pList;
+    expect(useServerStore.getState().servers.map((sv) => sv.id)).toEqual(['srv-t']);
+    useServerStore.getState().reset();
+  });
+
+  it('a rejoin is visible immediately and survives the next fetch', async () => {
+    useServerStore.setState({
+      servers: [{ id: 'srv-r', name: 'R', ownerId: 'u1' } as Server],
+      selectedServerId: null, channels: [],
+    });
+    useServerStore.getState().removeServer('srv-r'); // kicked/left -- tombstoned
+    expect(useServerStore.getState().servers).toEqual([]);
+    useServerStore.getState().addServer({ id: 'srv-r', name: 'R', ownerId: 'u1' } as Server); // join response
+    expect(useServerStore.getState().servers.map((sv) => sv.id)).toEqual(['srv-r']); // IMMEDIATE
+    useServerStore.setState({ selectedServerId: 'srv-r' }); // avoid the auto-select branch
+    const dList = deferred<Server[]>();
+    vi.mocked(client.apiGetServers).mockReturnValue(dList.promise);
+    const pList = useServerStore.getState().fetchServers();
+    dList.resolve([{ id: 'srv-r', name: 'R', ownerId: 'u1' } as Server]);
+    await pList;
+    expect(useServerStore.getState().servers.map((sv) => sv.id)).toEqual(['srv-r']); // not filtered back out
+    useServerStore.getState().reset();
+  });
+
+  it('a stale channel update does not clear a deletion tombstone', async () => {
+    useServerStore.setState({
+      servers: [], selectedServerId: 'srv-a', selectedChannelId: 'c-a',
+      channels: [{ id: 'c-a', name: 'a', serverId: 'srv-a', position: 0 } as Channel],
+    });
+    useServerStore.getState().removeChannel('c-dead', 'srv-a'); // tombstoned
+    const dRef = deferred<Channel[]>();
+    vi.mocked(client.apiGetChannels).mockReturnValue(dRef.promise);
+    const pRef = useServerStore.getState().refreshChannels('srv-a'); // fetch starts after the delete
+    // Delayed update, sent before the deletion, delivered after: target is absent.
+    useServerStore.getState().updateChannel({ id: 'c-dead', name: 'zombie', serverId: 'srv-a', position: 9 } as Channel);
+    dRef.resolve([
+      { id: 'c-a', name: 'a', serverId: 'srv-a', position: 0 } as Channel,
+      { id: 'c-dead', name: 'dead', serverId: 'srv-a', position: 9 } as Channel, // pre-delete read
+    ]);
+    await pRef;
+    expect(useServerStore.getState().channels.map((c) => c.id)).toEqual(['c-a']); // no resurrection
+    useServerStore.getState().reset();
+  });
+
+  it('a stale server update does not clear a deletion tombstone', async () => {
+    useServerStore.setState({
+      servers: [{ id: 'srv-keep', name: 'Keep', ownerId: 'u1' } as Server],
+      selectedServerId: 'srv-keep', channels: [],
+    });
+    useServerStore.getState().removeServer('srv-dead'); // tombstoned (absent locally)
+    const dList = deferred<Server[]>();
+    vi.mocked(client.apiGetServers).mockReturnValue(dList.promise);
+    const pList = useServerStore.getState().fetchServers();
+    useServerStore.getState().updateServer({ id: 'srv-dead', name: 'zombie' } as Server); // stale no-op
+    dList.resolve([
+      { id: 'srv-keep', name: 'Keep', ownerId: 'u1' } as Server,
+      { id: 'srv-dead', name: 'Dead', ownerId: 'u1' } as Server, // pre-delete read
+    ]);
+    await pList;
+    expect(useServerStore.getState().servers.map((sv) => sv.id)).toEqual(['srv-keep']);
+    useServerStore.getState().reset();
+  });
+
+  it('removing an unselected server does not churn the current view', async () => {
+    useServerStore.setState({
+      servers: [
+        { id: 'srv-a', name: 'A', ownerId: 'u1' } as Server,
+        { id: 'srv-other', name: 'O', ownerId: 'u1' } as Server,
+      ],
+      selectedServerId: 'srv-a', selectedChannelId: 'c-a',
+      channels: [{ id: 'c-a', name: 'a', serverId: 'srv-a', position: 0 } as Channel],
+    });
+    vi.mocked(client.apiGetChannels).mockClear();
+    useServerStore.getState().removeServer('srv-other');
+    expect(useServerStore.getState().selectedServerId).toBe('srv-a'); // untouched
+    expect(useServerStore.getState().selectedChannelId).toBe('c-a'); // not yanked to first
+    expect(useServerStore.getState().channels.map((c) => c.id)).toEqual(['c-a']); // not cleared
+    expect(useServerStore.getState().isLoadingChannels).toBe(false); // no refetch spinner
+    expect(vi.mocked(client.apiGetChannels)).not.toHaveBeenCalled(); // no reselect fetch
+    useServerStore.getState().reset();
+  });
+
+  it('a server-list commit omitting the selected server clears the dangling selection', async () => {
+    useServerStore.setState({
+      servers: [{ id: 'srv-gone', name: 'Gone', ownerId: 'u1' } as Server],
+      selectedServerId: 'srv-gone', selectedChannelId: 'c-g',
+      channels: [{ id: 'c-g', name: 'g', serverId: 'srv-gone', position: 0 } as Channel],
+    });
+    const dList = deferred<Server[]>();
+    vi.mocked(client.apiGetServers).mockReturnValue(dList.promise);
+    const pList = useServerStore.getState().fetchServers();
+    dList.resolve([]); // kicked while away: authoritative list no longer has it
+    await pList;
+    expect(useServerStore.getState().selectedServerId).toBeNull(); // no dangle
+    expect(useServerStore.getState().selectedChannelId).toBeNull();
+    expect(useServerStore.getState().channels).toEqual([]);
+    expect(useServerStore.getState().isLoadingChannels).toBe(false);
+    useServerStore.getState().reset();
+  });
+
+  it('a server-list commit omitting the selected server moves selection to the first available', async () => {
+    useServerStore.setState({
+      servers: [{ id: 'srv-gone', name: 'Gone', ownerId: 'u1' } as Server],
+      selectedServerId: 'srv-gone', selectedChannelId: 'c-g',
+      channels: [{ id: 'c-g', name: 'g', serverId: 'srv-gone', position: 0 } as Channel],
+    });
+    const dList = deferred<Server[]>();
+    vi.mocked(client.apiGetServers).mockReturnValue(dList.promise);
+    vi.mocked(client.apiGetChannels).mockResolvedValue([
+      { id: 'c-k', name: 'k', serverId: 'srv-keep', position: 0 } as Channel,
+    ]);
+    vi.mocked(client.apiGetMemberPermissions).mockResolvedValue({ permissions: 0 });
+    const pList = useServerStore.getState().fetchServers();
+    dList.resolve([{ id: 'srv-keep', name: 'Keep', ownerId: 'u1' } as Server]);
+    await pList;
+    expect(useServerStore.getState().selectedServerId).toBe('srv-keep'); // reselected
+    await Promise.resolve();
+    await Promise.resolve(); // let the fired selectServer commit
+    expect(useServerStore.getState().channels.map((c) => c.id)).toEqual(['c-k']);
+    expect(useServerStore.getState().isLoadingChannels).toBe(false);
+    useServerStore.getState().reset();
+  });
+
   it('reset invalidates lineage-owned requests: a held fetch cannot repopulate the cleared store', async () => {
     useServerStore.setState({ servers: [], selectedServerId: 'srv-keep', channels: [] });
     useDMStore.setState({ dmChannels: [] });

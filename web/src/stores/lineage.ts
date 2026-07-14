@@ -12,10 +12,15 @@
 // before its database transaction commits, so a fetch that starts just after the
 // event can return a snapshot that still contains the deleted row. The journal
 // cannot help there (the removal's seq predates the fetch start), so reconcile
-// drops tombstoned ids from the snapshot outright. A later claim that
-// (re)asserts an id -- a create, update, or upsert -- clears its tombstone: the
-// server has re-asserted existence, which also recovers from a broadcast whose
-// deletion subsequently failed server-side.
+// drops tombstoned ids from the snapshot outright.
+//
+// Tombstones are NOT permanent -- they cover a race, they do not encode "gone
+// forever" (leave/kick/ban are reversible; a closed shared DM can be reopened by
+// the other side). Two things retire one: a claim that (re)asserts the id (a
+// create event -- the server re-asserted existence), and FETCH RETIREMENT -- the
+// first ok-committing fetch that STARTED after the tombstone was laid filters it
+// one last time (covering the broadcast-before-commit read) and then retires it,
+// so from the next fetch on the server's word rules.
 export type ReconcileResult<T> =
   | { kind: 'ok'; list: T[] }
   // A newer fetch or a barrier owns the resource now; commit nothing (the owner
@@ -44,6 +49,11 @@ export interface Lineage<T> {
   // an error -- a superseded failure belongs to a scope that no longer exists.
   owns(startToken: number): boolean;
   reconcile(startToken: number, snapshot: T[]): ReconcileResult<T>;
+  // Store-level reset: supersede any held fetch AND drop accumulated evidence.
+  // Tombstones especially must not outlive the state they were laid against --
+  // an account's closed shared DM would otherwise stay hidden from the next
+  // account signing in on this client.
+  reset(): void;
 }
 
 const JOURNAL_CAP = 128;
@@ -98,15 +108,29 @@ export function createLineage<T>(getId: (item: T) => string): Lineage<T> {
     reconcile(startToken, snapshot) {
       if (startToken !== lastFetchStart) return { kind: 'superseded' };
       if (prunedThrough > startToken) return { kind: 'gap' };
-      // Tombstoned ids are dropped regardless of when the deletion was journaled:
-      // ids are never reused, so a tombstoned id in a snapshot is a stale read,
-      // not a recreation. (Recreation-by-server clears the tombstone via an
-      // assert claim before any snapshot could legitimately contain it.)
       let list = snapshot.filter((item) => !tombstones.has(getId(item)));
       for (const e of journal) {
         if (e.seq > startToken) list = e.apply(list);
       }
+      // FETCH RETIREMENT: this fetch started after these tombstones were laid, so
+      // its snapshot is server truth minted after the delete broadcast. One
+      // filtered commit covers the broadcast-before-commit read; after that the
+      // server's word rules -- a legitimately reopened DM or rejoined server
+      // reappears on the next fetch instead of being suppressed forever.
+      // (Post-start tombstones stay: their fetch-that-moved-past hasn't happened.)
+      for (const [id, seq] of tombstones) {
+        if (seq < startToken) tombstones.delete(id);
+      }
       return { kind: 'ok', list };
+    },
+    reset() {
+      // The counter stays monotonic so tokens held by in-flight fetches can never
+      // collide with post-reset tokens.
+      counter += 1;
+      lastFetchStart = counter;
+      journal.length = 0;
+      prunedThrough = 0;
+      tombstones.clear();
     },
   };
 }
