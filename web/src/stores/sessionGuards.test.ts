@@ -831,6 +831,32 @@ describe('session-boundary guards', () => {
     useDMStore.getState().reset();
   });
 
+  it('a message event revives a channel whose delete broadcast failed server-side', async () => {
+    // The delete was broadcast (tombstone laid) but the transaction failed: the
+    // channel is alive, every same-scope snapshot CONTAINS it, so omission can
+    // never testify and presence-gated updates cannot assert an absent target.
+    // The arriving message is the proof of life.
+    useServerStore.setState({
+      servers: [], selectedServerId: 'srv-a', selectedChannelId: 'c-a',
+      channels: [
+        { id: 'c-a', name: 'a', serverId: 'srv-a', position: 0 } as Channel,
+        { id: 'c-b', name: 'b', serverId: 'srv-a', position: 1 } as Channel,
+      ],
+    });
+    useServerStore.getState().removeChannel('c-b', 'srv-a'); // broadcast; DB delete then FAILS
+    useServerStore.getState().noteChannelAlive('c-b'); // someone messages in it
+    const dRef = deferred<Channel[]>();
+    vi.mocked(client.apiGetChannels).mockReturnValue(dRef.promise);
+    const pRef = useServerStore.getState().refreshChannels('srv-a');
+    dRef.resolve([
+      { id: 'c-a', name: 'a', serverId: 'srv-a', position: 0 } as Channel,
+      { id: 'c-b', name: 'b', serverId: 'srv-a', position: 1 } as Channel, // truthfully alive
+    ]);
+    await pRef;
+    expect(useServerStore.getState().channels.map((c) => c.id)).toEqual(['c-a', 'c-b']); // revived
+    useServerStore.getState().reset();
+  });
+
   it('a second still-stale fetch cannot resurrect a deleted channel', async () => {
     useServerStore.setState({
       servers: [], selectedServerId: 'srv-a', selectedChannelId: 'c-a',

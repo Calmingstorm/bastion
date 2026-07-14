@@ -57,9 +57,12 @@ export const useWSStore = create<WSState>((set) => ({
         }
 
         // A message in a channel is proof the channel is ALIVE: clear any DM
-        // close-tombstone BEFORE the refetch below, or the authoritative
-        // response revealing a reopened DM gets filtered as a stale read.
+        // close-tombstone BEFORE the refetch below (or the authoritative
+        // response revealing a reopened DM gets filtered as a stale read) and
+        // any channel deletion tombstone (the recovery path for a delete that
+        // was broadcast but failed server-side).
         useDMStore.getState().noteChannelAlive(message.channelId);
+        useServerStore.getState().noteChannelAlive(message.channelId);
 
         // If this message is for a channel not in our lists, refetch DMs
         // (handles reopened DMs where the user had closed the conversation)
