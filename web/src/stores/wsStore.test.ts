@@ -162,6 +162,25 @@ describe('wsStore MESSAGE_CREATE production wiring', () => {
     useServerStore.getState().reset();
   });
 
+  it('CHANNELS_STALE refetches the selected server channels (create/revoke race heal)', () => {
+    // A revocation delivered a CHANNELS_STALE: the client must refetch that
+    // server's channels so a spurious CHANNEL_CREATE from the race window is
+    // reconciled away by the authoritative list.
+    useServerStore.setState({ selectedServerId: 'srv-x', channels: [], selectedChannelId: null });
+    vi.mocked(client.apiGetChannels).mockReturnValue(new Promise(() => {}) as never);
+    handlers['CHANNELS_STALE']({ serverId: 'srv-x' });
+    expect(vi.mocked(client.apiGetChannels)).toHaveBeenCalledWith('srv-x');
+    useServerStore.getState().reset();
+  });
+
+  it('CHANNELS_STALE for a non-selected server does not refetch', () => {
+    useServerStore.setState({ selectedServerId: 'srv-a', channels: [] });
+    vi.mocked(client.apiGetChannels).mockClear();
+    handlers['CHANNELS_STALE']({ serverId: 'srv-other' });
+    expect(vi.mocked(client.apiGetChannels)).not.toHaveBeenCalled();
+    useServerStore.getState().reset();
+  });
+
   it('does not mark the ACTIVE channel unread', () => {
     useServerStore.setState({ selectedChannelId: 'ch-a' });
     handlers['MESSAGE_CREATE']({

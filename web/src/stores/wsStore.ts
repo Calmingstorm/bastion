@@ -146,6 +146,17 @@ export const useWSStore = create<WSState>((set) => ({
       }
     });
 
+    wsClient.on('CHANNELS_STALE', (data: unknown) => {
+      // A revocation just changed this user's channel visibility for a server.
+      // Refetch that server's channels if it is selected: the authoritative list
+      // omits the now-hidden channels, so serverStore reconciles away any channel
+      // a create-vs-revoke race delivered before the unsubscribe landed.
+      const payload = data as { serverId: string };
+      if (payload.serverId && useServerStore.getState().selectedServerId === payload.serverId) {
+        void useServerStore.getState().refreshChannels(payload.serverId);
+      }
+    });
+
     wsClient.on('PRESENCE_UPDATE', (data: unknown) => {
       const payload = data as { userId: string; status: string };
       if (payload.userId && payload.status) {

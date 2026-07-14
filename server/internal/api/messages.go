@@ -248,6 +248,7 @@ func reconcileServerSubscriptions(ctx context.Context, db *pgxpool.Pool, hub *re
 	// already off the channel and no later broadcast can reach them — and no
 	// pending queued subscribe can drain afterward to resurrect access.
 	granted := false
+	revoked := false
 	for _, chID := range channelIDs {
 		if view[chID] {
 			// SubscribeUser reports whether it actually ADDED a subscription; a
@@ -257,7 +258,9 @@ func reconcileServerSubscriptions(ctx context.Context, db *pgxpool.Pool, hub *re
 				granted = true
 			}
 		} else {
-			hub.UnsubscribeUser(userID, chID)
+			if hub.UnsubscribeUser(userID, chID) {
+				revoked = true
+			}
 		}
 	}
 	// A real grant (a newly-added subscription) does not bump the reconcile
@@ -266,6 +269,17 @@ func reconcileServerSubscriptions(ctx context.Context, db *pgxpool.Pool, hub *re
 	// them in CHANNEL_CREATE.
 	if granted {
 		hub.BumpReconcileGen()
+	}
+	// A revocation closes the create-vs-revoke race authoritatively on the
+	// client: a CHANNEL_CREATE can be delivered in the window between this
+	// revocation's DB commit and the unsubscribe above, so tell the member's
+	// client to refetch this server's channels -- the authoritative list omits
+	// the now-hidden channel and the client reconciles away the spurious entry.
+	if revoked {
+		hub.BroadcastToUser(userID, realtime.Event{
+			Type: realtime.EventChannelsStale,
+			Data: map[string]string{"serverId": serverID.String()},
+		})
 	}
 }
 
@@ -873,31 +887,51 @@ func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, a
 		if BeforeMentionIncrementForTest != nil {
 			BeforeMentionIncrementForTest()
 		}
-		// The NOTIFICATION is contingent on the mention actually COMMITTING. If
-		// the mention row fails, the computed badge cannot count it, so a
-		// notification would be a pure phantom -- skip it. If the read_states
-		// anchor fails (an existing-row member), the badge WILL still count the
-		// mention on the next fetch, but a live notification with no committed
-		// anchor is inconsistent, so skip it too and let the fetch surface the
-		// badge.
-		if _, err := h.db.Exec(r.Context(),
-			`INSERT INTO mentions (user_id, channel_id, message_id, seq)
-			 VALUES ($1, $2, $3, $4)
-			 ON CONFLICT (user_id, message_id) DO NOTHING`,
-			uid, channelID, msgID, msgSeq,
-		); err != nil {
-			log.Error().Err(err).Msg("failed to record mention; skipping notification")
-			continue
-		}
-		// Ensure a read_states row exists (watermark NULL = nothing read yet) so
-		// the computed badge surfaces for a channel the member has never acked --
-		// the read-states query sources counts from read_states.
-		if _, err := h.db.Exec(r.Context(),
-			`INSERT INTO read_states (user_id, channel_id) VALUES ($1, $2)
-			 ON CONFLICT (user_id, channel_id) DO NOTHING`,
-			uid, channelID,
-		); err != nil {
-			log.Error().Err(err).Msg("failed to ensure read_states row for mention; skipping notification")
+		// The mention row AND its read_states anchor commit in ONE transaction:
+		// the badge is COUNT(mentions above the watermark) sourced FROM read_states
+		// rows, so a mention with no anchor is committed-but-invisible. Rolling
+		// both together keeps the projection consistent, and the NOTIFICATION is
+		// contingent on that committed, visible state -- a partial failure emits
+		// nothing (a phantom badge/popup for state that does not exist).
+		//
+		// INVARIANT (load-bearing for correctness): processMentions runs EXACTLY
+		// ONCE per message, and msgID is a fresh server-minted UUID, so the mention
+		// INSERT is never a duplicate in practice. mentionCommitted therefore means
+		// "a NEW mention was persisted." If a future replay/retry/bulk path ever
+		// calls this more than once for the same (user_id, message_id), the ON
+		// CONFLICT DO NOTHING would no-op yet still return true, re-notifying with
+		// no new mention -- gate on the mention INSERT's RowsAffected there.
+		mentionCommitted := func() bool {
+			tx, err := h.db.Begin(r.Context())
+			if err != nil {
+				log.Error().Err(err).Msg("failed to begin mention tx; skipping notification")
+				return false
+			}
+			defer func() { _ = tx.Rollback(r.Context()) }()
+			if _, err := tx.Exec(r.Context(),
+				`INSERT INTO mentions (user_id, channel_id, message_id, seq)
+				 VALUES ($1, $2, $3, $4)
+				 ON CONFLICT (user_id, message_id) DO NOTHING`,
+				uid, channelID, msgID, msgSeq,
+			); err != nil {
+				log.Error().Err(err).Msg("failed to record mention; skipping notification")
+				return false
+			}
+			if _, err := tx.Exec(r.Context(),
+				`INSERT INTO read_states (user_id, channel_id) VALUES ($1, $2)
+				 ON CONFLICT (user_id, channel_id) DO NOTHING`,
+				uid, channelID,
+			); err != nil {
+				log.Error().Err(err).Msg("failed to ensure read_states anchor; skipping notification")
+				return false
+			}
+			if err := tx.Commit(r.Context()); err != nil {
+				log.Error().Err(err).Msg("failed to commit mention; skipping notification")
+				return false
+			}
+			return true
+		}()
+		if !mentionCommitted {
 			continue
 		}
 

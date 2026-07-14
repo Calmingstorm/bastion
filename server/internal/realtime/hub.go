@@ -274,6 +274,15 @@ func (h *Hub) unsubscribeUserFromChannel(userID, channelID uuid.UUID) {
 	}
 }
 
+// UnsubscribeUserFromChannel rolls back a speculative subscribe from OUTSIDE the
+// hub package (the channel-create best-effort path) WITHOUT bumping the reconcile
+// generation -- undoing our own optimistic add is not a revocation and must not
+// disturb other in-flight revalidations. Callers that need concurrent connects to
+// re-read after an abort bump the generation themselves (BumpReconcileGen).
+func (h *Hub) UnsubscribeUserFromChannel(userID, channelID uuid.UUID) {
+	h.unsubscribeUserFromChannel(userID, channelID)
+}
+
 // SubscribeAuthorizedStable installs a freshly-created channel's subscriptions
 // against a MOVING world. Revocations (UnsubscribeUser) and the channel's own
 // deletion (RemoveChannel) both bump the reconcile generation, so this samples
@@ -348,7 +357,7 @@ func (h *Hub) SubscribeUser(userID, channelID uuid.UUID) bool {
 // UnsubscribeUser unsubscribes all of a user's connected clients from a channel
 // synchronously, so no broadcast issued after this returns can still reach the
 // user on that channel.
-func (h *Hub) UnsubscribeUser(userID, channelID uuid.UUID) {
+func (h *Hub) UnsubscribeUser(userID, channelID uuid.UUID) bool {
 	// Signal a revocation to any in-flight connect revalidation, even if the user
 	// has no clients or no subscription right now — a client may be mid-connect
 	// with a snapshot that predates this call.
@@ -358,18 +367,23 @@ func (h *Hub) UnsubscribeUser(userID, channelID uuid.UUID) {
 	defer h.mu.Unlock()
 	clients, ok := h.users[userID]
 	if !ok {
-		return
+		return false
 	}
 	set, ok := h.channels[channelID]
 	if !ok {
-		return
+		return false
 	}
+	removed := false
 	for c := range clients {
-		delete(set, c)
+		if _, ok := set[c]; ok {
+			delete(set, c)
+			removed = true
+		}
 	}
 	if len(set) == 0 {
 		delete(h.channels, channelID)
 	}
+	return removed
 }
 
 func (h *Hub) BroadcastToUser(userID uuid.UUID, event Event) {

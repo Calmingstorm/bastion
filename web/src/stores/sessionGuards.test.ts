@@ -1249,6 +1249,35 @@ describe('session-boundary guards', () => {
     useUnreadStore.getState().reset();
   });
 
+  it('out-of-order ack: neither the watermark NOR the flag regresses to the stale response', async () => {
+    // Odin round 34 blocker 1: two acks complete out of order. The older ack's
+    // response (a server no-op, carrying an OLDER watermark) arrives LAST. It must
+    // regress NEITHER lastReadSeq (the monotonic apply) NOR the unread flag (which
+    // is derived from the WINNING watermark's count, not the last response). The
+    // stale response carries a NONZERO count so a flag derived from `committed`
+    // rather than the winner would wrongly re-flag the channel.
+    useUnreadStore.setState({
+      readStates: { c1: { userId: '', channelId: 'c1', lastMessageId: 'm1', lastReadAt: '', lastReadSeq: 1, mentionCount: 0 } },
+      unreadChannels: new Set(),
+    });
+    const dOld = deferred<ReadState>();
+    const dNew = deferred<ReadState>();
+    vi.mocked(client.apiAckChannel).mockReturnValueOnce(dOld.promise as never).mockReturnValueOnce(dNew.promise as never);
+    const pOld = useUnreadStore.getState().ackChannel('c1', 'm5'); // older
+    const pNew = useUnreadStore.getState().ackChannel('c1', 'm9'); // newer
+    dNew.resolve({ userId: '', channelId: 'c1', lastMessageId: 'm9', lastReadAt: '', lastReadSeq: 9, mentionCount: 0 }); // winner: read through m9, no mentions
+    await pNew;
+    expect(useUnreadStore.getState().readStates['c1']?.lastReadSeq).toBe(9);
+    expect(useUnreadStore.getState().isUnread('c1')).toBe(false);
+    // Stale, arrives last, carries a NONZERO count the higher watermark subsumes.
+    dOld.resolve({ userId: '', channelId: 'c1', lastMessageId: 'm5', lastReadAt: '', lastReadSeq: 5, mentionCount: 3 });
+    await pOld;
+    expect(useUnreadStore.getState().readStates['c1']?.lastReadSeq).toBe(9); // NOT regressed to 5
+    expect(useUnreadStore.getState().getMentionCount('c1')).toBe(0); // winner's count, NOT the stale 3
+    expect(useUnreadStore.getState().isUnread('c1')).toBe(false); // NOT re-flagged from the stale response
+    useUnreadStore.getState().reset();
+  });
+
   it('an ack commits the server-returned count, not a local guess', async () => {
     // The response carries cross-device mentions the ack did NOT cover (count 2):
     // the client commits that, keeping the channel flagged, instead of zeroing.

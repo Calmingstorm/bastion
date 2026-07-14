@@ -165,15 +165,27 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
       }
       // Quiet flight: the response is current server truth. Claim it so a held
       // pre-ack fetch reconciles it IN rather than clobbering it with a pre-ack
-      // snapshot, then commit.
-      const apply = (list: ReadState[]) => [committed, ...list.filter((r) => r.channelId !== channelId)];
+      // snapshot, then commit. The apply is MONOTONIC on the watermark: two acks
+      // can complete out of order (device acks m5 then m9; the m5 response, which
+      // the server no-op'd, may carry an OLDER committed watermark and arrive
+      // last), so it never regresses lastReadSeq -- the higher watermark, and its
+      // authoritative count, win regardless of completion order.
+      const apply = (list: ReadState[]) => {
+        const existing = list.find((r) => r.channelId === channelId);
+        const winner =
+          existing && (existing.lastReadSeq ?? -1) > (committed.lastReadSeq ?? -1)
+            ? existing
+            : committed;
+        return [winner, ...list.filter((r) => r.channelId !== channelId)];
+      };
       readStateLineage.claim(apply);
       set((state) => {
         const newUnread = new Set(state.unreadChannels);
-        // The flag clears exactly when the server says nothing unread remains
-        // (no mentions above the committed watermark); a nonzero committed count
-        // means cross-device mentions the ack did not cover -- keep it flagged.
-        if (committed.mentionCount === 0) {
+        const nextStates = toMap(apply(Object.values(state.readStates)));
+        // Base the flag on the WINNING (highest-watermark) read state, not the
+        // possibly-stale response -- if a newer ack already won, its count rules.
+        const winning = nextStates[channelId];
+        if ((winning?.mentionCount ?? 0) === 0) {
           newUnread.delete(channelId);
           flagRaised.delete(channelId);
         } else {
@@ -182,10 +194,7 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
           // no unread mentions here (they were read elsewhere).
           newUnread.add(channelId);
         }
-        return {
-          unreadChannels: newUnread,
-          readStates: toMap(apply(Object.values(state.readStates))),
-        };
+        return { unreadChannels: newUnread, readStates: nextStates };
       });
     } catch {
       // Silent fail

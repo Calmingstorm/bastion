@@ -945,3 +945,227 @@ func TestGrantDuringCreateReceivesCreate(t *testing.T) {
 		t.Fatalf("a member granted access during create must receive CHANNEL_CREATE exactly once, got %d", n)
 	}
 }
+
+// TestMentionAnchorFailureCommitsNoMention: the mention row and its read_states
+// anchor commit in one transaction. If the anchor insert fails, the whole
+// transaction rolls back -- no committed-but-invisible mention -- and no
+// NOTIFICATION is sent. Forced by dropping the channel's read_states FK target
+// mid-transaction is impractical; instead a trigger makes the read_states insert
+// fail, and we assert both no notification AND no orphaned mention row.
+func TestMentionAnchorFailureCommitsNoMention(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	member := h.Register("member")
+	serverID := h.CreateServer(owner, "S")
+	channelID := h.CreateChannel(owner, serverID, "general")
+	joinServer(h, owner, member, serverID)
+
+	// A trigger that raises on the read_states insert (the anchor), so the
+	// mention transaction rolls back as a unit.
+	ctx := context.Background()
+	if _, err := h.Pool.Exec(ctx, `
+		CREATE OR REPLACE FUNCTION fail_readstate_anchor() RETURNS trigger AS $$
+		BEGIN RAISE EXCEPTION 'anchor blocked'; END; $$ LANGUAGE plpgsql;
+		CREATE TRIGGER t_fail_anchor BEFORE INSERT ON read_states
+		FOR EACH ROW WHEN (NEW.user_id = '`+member.ID+`') EXECUTE FUNCTION fail_readstate_anchor();
+	`); err != nil {
+		t.Fatalf("install trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = h.Pool.Exec(context.Background(),
+			`DROP TRIGGER IF EXISTS t_fail_anchor ON read_states; DROP FUNCTION IF EXISTS fail_readstate_anchor()`)
+	})
+
+	ws := h.DialWS(member)
+	ws.Drain(400 * time.Millisecond)
+
+	if code := postTextMessage(h, owner, channelID, "@member anchored"); code != http.StatusCreated {
+		t.Fatalf("message: got %d", code)
+	}
+	if n := ws.CountEvents("NOTIFICATION", 700*time.Millisecond); n != 0 {
+		t.Fatalf("an anchor failure must not notify, got %d", n)
+	}
+	// And no orphaned mention row committed (the whole tx rolled back).
+	var mentions int
+	if err := h.Pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM mentions WHERE user_id = $1 AND channel_id = $2`, member.ID, channelID).Scan(&mentions); err != nil {
+		t.Fatalf("count mentions: %v", err)
+	}
+	if mentions != 0 {
+		t.Fatalf("an anchor failure must leave no committed mention, got %d", mentions)
+	}
+}
+
+// TestCreateNonConvergenceStillDelivers: when the subscription stability loop
+// cannot converge, the create does NOT fail closed -- it best-effort subscribes
+// the authorized members and delivers CHANNEL_CREATE, so connected clients get
+// the channel and its messages instead of silence. Forced by an
+// AfterChannelCreateSubscribeForTest seam that revokes+regrants every pass so
+// the generation never stabilizes.
+func TestCreateNonConvergenceStillDelivers(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	member := h.Register("member")
+	serverID := h.CreateServer(owner, "S")
+	joinServer(h, owner, member, serverID)
+
+	ws := h.DialWS(member)
+	ws.Drain(400 * time.Millisecond)
+
+	def := defaultRoleID(h, owner, serverID)
+	// Toggle a member's own default-role permission every pass so revGen keeps
+	// moving and SubscribeAuthorizedStable exhausts its attempts. Keep the member
+	// authorized (ViewChannel stays set) so best-effort delivery includes them.
+	toggle := true
+	api.AfterChannelCreateSubscribeForTest = func() {
+		if toggle {
+			_ = patchRolePerms(h, owner, serverID, def, permissions.ViewChannel|permissions.SendMessages|permissions.AttachFiles)
+		} else {
+			_ = patchRolePerms(h, owner, serverID, def, permissions.ViewChannel|permissions.SendMessages)
+		}
+		toggle = !toggle
+	}
+	t.Cleanup(func() { api.AfterChannelCreateSubscribeForTest = nil })
+
+	if code := h.Request(http.MethodPost, "/api/v1/servers/"+serverID+"/channels",
+		owner.AccessToken, map[string]string{"name": "churny"}, nil); code != http.StatusCreated {
+		t.Fatalf("create: got %d", code)
+	}
+	if n := ws.CountEvents("CHANNEL_CREATE", 900*time.Millisecond); n != 1 {
+		t.Fatalf("best-effort delivery must still send CHANNEL_CREATE to an authorized member, got %d", n)
+	}
+}
+
+// TestRevocationEmitsChannelsStale: a revocation that unsubscribes an online
+// member sends them CHANNELS_STALE, so their client refetches and reconciles
+// away any channel delivered in the create-vs-revoke window.
+func TestRevocationEmitsChannelsStale(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	member := h.Register("member")
+	serverID := h.CreateServer(owner, "S")
+	h.CreateChannel(owner, serverID, "general")
+	joinServer(h, owner, member, serverID)
+
+	ws := h.DialWS(member)
+	ws.Drain(400 * time.Millisecond)
+
+	def := defaultRoleID(h, owner, serverID)
+	if code := patchRolePerms(h, owner, serverID, def, permissions.SendMessages); code != http.StatusOK {
+		t.Fatalf("revoke ViewChannel: got %d", code)
+	}
+	if n := ws.CountEvents("CHANNELS_STALE", 800*time.Millisecond); n != 1 {
+		t.Fatalf("a revocation must emit CHANNELS_STALE to the member, got %d", n)
+	}
+}
+
+// TestBestEffortDoesNotLeakToRevokedMember: the non-convergence best-effort path
+// must apply the same generation guard as the stability loop. A member revoked in
+// the guard window (still in the just-read authorized set, so the speculative
+// subscribe re-adds them) must be rolled back -- otherwise every later message on
+// the channel leaks to a revoked member (blocker 2, back door). We force the
+// stability loop to exhaust (bump the generation every pass, authorization
+// untouched), then revoke the member inside the best-effort guard window, and
+// prove a subsequent message never reaches their socket.
+func TestBestEffortDoesNotLeakToRevokedMember(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	member := h.Register("member")
+	serverID := h.CreateServer(owner, "S")
+	joinServer(h, owner, member, serverID)
+
+	ws := h.DialWS(member)
+	ws.Drain(400 * time.Millisecond)
+
+	def := defaultRoleID(h, owner, serverID)
+
+	// Exhaust the stability loop without touching authorization: bump the reconcile
+	// generation on every pass so it can never confirm a stable snapshot.
+	api.AfterChannelCreateSubscribeForTest = func() { h.Hub.BumpReconcileGen() }
+	t.Cleanup(func() { api.AfterChannelCreateSubscribeForTest = nil })
+
+	// Inside the best-effort guard window (member already in the read authorized
+	// set), revoke the member exactly once. The buggy path subscribes them anyway;
+	// the guard must roll it back.
+	revoked := false
+	api.AfterBestEffortAuthzReadForTest = func() {
+		if revoked {
+			return
+		}
+		revoked = true
+		_ = patchRolePerms(h, owner, serverID, def, permissions.SendMessages) // drop ViewChannel
+	}
+	t.Cleanup(func() { api.AfterBestEffortAuthzReadForTest = nil })
+
+	var created struct {
+		ID string `json:"id"`
+	}
+	if code := h.Request(http.MethodPost, "/api/v1/servers/"+serverID+"/channels",
+		owner.AccessToken, map[string]string{"name": "leaky"}, &created); code != http.StatusCreated {
+		t.Fatalf("create: got %d", code)
+	}
+	if created.ID == "" {
+		t.Fatal("create did not return a channel id")
+	}
+	if !revoked {
+		t.Fatal("best-effort guard window never ran; test did not exercise the fallback")
+	}
+	ws.Drain(300 * time.Millisecond) // absorb any CHANNEL_CREATE / CHANNELS_STALE
+
+	// The revoked member must not be subscribed: a message on the channel must not
+	// reach them. A leaked speculative subscribe would deliver it.
+	if code := h.Request(http.MethodPost, "/api/v1/channels/"+created.ID+"/messages",
+		owner.AccessToken, map[string]any{"content": "post-revoke"}, nil); code != http.StatusCreated {
+		t.Fatalf("owner send: got %d", code)
+	}
+	if n := ws.CountEvents("MESSAGE_CREATE", 800*time.Millisecond); n != 0 {
+		t.Fatalf("revoked member must not receive channel messages (subscription leak), got %d", n)
+	}
+}
+
+// TestBestEffortDeletedInWindowEmitsNoPhantom: if the channel is DELETED inside
+// the best-effort guard window, the degraded floor must not broadcast a phantom
+// CHANNEL_CREATE for a gone channel. authorizedMemberIDs is server-scoped and
+// still returns members for a deleted channel, so without an existence re-check
+// the floor would emit a create that never self-heals (members kept ViewChannel,
+// so no CHANNELS_STALE). We force non-convergence, delete the row in the guard
+// window, and prove no CHANNEL_CREATE reaches the member.
+func TestBestEffortDeletedInWindowEmitsNoPhantom(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	member := h.Register("member")
+	serverID := h.CreateServer(owner, "S")
+	joinServer(h, owner, member, serverID)
+
+	ws := h.DialWS(member)
+	ws.Drain(400 * time.Millisecond)
+
+	// Exhaust the stability loop (bump every pass, authorization untouched).
+	api.AfterChannelCreateSubscribeForTest = func() { h.Hub.BumpReconcileGen() }
+	t.Cleanup(func() { api.AfterChannelCreateSubscribeForTest = nil })
+
+	// Inside the best-effort guard window, delete the channel row and move the
+	// generation exactly once: the floor must detect the delete and stay silent.
+	deleted := false
+	api.AfterBestEffortAuthzReadForTest = func() {
+		if deleted {
+			return
+		}
+		deleted = true
+		_, _ = h.Pool.Exec(context.Background(),
+			`DELETE FROM channels WHERE server_id = $1::uuid AND name = $2`, serverID, "ghost")
+		h.Hub.BumpReconcileGen()
+	}
+	t.Cleanup(func() { api.AfterBestEffortAuthzReadForTest = nil })
+
+	if code := h.Request(http.MethodPost, "/api/v1/servers/"+serverID+"/channels",
+		owner.AccessToken, map[string]string{"name": "ghost"}, nil); code != http.StatusCreated {
+		t.Fatalf("create: got %d", code)
+	}
+	if !deleted {
+		t.Fatal("best-effort guard window never ran; test did not exercise the fallback")
+	}
+	if n := ws.CountEvents("CHANNEL_CREATE", 800*time.Millisecond); n != 0 {
+		t.Fatalf("a channel deleted in the best-effort window must emit no phantom CHANNEL_CREATE, got %d", n)
+	}
+}

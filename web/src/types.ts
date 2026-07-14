@@ -290,6 +290,7 @@ export type WSEventType =
   | 'CHANNEL_CREATE'
   | 'CHANNEL_UPDATE'
   | 'CHANNEL_DELETE'
+  | 'CHANNELS_STALE'
   | 'SERVER_UPDATE'
   | 'MEMBER_JOIN'
   | 'MEMBER_LEAVE'

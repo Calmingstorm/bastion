@@ -41,6 +41,13 @@ var AfterChannelCreateStableForTest func()
 // member whose revocation raced the create.
 var AfterChannelCreateSubscribeForTest func()
 
+// AfterBestEffortAuthzReadForTest runs in the non-convergence best-effort path,
+// AFTER the authorized set is read but BEFORE it is speculatively subscribed (nil
+// in production). Tests use it to revoke a member inside that window and prove the
+// generation guard rolls the speculative subscribe back -- a revoked member must
+// never be left subscribed by the fallback (the blocker-2 leak, back door).
+var AfterBestEffortAuthzReadForTest func()
+
 func NewChannelHandler(db *pgxpool.Pool, hub *realtime.Hub) *ChannelHandler {
 	return &ChannelHandler{db: db, hub: hub}
 }
@@ -283,17 +290,95 @@ func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return ids, true, nil
 	})
 	if subErr != nil {
-		// Fail-closed after N racing revocations could not converge: drop any
-		// partial subscriptions (RemoveChannel) and emit no CHANNEL_CREATE for a
-		// subscription state we could not confirm. This does leave already-
-		// connected authorized members unsubscribed (only in-flight connect/
-		// create loops resample the generation, so the bump does not re-subscribe
-		// them here) -- but the row is committed, so it self-heals: their client
-		// picks the channel up on the next channel-list fetch, and the
-		// MESSAGE_CREATE unknown-channel path (web) refetches on the first message
-		// delivered there. An 8-consecutive-revocation race, degraded not broken.
-		h.hub.RemoveChannel(ch.ID)
-		log.Error().Err(subErr).Msg("channel create: subscription did not stabilize")
+		// The stability loop could not converge (N consecutive racing
+		// revocations). Failing closed (drop all subscriptions, stay silent)
+		// starves connected authorized clients: they get no messages and the
+		// unknown-channel refetch never fires (no first message arrives). But
+		// blindly re-subscribing the authorized set and broadcasting can leave a
+		// member a concurrent revoke already committed subscribed FOREVER -- the
+		// blocker-2 leak through the back door, because this path has no
+		// generation guard. So apply the SAME discipline as the stability loop one
+		// final time: sample the reconcile generation, subscribe the authorized
+		// set, and re-check. If nothing raced, broadcast to the channel (full live
+		// delivery, provably leak-free). If a revocation DID race, roll the
+		// speculative subscriptions back (no leak), bump the generation so any
+		// concurrent legitimate join re-reads, and degrade to a one-time per-user
+		// CHANNEL_CREATE: members still learn the channel and self-heal live
+		// delivery on reconnect, while a member revoked in the last instant gets
+		// at most a transient event their CHANNELS_STALE reconciles away -- never a
+		// persistent subscription. If the channel was itself deleted amid the
+		// churn, clean up and stay silent.
+		log.Warn().Err(subErr).Msg("channel create: subscription did not stabilize; best-effort delivery")
+		var stillExists bool
+		if err := h.db.QueryRow(r.Context(),
+			`SELECT EXISTS(SELECT 1 FROM channels WHERE id = $1)`, ch.ID).Scan(&stillExists); err != nil || !stillExists {
+			h.hub.RemoveChannel(ch.ID)
+			writeJSON(w, http.StatusCreated, ch)
+			return
+		}
+		gen := h.hub.ReconcileGen()
+		if ids, authErr := h.authorizedMemberIDs(r, serverID); authErr == nil {
+			// Test seam: fires after the authorized set is read but before the
+			// speculative subscribe, so a revocation it triggers lands inside the
+			// guard window and MUST be rolled back below.
+			if AfterBestEffortAuthzReadForTest != nil {
+				AfterBestEffortAuthzReadForTest()
+			}
+			for _, uid := range ids {
+				h.hub.SubscribeUser(uid, ch.ID)
+			}
+			if h.hub.ReconcileGen() == gen {
+				// Converged: every subscribed member stayed authorized across the
+				// window, so channel delivery cannot leak.
+				h.hub.BroadcastToChannel(ch.ID, realtime.Event{
+					Type: realtime.EventChannelCreate,
+					Data: ch,
+				})
+				writeJSON(w, http.StatusCreated, ch)
+				return
+			}
+			// The generation also moves on a concurrent GRANT (a harmless bump) --
+			// we cannot tell it from a revoke, so we conservatively roll back and
+			// degrade in both cases. On a pure grant this only costs the members a
+			// live subscription until they reconnect; correctness is preserved.
+			// A revocation raced: undo the speculative subscriptions BEFORE any
+			// broadcast so a just-revoked member is never left subscribed, then
+			// force concurrent joins to re-read.
+			for _, uid := range ids {
+				h.hub.UnsubscribeUserFromChannel(uid, ch.ID)
+			}
+			h.hub.BumpReconcileGen()
+		} else {
+			log.Error().Err(authErr).Msg("channel create best-effort: authorized members read failed; degrading to no-op delivery")
+		}
+		// The generation also moves when THIS channel is deleted in the guard
+		// window (RemoveChannel bumps it). authorizedMemberIDs is server-scoped and
+		// would still return members for a now-gone channel, so a naive degraded
+		// broadcast would emit a phantom CHANNEL_CREATE for a deleted channel --
+		// and it would NOT self-heal (the members kept ViewChannel, so no
+		// CHANNELS_STALE fires; only a manual refetch clears it). Re-check
+		// existence before the floor and stay silent if the row is gone, mirroring
+		// the stable path. (A residual commit->check gap remains, identical to the
+		// stable path's inherent one.)
+		var floorExists bool
+		if err := h.db.QueryRow(r.Context(),
+			`SELECT EXISTS(SELECT 1 FROM channels WHERE id = $1)`, ch.ID).Scan(&floorExists); err != nil || !floorExists {
+			h.hub.RemoveChannel(ch.ID)
+			writeJSON(w, http.StatusCreated, ch)
+			return
+		}
+		// Degraded floor: one-time per-user delivery to the current authorized set
+		// (no persistent subscription). Live delivery self-heals on reconnect.
+		if ids, authErr := h.authorizedMemberIDs(r, serverID); authErr == nil {
+			for _, uid := range ids {
+				h.hub.BroadcastToUser(uid, realtime.Event{
+					Type: realtime.EventChannelCreate,
+					Data: ch,
+				})
+			}
+		} else {
+			log.Error().Err(authErr).Msg("channel create best-effort: authorized members read failed for degraded delivery")
+		}
 		writeJSON(w, http.StatusCreated, ch)
 		return
 	}
