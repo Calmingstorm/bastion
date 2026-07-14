@@ -1467,6 +1467,34 @@ describe('session-boundary guards', () => {
     useUnreadStore.getState().reset();
   });
 
+  it('a seq event with no seq watermark defers to a covering read time', async () => {
+    // Migrated-before-seq read state: lastReadSeq undefined, lastReadAt present.
+    // A seq-carrying event whose time is covered by lastReadAt must not raise.
+    useUnreadStore.setState({
+      readStates: {
+        c13: { userId: '', channelId: 'c13', lastMessageId: 'm1', lastReadAt: '2026-07-14T12:00:10Z', mentionCount: 0 },
+      },
+      unreadChannels: new Set(),
+    });
+    useUnreadStore.getState().markUnread('c13', { seq: 5, at: '2026-07-14T12:00:05Z' }); // time-covered
+    expect(useUnreadStore.getState().isUnread('c13')).toBe(false);
+    useUnreadStore.getState().markUnread('c13', { seq: 6, at: '2026-07-14T12:00:20Z' }); // newer time
+    expect(useUnreadStore.getState().isUnread('c13')).toBe(true);
+    useUnreadStore.getState().reset();
+  });
+
+  it('a non-positive seq never tests as covered', async () => {
+    useUnreadStore.setState({
+      readStates: {
+        c14: { userId: '', channelId: 'c14', lastMessageId: 'm9', lastReadAt: '', lastReadSeq: 90, mentionCount: 0 },
+      },
+      unreadChannels: new Set(),
+    });
+    useUnreadStore.getState().markUnread('c14', { seq: 0 }); // nonconforming; must not falsely cover
+    expect(useUnreadStore.getState().isUnread('c14')).toBe(true);
+    useUnreadStore.getState().reset();
+  });
+
   it('a covered delayed event does not suppress an in-flight ack flag clear', async () => {
     // The activity epoch answers "did anything UNREAD arrive during the ack's
     // flight" -- a delayed event already covered by the watermark must be a

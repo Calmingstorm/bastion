@@ -9,7 +9,7 @@ interface UnreadState {
   unreadChannels: Set<string>;
   fetchReadStates: () => Promise<void>;
   ackChannel: (channelId: string, messageId: string) => Promise<void>;
-  markUnread: (channelId: string, mark?: { seq?: number; at?: string }) => void;
+  markUnread: (channelId: string, mark?: { seq?: number; at?: string }) => boolean;
   incrementMention: (channelId: string) => void;
   isUnread: (channelId: string) => boolean;
   getMentionCount: (channelId: string) => number;
@@ -198,9 +198,17 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
     // ack's flight", and a delayed already-read event would otherwise suppress
     // that ack's flag-clear (stranding a flag that has no watermark to retire
     // it).
-    if (seq !== undefined) {
-      // Primary tier: the server-owned sequence.
-      if (rs?.lastReadSeq !== undefined && seq <= rs.lastReadSeq) return;
+    if (seq !== undefined && seq > 0) {
+      // Primary tier: the server-owned sequence (seq starts at 1; a 0/negative
+      // seq from a nonconforming server would falsely test as covered against
+      // any watermark, so it never enters this tier).
+      if (rs?.lastReadSeq !== undefined) {
+        if (seq <= rs.lastReadSeq) return false; // covered by the seq watermark
+      } else if (rs?.lastReadAt && mark?.at && Date.parse(rs.lastReadAt) >= Date.parse(mark.at)) {
+        // No seq watermark yet (e.g. a read state migrated before seq existed),
+        // but a server-minted read time covers this event: still covered.
+        return false;
+      }
       bumpActivity(channelId);
       const prev = flagRaised.get(channelId);
       flagRaised.set(channelId, {
@@ -211,7 +219,7 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
       // Fallback tier (pre-seq servers): server-minted times on one clock.
       const raisedAt = mark?.at ? Date.parse(mark.at) : NaN;
       if (!Number.isNaN(raisedAt)) {
-        if (rs?.lastReadAt && Date.parse(rs.lastReadAt) >= raisedAt) return; // already read
+        if (rs?.lastReadAt && Date.parse(rs.lastReadAt) >= raisedAt) return false; // already read
         bumpActivity(channelId);
         const prev = flagRaised.get(channelId);
         flagRaised.set(channelId, {
@@ -227,6 +235,7 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
       newUnread.add(channelId);
       return { unreadChannels: newUnread };
     });
+    return true;
   },
 
   incrementMention: (channelId: string) => {

@@ -366,3 +366,32 @@ func TestRemoveChannelBumpsReconcileGen(t *testing.T) {
 		t.Fatal("RemoveChannel must bump the reconcile generation")
 	}
 }
+
+// TestSubscribeAuthorizedStableUnstableBails: when the read keeps failing (or the
+// generation keeps moving), SubscribeAuthorizedStable returns ErrConnectUnstable
+// and leaves no partial subscriptions behind -- the caller's abort path then
+// bumps the generation (RemoveChannel) so any client that legitimately
+// subscribed mid-pass re-reads. Here we assert the primitive itself: on repeated
+// generation churn it does not converge and installs nothing.
+func TestSubscribeAuthorizedStableUnstableBails(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	userID := uuid.New()
+	channelID := uuid.New()
+	client := newDroppingClient(userID)
+	hub.RegisterUser(client)
+
+	ids, exists, err := hub.SubscribeAuthorizedStable(channelID, func() ([]uuid.UUID, bool, error) {
+		// Move the generation on every read so the re-check never matches.
+		hub.UnsubscribeUser(uuid.New(), uuid.New())
+		return []uuid.UUID{userID}, true, nil
+	})
+	if !errors.Is(err, ErrConnectUnstable) {
+		t.Fatalf("expected ErrConnectUnstable, got %v (ids=%v exists=%v)", err, ids, exists)
+	}
+	if channelHas(hub, channelID, client) {
+		t.Fatal("a non-convergent pass must leave no subscription installed")
+	}
+}

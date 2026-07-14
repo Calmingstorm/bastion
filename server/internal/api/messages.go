@@ -168,11 +168,11 @@ func requireChannelPermission(db *pgxpool.Pool, w http.ResponseWriter, r *http.R
 	return true
 }
 
-// BeforeMentionIncrementForTest runs immediately before each mention-count
-// increment (nil in production). Tests use it to acknowledge the very message
-// being processed, proving the increment is gated on the read watermark -- the
-// ack-races-processMentions window is otherwise not deterministically
-// reachable.
+// BeforeMentionIncrementForTest runs immediately before each mention row is
+// recorded (nil in production). Tests use it to acknowledge the very message
+// being processed, proving the COMPUTED badge (COUNT of mentions above the read
+// watermark) excludes a mention the member has already read -- the
+// ack-races-processMentions window is otherwise not deterministically reachable.
 var BeforeMentionIncrementForTest func()
 
 // insertMessageTx runs fn inside a transaction holding the channel's
@@ -598,7 +598,7 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 
 	// Process @mentions (only for server channels, not DMs)
 	if serverID != nil {
-		h.processMentions(r, *serverID, channelID, userID, req.Content, msg.Seq)
+		h.processMentions(r, *serverID, channelID, userID, req.Content, msg.ID, msg.Seq)
 	}
 
 	writeJSON(w, http.StatusCreated, msg)
@@ -772,7 +772,7 @@ func (h *MessageHandler) Delete(w http.ResponseWriter, r *http.Request) {
 }
 
 // processMentions parses @mentions from message content and sends notifications.
-func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, authorID uuid.UUID, content string, msgSeq int64) {
+func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, authorID uuid.UUID, content string, msgID uuid.UUID, msgSeq int64) {
 	matches := mentionRegex.FindAllStringSubmatch(content, -1)
 	if len(matches) == 0 {
 		return
@@ -852,23 +852,32 @@ func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, a
 			continue
 		}
 
-		// Increment mention count in read_states -- gated on the member's read
-		// watermark: processMentions runs after the insert commits and after the
-		// broadcast, so an ack of this very message can land first (channel open,
-		// second device). Incrementing past that ack would wedge a phantom badge
-		// forever, because re-acking the same message is now a deliberate no-op.
+		// Record the mention as a row carrying the message's seq. The badge is
+		// COUNT(mentions with seq > last_read_seq), so this needs no watermark
+		// gate: a mention for an already-read message simply falls below the
+		// watermark and is not counted, and a mention for a newer message counts
+		// even if processMentions lags an ack of an older one.
 		if BeforeMentionIncrementForTest != nil {
 			BeforeMentionIncrementForTest()
 		}
 		_, err := h.db.Exec(r.Context(),
-			`INSERT INTO read_states (user_id, channel_id, mention_count)
-			 VALUES ($1, $2, 1)
-			 ON CONFLICT (user_id, channel_id) DO UPDATE SET mention_count = read_states.mention_count + 1
-			 WHERE COALESCE(read_states.last_read_seq, -1) < $3`,
-			uid, channelID, msgSeq,
+			`INSERT INTO mentions (user_id, channel_id, message_id, seq)
+			 VALUES ($1, $2, $3, $4)
+			 ON CONFLICT (user_id, message_id) DO NOTHING`,
+			uid, channelID, msgID, msgSeq,
 		)
 		if err != nil {
-			log.Error().Err(err).Msg("failed to increment mention count")
+			log.Error().Err(err).Msg("failed to record mention")
+		}
+		// Ensure a read_states row exists (watermark NULL = nothing read yet) so
+		// the computed badge surfaces for a channel the member has never acked --
+		// the read-states query sources counts from read_states.
+		if _, err := h.db.Exec(r.Context(),
+			`INSERT INTO read_states (user_id, channel_id) VALUES ($1, $2)
+			 ON CONFLICT (user_id, channel_id) DO NOTHING`,
+			uid, channelID,
+		); err != nil {
+			log.Error().Err(err).Msg("failed to ensure read_states row for mention")
 		}
 
 		// Notify via WebSocket

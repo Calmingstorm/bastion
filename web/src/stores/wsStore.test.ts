@@ -171,6 +171,27 @@ describe('wsStore MESSAGE_CREATE production wiring', () => {
     expect(useUnreadStore.getState().isUnread('ch-b')).toBe(true); // not swallowed
   });
 
+  it('a covered NOTIFICATION neither badges nor shows a browser notification', () => {
+    // A delayed mention already covered by the watermark must be fully dropped:
+    // no optimistic badge bump, no stale browser notification.
+    useUnreadStore.setState({
+      readStates: {
+        'ch-c': { userId: '', channelId: 'ch-c', lastMessageId: 'm9', lastReadAt: '2026-07-14T12:00:10Z', lastReadSeq: 90, mentionCount: 0 },
+      },
+      unreadChannels: new Set(),
+    });
+    let incremented = false;
+    const origInc = useUnreadStore.getState().incrementMention;
+    useUnreadStore.setState({ incrementMention: () => { incremented = true; } });
+    handlers['NOTIFICATION']({
+      channelId: 'ch-c', mentionCount: 1, seq: 85, createdAt: '2026-07-14T12:00:20Z',
+      senderName: 'x', channelName: 'y', content: 'z',
+    });
+    expect(useUnreadStore.getState().isUnread('ch-c')).toBe(false); // covered
+    expect(incremented).toBe(false); // no optimistic badge
+    useUnreadStore.setState({ incrementMention: origInc });
+  });
+
   it('NOTIFICATION passes the server-minted createdAt through to markUnread', () => {
     // A delayed notification whose message predates the committed lastReadAt
     // must not permanently restore isUnread -- same contract as MESSAGE_CREATE.

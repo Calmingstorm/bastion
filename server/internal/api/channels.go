@@ -56,7 +56,7 @@ type updateChannelRequest struct {
 // carries ViewChannel (or Administrator). Raw membership is NOT authorization
 // -- a member whose channel access was revoked must receive no channel events,
 // and create/update payloads carry channel metadata that would otherwise leak.
-func (h *ChannelHandler) authorizedMemberIDs(r *http.Request, serverID uuid.UUID) []uuid.UUID {
+func (h *ChannelHandler) authorizedMemberIDs(r *http.Request, serverID uuid.UUID) ([]uuid.UUID, error) {
 	viewBits := permissions.ViewChannel | permissions.Administrator
 	rows, err := h.db.Query(r.Context(), `
 		SELECT sm.user_id
@@ -71,19 +71,18 @@ func (h *ChannelHandler) authorizedMemberIDs(r *http.Request, serverID uuid.UUID
 		            WHERE mr.server_id = sm.server_id AND mr.user_id = sm.user_id
 		          ), 0) & $2) != 0)`, serverID, viewBits)
 	if err != nil {
-		log.Error().Err(err).Msg("failed to query authorized members for broadcast")
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 	var ids []uuid.UUID
 	for rows.Next() {
 		var uid uuid.UUID
 		if err := rows.Scan(&uid); err != nil {
-			continue
+			return nil, err
 		}
 		ids = append(ids, uid)
 	}
-	return ids
+	return ids, rows.Err()
 }
 
 // broadcastToServer delivers a channel event exactly once per AUTHORIZED
@@ -96,7 +95,11 @@ func (h *ChannelHandler) broadcastToServer(r *http.Request, serverID uuid.UUID, 
 	if len(recipients) > 0 {
 		ids = recipients[0]
 	} else {
-		ids = h.authorizedMemberIDs(r, serverID)
+		var err error
+		if ids, err = h.authorizedMemberIDs(r, serverID); err != nil {
+			log.Error().Err(err).Msg("failed to resolve authorized members for broadcast")
+			return
+		}
 	}
 	for _, uid := range ids {
 		h.hub.BroadcastToUser(uid, event)
@@ -241,35 +244,60 @@ func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// A new channel must be USABLE by already-connected clients, not just
-	// announced: subscribe every authorized member's live sockets first --
-	// without the subscription, subsequent messages in this channel would
-	// silently never reach them until reconnect. The post-check below re-reads
-	// authorization and the broadcast uses that CONFIRMED set.
-	recipients := h.authorizedMemberIDs(r, serverID)
-	for _, uid := range recipients {
-		h.hub.SubscribeUser(uid, ch.ID)
-	}
-	if AfterChannelCreateSubscribeForTest != nil {
-		AfterChannelCreateSubscribeForTest()
-	}
-	// POST-CHECK: a revocation can land between reading the recipient set and
-	// subscribing. Re-read and unsubscribe anyone no longer authorized; whoever
-	// runs last (this check or the revocation's own reconcile) leaves the hub
-	// consistent with the database.
-	still := make(map[uuid.UUID]bool)
-	confirmed := h.authorizedMemberIDs(r, serverID)
-	for _, uid := range confirmed {
-		still[uid] = true
-	}
-	for _, uid := range recipients {
-		if !still[uid] {
-			h.hub.UnsubscribeUser(uid, ch.ID)
+	// announced -- without a live subscription, messages in it never reach them
+	// until reconnect. But two lifecycle transitions can race the subscribe: a
+	// concurrent ViewChannel revocation (must not leave the revoked member
+	// subscribed) and a concurrent deletion of THIS channel (must not resurrect
+	// its subscriptions or emit a phantom CHANNEL_CREATE). Both bump the hub's
+	// reconcile generation, so the subscribe runs inside a stability loop that
+	// re-reads authorization + existence and rolls back if the generation moved
+	// -- the same primitive the connect path uses. It returns the CONFIRMED,
+	// still-authorized recipient set; the broadcast goes only to that set, and
+	// only if the channel still exists.
+	confirmed, exists, subErr := h.hub.SubscribeAuthorizedStable(ch.ID, func() ([]uuid.UUID, bool, error) {
+		var stillExists bool
+		if err := h.db.QueryRow(r.Context(),
+			`SELECT EXISTS(SELECT 1 FROM channels WHERE id = $1)`, ch.ID).Scan(&stillExists); err != nil {
+			return nil, false, err
 		}
+		if !stillExists {
+			return nil, false, nil
+		}
+		ids, authErr := h.authorizedMemberIDs(r, serverID)
+		if authErr != nil {
+			return nil, false, authErr
+		}
+		// Test seam: fires AFTER the authorized set is read but before the loop's
+		// generation re-check, so a revocation (or delete) it triggers happens
+		// inside the stability window -- the member is included in THIS pass and
+		// must be rolled back and excluded on retry.
+		if AfterChannelCreateSubscribeForTest != nil {
+			AfterChannelCreateSubscribeForTest()
+		}
+		return ids, true, nil
+	})
+	if subErr != nil {
+		// Could not converge (or a read failed): drop any partial subscriptions
+		// AND bump the reconcile generation (RemoveChannel does both), so a
+		// client that legitimately subscribed to this committed channel via its
+		// own connect/join during the aborted passes re-reads and reinstalls
+		// rather than being left silently unsubscribed. The row is committed, so
+		// clients pick the channel up on their next fetch; no CHANNEL_CREATE is
+		// emitted for a subscription state we could not confirm.
+		h.hub.RemoveChannel(ch.ID)
+		log.Error().Err(subErr).Msg("channel create: subscription did not stabilize")
+		writeJSON(w, http.StatusCreated, ch)
+		return
 	}
-	h.broadcastToServer(r, serverID, realtime.Event{
-		Type: realtime.EventChannelCreate,
-		Data: ch,
-	}, confirmed)
+	if exists {
+		h.broadcastToServer(r, serverID, realtime.Event{
+			Type: realtime.EventChannelCreate,
+			Data: ch,
+		}, confirmed)
+	} else {
+		// Deleted mid-create: leave no subscriptions or phantom event behind.
+		h.hub.RemoveChannel(ch.ID)
+	}
 
 	writeJSON(w, http.StatusCreated, ch)
 }
@@ -439,14 +467,20 @@ func (h *ChannelHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	// and commit could read the channel back into existence, and a delete that
 	// FAILED after broadcasting left every connected client having removed a
 	// channel that still exists, with no event that would ever correct them.
-	// Authorization is evaluated at DELIVERY time: the recipient set is computed
-	// here, after the commit, so a member whose access was revoked between the
-	// request and the commit receives nothing. (Visibility is server-scoped, so
-	// the deleted row's absence changes no one's authorization.) The hub also
-	// forgets the channel -- its subscriber set must not outlive the row.
+	// Forget the channel in the hub FIRST -- and thereby bump the reconcile
+	// generation -- so a concurrent channel-create's stability loop observes the
+	// change and cannot confirm a subscription to (or broadcast a phantom
+	// CHANNEL_CREATE for) this now-deleted channel. Only then broadcast the
+	// delete. (A tiny commit->RemoveChannel gap remains inherent; a create whose
+	// entire stable pass falls inside it is bounded by the loop's ret/attempt
+	// cap and the row-existence re-read, not eliminated.)
+	h.hub.RemoveChannel(channelID)
 	if AfterChannelDeleteExecForTest != nil {
 		AfterChannelDeleteExecForTest()
 	}
+	// Authorization is evaluated at DELIVERY time: the recipient set is computed
+	// here, after the commit, so a member whose access was revoked between the
+	// request and the commit receives nothing.
 	h.broadcastToServer(r, serverID, realtime.Event{
 		Type: realtime.EventChannelDelete,
 		Data: map[string]string{
@@ -454,7 +488,6 @@ func (h *ChannelHandler) Delete(w http.ResponseWriter, r *http.Request) {
 			"serverId":  serverID.String(),
 		},
 	})
-	h.hub.RemoveChannel(channelID)
 
 	// Audit log
 	writeAuditLog(h.db, r.Context(), serverID, userID, "CHANNEL_DELETE", "channel", channelID, map[string]any{

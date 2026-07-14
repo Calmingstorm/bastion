@@ -254,6 +254,62 @@ func (h *Hub) RemoveChannel(channelID uuid.UUID) {
 	h.mu.Unlock()
 }
 
+// unsubscribeUserFromChannel removes a user's clients from a channel WITHOUT
+// bumping the reconcile generation -- used to roll back a speculative subscribe,
+// which is not a revocation and must not disturb other in-flight revalidations.
+func (h *Hub) unsubscribeUserFromChannel(userID, channelID uuid.UUID) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	set, ok := h.channels[channelID]
+	if !ok {
+		return
+	}
+	if clients, ok := h.users[userID]; ok {
+		for c := range clients {
+			delete(set, c)
+		}
+	}
+	if len(set) == 0 {
+		delete(h.channels, channelID)
+	}
+}
+
+// SubscribeAuthorizedStable installs a freshly-created channel's subscriptions
+// against a MOVING world. Revocations (UnsubscribeUser) and the channel's own
+// deletion (RemoveChannel) both bump the reconcile generation, so this samples
+// the generation, reads the authorized set, subscribes, and re-checks: if the
+// generation moved, a revocation or a delete raced the read, so it rolls back
+// its additions and retries. It returns the CONFIRMED recipient set only after a
+// stable pass; (nil, false, nil) if the channel no longer exists (caller must
+// broadcast nothing); or ErrConnectUnstable if it cannot converge. The
+// convergent path is self-healing (the successful pass re-subscribes). The rare
+// rollback CAN strip a subscription a concurrent connect/join legitimately
+// installed for this already-committed channel, so the ABORT paths must bump the
+// reconcile generation (the caller does, via RemoveChannel) to force those
+// clients to re-read and reinstall.
+func (h *Hub) SubscribeAuthorizedStable(channelID uuid.UUID, read func() (ids []uuid.UUID, exists bool, err error)) ([]uuid.UUID, bool, error) {
+	for i := 0; i < connectMaxAttempts; i++ {
+		gen := h.ReconcileGen()
+		ids, exists, err := read()
+		if err != nil {
+			return nil, false, err
+		}
+		if !exists {
+			return nil, false, nil
+		}
+		for _, uid := range ids {
+			h.SubscribeUser(uid, channelID)
+		}
+		if h.ReconcileGen() == gen {
+			return ids, true, nil // stable: no revocation or delete raced
+		}
+		for _, uid := range ids {
+			h.unsubscribeUserFromChannel(uid, channelID)
+		}
+	}
+	return nil, false, ErrConnectUnstable
+}
+
 // SubscribeUser subscribes all of a user's connected clients to a channel
 // synchronously (under the hub lock), so the subscription is in effect the
 // instant the call returns.

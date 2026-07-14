@@ -160,7 +160,14 @@ export const useWSStore = create<WSState>((set) => ({
       if (payload.channelId) {
         // Server-owned watermark first (same contract as MESSAGE_CREATE): a
         // delayed notification whose message an ack already covered is dropped.
-        useUnreadStore.getState().markUnread(payload.channelId, { seq: payload.seq, at: payload.createdAt });
+        // markUnread returns false when the event is already covered -- in that
+        // case the badge must NOT be bumped and NO browser notification shown,
+        // or a stale ping resurfaces for a message the user already read.
+        const raised = useUnreadStore.getState().markUnread(payload.channelId, {
+          seq: payload.seq,
+          at: payload.createdAt,
+        });
+        if (!raised) return;
         if (payload.mentionCount) {
           useUnreadStore.getState().incrementMention(payload.channelId);
         }
