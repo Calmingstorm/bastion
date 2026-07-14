@@ -3,7 +3,7 @@ import axios, { type AxiosAdapter, type AxiosResponse } from 'axios';
 import { render, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import apiClient, { clearTokens, setAuthFailureHandler } from './client';
-import { invalidateSession } from './session';
+import { invalidateSession, captureSessionGeneration } from './session';
 import { storage } from '../utils/storage';
 import { AuthFailureBridge } from '../components/AuthFailureBridge';
 import { useAuthStore } from '../stores/authStore';
@@ -228,6 +228,96 @@ describe('session invalidation', () => {
     // Clean up the still-held refresh A.
     rejectRefreshA(new Error('A refresh failed'));
     await expect(reqA).rejects.toBeTruthy();
+    postSpy.mockRestore();
+  });
+
+  // F38 round 4: the request interceptor must run synchronously, so a request
+  // created just before an identity boundary is stamped with the OLD generation
+  // (not the new one a microtask-later interceptor would capture).
+  it('stamps a request with the generation at creation time, not a microtask later', async () => {
+    const g = captureSessionGeneration();
+    let stampedGen: number | undefined;
+    apiClient.defaults.adapter = (async (config) => {
+      stampedGen = (config as { __sessionGeneration?: number }).__sessionGeneration;
+      return { data: {}, status: 200, statusText: 'OK', headers: {}, config } as AxiosResponse;
+    }) as AxiosAdapter;
+
+    const req = apiClient.get('/x'); // synchronous interceptor stamps here...
+    invalidateSession(); // ...before this boundary can advance the generation
+    await req;
+
+    expect(stampedGen).toBe(g); // stamped with the pre-boundary generation
+  });
+
+  // F38 round 4: after a newer refresh (B) supersedes a held refresh (A), A's late
+  // settlement must not drain the queue that now belongs to B.
+  it('a stale refresh settling does not drain the current refresh queue', async () => {
+    storage.setItem('accessToken', 'a-access');
+    storage.setItem('refreshToken', 'a-refresh');
+
+    let rejectA!: (e: unknown) => void;
+    let resolveB!: (v: unknown) => void;
+    let aStarted!: () => void;
+    let bStarted!: () => void;
+    const aInFlight = new Promise<void>((r) => (aStarted = r));
+    const bInFlight = new Promise<void>((r) => (bStarted = r));
+    const postSpy = vi
+      .spyOn(axios, 'post')
+      .mockImplementationOnce(
+        () =>
+          new Promise((_res, rej) => {
+            aStarted();
+            rejectA = rej;
+          })
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((res) => {
+            bStarted();
+            resolveB = res as (v: unknown) => void;
+          })
+      );
+
+    const retried = new Set<string>();
+    apiClient.defaults.adapter = (async (config) => {
+      const url = config.url ?? '';
+      if (retried.has(url)) {
+        return { data: { url }, status: 200, statusText: 'OK', headers: {}, config } as AxiosResponse;
+      }
+      retried.add(url);
+      const err = new Error('Unauthorized') as Error & Record<string, unknown>;
+      err.config = config;
+      err.response = { status: 401, data: {} };
+      err.isAxiosError = true;
+      throw err;
+    }) as AxiosAdapter;
+
+    const r1 = apiClient.get('/r1'); // 401 -> starts refresh A (held)
+    await aInFlight;
+
+    invalidateSession(); // account B logs in -> A is now stale
+    storage.setItem('accessToken', 'b-access');
+    storage.setItem('refreshToken', 'b-refresh');
+
+    const rb = apiClient.get('/rb'); // 401 -> resets stale A, starts refresh B (held)
+    await bInFlight;
+
+    const r3 = apiClient.get('/r3'); // 401 -> queues behind refresh B
+    // A macrotask flush so r3 has genuinely 401'd and been pushed onto failedQueue
+    // (the adapter is async; microtask flushes are not enough) before A settles.
+    await new Promise((r) => setTimeout(r, 0));
+
+    // A settles late: with the guard it must NOT reject r3 (which waits on B).
+    rejectA(new Error('A failed'));
+    await new Promise((r) => setTimeout(r, 0));
+
+    // B succeeds -> drains its own queue -> r3 retries and succeeds.
+    resolveB({ data: { accessToken: 'b-access-2' } });
+    const r3res = await r3;
+    expect((r3res as { data: { url: string } }).data.url).toBe('/r3'); // not drained by A
+
+    await expect(r1).rejects.toBeTruthy(); // r1 (account A) genuinely failed
+    await rb;
     postSpy.mockRestore();
   });
 });

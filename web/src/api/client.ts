@@ -117,7 +117,12 @@ apiClient.interceptors.request.use(
     }
     return config;
   },
-  (error) => Promise.reject(error)
+  (error) => Promise.reject(error),
+  // Run synchronously so the generation stamp + auth token are captured at the
+  // moment the request is CREATED, not a microtask later -- otherwise a request
+  // issued just before an identity boundary could be stamped as the new session's
+  // and refresh with its credentials.
+  { synchronous: true }
 );
 
 // Response interceptor: handle 401 with token refresh
@@ -208,11 +213,11 @@ apiClient.interceptors.response.use(
           `${apiBaseURL}/auth/refresh`,
           { refreshToken }
         );
-        // A logout during the in-flight refresh must remain authoritative: do
-        // not write the new tokens back, update the socket, or resume queued
-        // requests — that would resurrect the dead session.
+        // A logout during the in-flight refresh must remain authoritative: do not
+        // write the new tokens back or update the socket. Do NOT touch failedQueue
+        // either -- it now belongs to whatever refresh replaced this stale one; a
+        // superseded refresh must not drain the current refresh's waiters.
         if (!isSessionGenerationCurrent(generationAtRefresh)) {
-          processQueue(new Error('session ended'), null);
           return Promise.reject(error);
         }
         const { accessToken } = response.data;
@@ -225,7 +230,11 @@ apiClient.interceptors.response.use(
         }
         return apiClient(originalRequest);
       } catch (refreshError) {
-        processQueue(refreshError, null);
+        // Only drain the queue if this is still the current refresh; a superseded
+        // refresh failing must not reject the requests waiting on its replacement.
+        if (isSessionGenerationCurrent(generationAtRefresh)) {
+          processQueue(refreshError, null);
+        }
         // Only end the session when the refresh token itself is rejected. A
         // transient failure (network drop, 5xx) must not force a logout — leave
         // the tokens in place so the next request can retry. And only if this

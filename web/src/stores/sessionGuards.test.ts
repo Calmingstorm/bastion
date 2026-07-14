@@ -16,6 +16,7 @@ vi.mock('../api/client', () => ({
   apiGetReadStates: vi.fn(),
   apiAckChannel: vi.fn(),
   apiGetMemberPermissions: vi.fn(),
+  apiGetServerCommands: vi.fn(),
   apiLogin: vi.fn(),
   apiRegister: vi.fn(),
   apiGetMe: vi.fn(),
@@ -27,12 +28,13 @@ vi.mock('../api/client', () => ({
 vi.mock('./resetAll', () => ({ resetAllStores: vi.fn() }));
 
 import * as client from '../api/client';
-import type { LoginResponse, ReadState } from '../types';
+import type { LoginResponse, ReadState, ApplicationCommand } from '../types';
 import { resetAllStores } from './resetAll';
 import { useServerStore } from './serverStore';
 import { useDMStore } from './dmStore';
 import { useUnreadStore } from './unreadStore';
 import { usePermissionStore } from './permissionStore';
+import { useCommandStore } from './commandStore';
 import { useAuthStore } from './authStore';
 import {
   captureSessionGeneration,
@@ -213,6 +215,30 @@ describe('session-boundary guards', () => {
     vi.mocked(client.apiRegister).mockReturnValue(new Promise(() => {})); // hangs
     void useAuthStore.getState().register('u', 'a@b.c', 'pw');
     expect(isSessionGenerationCurrent(g)).toBe(false); // prior generation invalidated
+  });
+
+  it('a register response resolving after a newer boundary rejects and does not authenticate', async () => {
+    useAuthStore.setState({ isAuthenticated: false, user: null });
+    const d = deferred<LoginResponse>();
+    vi.mocked(client.apiRegister).mockReturnValue(d.promise);
+    const p = useAuthStore.getState().register('u', 'a@b.c', 'pw');
+    invalidateSession(); // superseded during the request
+    d.resolve({ user: { id: 'u-old', username: 'old' }, accessToken: 'a', refreshToken: 'r' } as LoginResponse);
+    await expect(p).rejects.toBeInstanceOf(SessionSupersededError);
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+  });
+
+  it('commandStore.fetchCommands: a response after the session ends does not overwrite commands (same server id)', async () => {
+    useCommandStore.setState({ commands: [], serverId: null });
+    const d = deferred<ApplicationCommand[]>();
+    vi.mocked(client.apiGetServerCommands).mockReturnValue(d.promise);
+    useCommandStore.getState().fetchCommands('s1');
+    invalidateSession(); // new account logs in, also on server s1 (same id)
+    useCommandStore.setState({ serverId: 's1' });
+    d.resolve([{ id: 'cmd-old' } as ApplicationCommand]);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(useCommandStore.getState().commands).toEqual([]); // stale fetch did not overwrite
   });
 
   it('logout advances the session generation BEFORE it aborts requests or resets stores', () => {
