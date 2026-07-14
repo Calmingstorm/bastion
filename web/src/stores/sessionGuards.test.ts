@@ -1175,6 +1175,28 @@ describe('session-boundary guards', () => {
     useUnreadStore.getState().reset();
   });
 
+  it('a mid-flight authoritative fetch does not inflate a late ack residual', async () => {
+    // The fetch carries cross-device mentions the ack actually covered: a count
+    // DELTA would commit them as "new since entry" (false badge right after
+    // reading); the residual must count locally-observed mention EVENTS only.
+    useUnreadStore.setState({
+      readStates: { c4: { userId: '', channelId: 'c4', lastMessageId: 'm1', lastReadAt: '', mentionCount: 2 } },
+      unreadChannels: new Set(['c4']),
+    });
+    const dAck = deferred<void>();
+    vi.mocked(client.apiAckChannel).mockReturnValue(dAck.promise as never);
+    const pAck = useUnreadStore.getState().ackChannel('c4', 'm9'); // reading everything
+    const dFetch = deferred<unknown>();
+    vi.mocked(client.apiGetReadStates).mockReturnValue(dFetch.promise as never);
+    const pFetch = useUnreadStore.getState().fetchReadStates();
+    dFetch.resolve([{ channelId: 'c4', lastMessageId: 'm1', mentionCount: 5 }]); // cross-device count
+    await pFetch;
+    dAck.resolve(); // the ack covered all of them (m9 is the newest)
+    await pAck;
+    expect(useUnreadStore.getState().getMentionCount('c4')).toBe(0); // no phantom residual
+    useUnreadStore.getState().reset();
+  });
+
   it('an ack with no mid-flight activity clears cleanly', async () => {
     useUnreadStore.setState({
       readStates: { c2: { userId: '', channelId: 'c2', lastMessageId: 'm1', lastReadAt: '', mentionCount: 3 } },

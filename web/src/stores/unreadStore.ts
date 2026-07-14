@@ -44,6 +44,14 @@ const readStateLineage = createLineage<ReadState>((rs) => rs.channelId);
 const activityEpochs = new Map<string, number>();
 const bumpActivity = (channelId: string) =>
   activityEpochs.set(channelId, (activityEpochs.get(channelId) ?? 0) + 1);
+// Mention EVENTS only (a subset of activity): the residual count a late ack
+// commits is the number of mention events observed during its flight -- a
+// count DELTA would be inflated by a mid-flight authoritative fetch carrying
+// cross-device mentions the ack actually covered (false badge right after
+// reading). Cross-device mentions newer than the ack point surface at the next
+// fetch instead; the ack endpoint returning the post-ack read state would make
+// this exact (server-side follow-up).
+const mentionEpochs = new Map<string, number>();
 
 const toMap = (list: ReadState[]) => {
   const map: Record<string, ReadState> = {};
@@ -87,17 +95,14 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
   ackChannel: async (channelId: string, messageId: string) => {
     const generation = captureSessionGeneration();
     const epochAtEntry = activityEpochs.get(channelId) ?? 0;
-    const countAtEntry = get().readStates[channelId]?.mentionCount || 0;
+    const mentionsAtEntry = mentionEpochs.get(channelId) ?? 0;
     try {
       await apiAckChannel(channelId, messageId);
       if (!isSessionGenerationCurrent(generation)) return;
-      // Mentions that arrived after this ack was initiated were counted by the
-      // server AFTER it processed the ack -- the committed state is "mentions
-      // since entry", never an unconditional zero that would erase them.
-      const mentionsSince = Math.max(
-        0,
-        (get().readStates[channelId]?.mentionCount || 0) - countAtEntry
-      );
+      // Mention EVENTS that arrived after this ack was initiated were counted by
+      // the server AFTER it processed the ack -- the committed state is "mention
+      // events since entry", never an unconditional zero that would erase them.
+      const mentionsSince = (mentionEpochs.get(channelId) ?? 0) - mentionsAtEntry;
       const rs: ReadState = {
         userId: '',
         channelId,
@@ -136,6 +141,7 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
 
   incrementMention: (channelId: string) => {
     bumpActivity(channelId);
+    mentionEpochs.set(channelId, (mentionEpochs.get(channelId) ?? 0) + 1);
     // CONVERGENT apply (see module comment): the claim captures the count the
     // client computed for this mention; replay takes max(snapshot, captured), so
     // a snapshot that already includes the mention is not double-counted and one
@@ -168,6 +174,7 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
   reset: () => {
     readStateLineage.reset(); // held fetches must not repopulate; no cross-account leakage
     activityEpochs.clear();
+    mentionEpochs.clear();
     set({ readStates: {}, unreadChannels: new Set() });
   },
 }));
