@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import * as Popover from '@radix-ui/react-popover';
-import { apiGetUser, apiCreateDM, apiKickMember, apiBanMember, apiTimeoutMember } from '../../api/client';
+import { apiGetUser, apiKickMember, apiBanMember, apiTimeoutMember } from '../../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { useAuthStore } from '../../stores/authStore';
-import { useDMStore } from '../../stores/dmStore';
-import { useServerStore } from '../../stores/serverStore';
+import { openDirectMessage } from '../../stores/dmActions';
 import { resolveMediaUrl } from '../../platform';
 import { PresenceDot } from './PresenceDot';
 import type { User, RoleInfo } from '../../types';
@@ -22,21 +22,42 @@ export function UserProfileCard({ userId, roles, joinedAt, serverId, canModerate
   const [user, setUser] = useState<User | null>(null);
   const [open, setOpen] = useState(false);
   const currentUser = useAuthStore((s) => s.user);
-  const { selectDM } = useDMStore();
+
+  // Only the LATEST profile fetch owns the card (session + recency), and the
+  // displayed profile is keyed to the userId it was fetched for -- a userId change
+  // clears the previous profile instead of showing the wrong user while loading.
+  const profileSeqRef = useRef(0);
+  const shownForRef = useRef<string | null>(null);
+  // Latest-prop mirror of the card's target user (assigned during render).
+  const cardTargetRef = useRef(userId);
+  cardTargetRef.current = userId;
 
   useEffect(() => {
-    if (open && !user) {
-      apiGetUser(userId).then(setUser).catch(() => {});
+    if (!open) return;
+    if (shownForRef.current !== userId) {
+      setUser(null);
+      shownForRef.current = userId;
     }
-  }, [open, userId, user]);
+    const generation = captureSessionGeneration();
+    const seq = ++profileSeqRef.current;
+    apiGetUser(userId)
+      .then((u) => {
+        if (seq === profileSeqRef.current && isSessionGenerationCurrent(generation)) setUser(u);
+      })
+      .catch(() => {});
+  }, [open, userId]);
 
   const handleMessage = async () => {
+    // Session-guarded create + switch to DM view, owned by the card's TARGET too:
+    // the card is reused across users, and a DM opened for the previous target
+    // must neither be selected nor close the retargeted card.
+    const targetAtStart = userId;
     try {
-      const dm = await apiCreateDM([userId]);
-      // Switch to DM view
-      useServerStore.setState({ selectedServerId: null, selectedChannelId: null });
-      selectDM(dm.id);
-      setOpen(false);
+      const dm = await openDirectMessage(
+        [userId],
+        () => cardTargetRef.current === targetAtStart
+      );
+      if (dm && cardTargetRef.current === targetAtStart) setOpen(false);
     } catch {
       // Error handling
     }
@@ -177,6 +198,14 @@ const TIMEOUT_OPTIONS = [
 function ModActions({ serverId, userId, onDone }: { serverId: string; userId: string; onDone: () => void }) {
   const [showTimeoutPicker, setShowTimeoutPicker] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
+  // Track the current target: the card is REUSED across (server, user) targets, so
+  // a completion for a previous target must not close the current target's card.
+  // Updated DURING RENDER (latest-prop mirror) -- a passive effect leaves a
+  // post-render/pre-effect stale window.
+  const targetRef = useRef({ serverId, userId });
+  targetRef.current = { serverId, userId };
+  const sameTarget = () =>
+    targetRef.current.serverId === serverId && targetRef.current.userId === userId;
 
   useEffect(() => {
     if (!showTimeoutPicker) return;
@@ -190,7 +219,32 @@ function ModActions({ serverId, userId, onDone }: { serverId: string; userId: st
   }, [showTimeoutPicker]);
 
   const handleTimeout = async (seconds: number) => {
-    try { await apiTimeoutMember(serverId, userId, seconds); onDone(); } catch { /* ignored */ }
+    // A stale completion (session ended OR the card retargeted) must not call
+    // onDone() and close the current card.
+    const generation = captureSessionGeneration();
+    try {
+      await apiTimeoutMember(serverId, userId, seconds);
+      if (!isSessionGenerationCurrent(generation) || !sameTarget()) return;
+      onDone();
+    } catch { /* ignored */ }
+  };
+
+  const handleKick = async () => {
+    const generation = captureSessionGeneration();
+    try {
+      await apiKickMember(serverId, userId);
+      if (!isSessionGenerationCurrent(generation) || !sameTarget()) return;
+      onDone();
+    } catch { /* ignored */ }
+  };
+
+  const handleBan = async () => {
+    const generation = captureSessionGeneration();
+    try {
+      await apiBanMember(serverId, userId);
+      if (!isSessionGenerationCurrent(generation) || !sameTarget()) return;
+      onDone();
+    } catch { /* ignored */ }
   };
 
   const btnClass = "flex-1 rounded-[3px] border border-[var(--border)] py-1.5 text-xs font-medium text-[var(--danger)] hover:bg-[var(--danger)]/10";
@@ -201,10 +255,10 @@ function ModActions({ serverId, userId, onDone }: { serverId: string; userId: st
         <button onClick={() => setShowTimeoutPicker(!showTimeoutPicker)} className={btnClass}>
           Timeout
         </button>
-        <button onClick={async () => { try { await apiKickMember(serverId, userId); onDone(); } catch { /* ignored */ } }} className={btnClass}>
+        <button onClick={handleKick} className={btnClass}>
           Kick
         </button>
-        <button onClick={async () => { try { await apiBanMember(serverId, userId); onDone(); } catch { /* ignored */ } }} className={btnClass}>
+        <button onClick={handleBan} className={btnClass}>
           Ban
         </button>
       </div>

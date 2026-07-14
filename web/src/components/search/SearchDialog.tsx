@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { apiSearch } from '../../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { useServerStore } from '../../stores/serverStore';
 import type { SearchResult } from '../../types';
 
@@ -30,13 +31,30 @@ export function SearchDialog({ open, onClose }: SearchDialogProps) {
   const [loading, setLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const searchSeqRef = useRef(0);
   const selectedServerId = useServerStore((s) => s.selectedServerId);
   const selectChannel = useServerStore((s) => s.selectChannel);
 
+  // A server switch changes the search SCOPE: it supersedes any in-flight search
+  // and clears results, so server A's matches never render under server B.
+  useEffect(() => {
+    searchSeqRef.current += 1;
+    // Cancel the pending debounce too: a timer armed under the old scope would
+    // otherwise fire, set loading, and be unable to clear it (its finally is
+    // superseded) -- a permanent spinner.
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    setResults([]);
+    setLoading(false);
+  }, [selectedServerId]);
+
   useEffect(() => {
     if (open) {
+      // The reset supersedes any in-flight search: an already-fired request must
+      // not land into the freshly-opened dialog.
+      searchSeqRef.current += 1;
       setQuery('');
       setResults([]);
+      setLoading(false);
       setTimeout(() => inputRef.current?.focus(), 50);
     }
   }, [open]);
@@ -53,17 +71,33 @@ export function SearchDialog({ open, onClose }: SearchDialogProps) {
 
   const doSearch = useCallback((q: string) => {
     setQuery(q);
+    // EVERY query change claims the sequence immediately -- clearing the input or
+    // typing again must supersede an already-fired in-flight request, not just the
+    // pending debounce timer. Otherwise stale results land beneath an empty input.
+    const seq = ++searchSeqRef.current;
     if (debounceRef.current) clearTimeout(debounceRef.current);
     if (!q.trim()) {
       setResults([]);
+      setLoading(false); // a superseded in-flight search will not clear this
       return;
     }
     debounceRef.current = setTimeout(() => {
+      // Superseded before firing (scope change, newer query): start nothing --
+      // setting loading here could never be cleared by this callback.
+      if (seq !== searchSeqRef.current) return;
+      const generation = captureSessionGeneration();
+      const owns = () => seq === searchSeqRef.current && isSessionGenerationCurrent(generation);
       setLoading(true);
       apiSearch(q.trim(), { serverId: selectedServerId || undefined })
-        .then(setResults)
-        .catch(() => setResults([]))
-        .finally(() => setLoading(false));
+        .then((r) => {
+          if (owns()) setResults(r);
+        })
+        .catch(() => {
+          if (owns()) setResults([]);
+        })
+        .finally(() => {
+          if (owns()) setLoading(false);
+        });
     }, 400);
   }, [selectedServerId]);
 

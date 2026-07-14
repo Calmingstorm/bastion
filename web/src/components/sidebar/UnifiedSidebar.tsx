@@ -12,7 +12,8 @@ import { CreateServerDialog } from '../server/CreateServerDialog';
 import { InviteDialog } from '../server/InviteDialog';
 import { ServerSettingsDialog } from '../server/ServerSettingsDialog';
 import { NewDMDialog } from '../dm/NewDMDialog';
-import { apiGetCategories, apiCreateCategory, apiUpdateCategory, apiDeleteCategory, apiCreateChannel, apiGetChannels } from '../../api/client';
+import { apiGetCategories, apiCreateCategory, apiUpdateCategory, apiDeleteCategory, apiCreateChannel } from '../../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { usePermissionStore } from '../../stores/permissionStore';
 import { PERMISSIONS } from '../../utils/permissions';
 import { eventBus } from '../../utils/eventBus';
@@ -91,16 +92,37 @@ export function UnifiedSidebar() {
     }
   }, [selectedServerId]);
 
+  const categoriesSeqRef = useRef(0);
   const fetchCategories = useCallback(() => {
-    if (!expandedServerId) return;
+    if (!expandedServerId) {
+      // Empty scope (collapsed) invalidates outstanding reads too.
+      categoriesSeqRef.current += 1;
+      return;
+    }
+    // Owned by session AND recency: a fetch settling after an identity boundary
+    // must not populate the new session's sidebar, and an OLDER fetch settling
+    // after a newer one must not overwrite its categories.
+    const generation = captureSessionGeneration();
+    const seq = ++categoriesSeqRef.current;
     apiGetCategories(expandedServerId).then((cats) => {
+      if (seq !== categoriesSeqRef.current || !isSessionGenerationCurrent(generation)) return;
       const safeCats = Array.isArray(cats) ? cats : [];
       setCategories(safeCats.sort((a, b) => a.position - b.position));
     }).catch(() => {});
   }, [expandedServerId]);
 
-  // Fetch categories when expanded server changes
-  useEffect(() => { fetchCategories(); }, [fetchCategories]);
+  // Track the current expanded server for scope checks in mutation continuations.
+  // Updated DURING RENDER (latest-prop mirror) -- a passive effect leaves a
+  // post-render/pre-effect stale window.
+  const expandedServerIdRef = useRef(expandedServerId);
+  expandedServerIdRef.current = expandedServerId;
+
+  // Fetch categories when expanded server changes -- clearing FIRST, so server A's
+  // categories are never displayed under server B (even if B's fetch fails).
+  useEffect(() => {
+    setCategories([]);
+    fetchCategories();
+  }, [fetchCategories]);
 
   // Listen for category WS events to refetch
   useEffect(() => {
@@ -121,8 +143,13 @@ export function UnifiedSidebar() {
     e.preventDefault();
     const trimmed = newCategoryName.trim();
     if (!trimmed) return;
+    // Owned by session AND server scope: a continuation settling after the
+    // expanded server changed must not refetch the OLD server under the new one.
+    const generation = captureSessionGeneration();
     try {
       await apiCreateCategory(serverId, trimmed);
+      if (!isSessionGenerationCurrent(generation)) return;
+      if (expandedServerIdRef.current !== serverId) return;
       setNewCategoryName('');
       setShowCreateCategory(null);
       fetchCategories();
@@ -140,23 +167,37 @@ export function UnifiedSidebar() {
       setEditingCategoryId(null);
       return;
     }
+    const generation = captureSessionGeneration();
+    const serverIdAtStart = expandedServerId;
+    const stillOurs = () => isSessionGenerationCurrent(generation)
+      && expandedServerIdRef.current === serverIdAtStart;
     try {
       await apiUpdateCategory(expandedServerId, catId, { name: trimmed });
-      fetchCategories();
+      if (stillOurs()) fetchCategories();
     } catch { /* silently fail */ }
-    setEditingCategoryId(null);
+    if (stillOurs()) setEditingCategoryId(null);
   };
 
   const handleDeleteCategory = async () => {
     if (!deletingCategoryId || !expandedServerId) return;
     setIsDeletingCategory(true); // locks the dialog so it can't be dismissed mid-request
+    const generation = captureSessionGeneration();
+    const serverIdAtStart = expandedServerId;
+    const stillOurs = () => isSessionGenerationCurrent(generation)
+      && expandedServerIdRef.current === serverIdAtStart;
     try {
       await apiDeleteCategory(expandedServerId, deletingCategoryId);
-      fetchCategories();
-      useServerStore.getState().selectServer(expandedServerId);
+      // A stale delete completing must not refetch into -- or reselect within --
+      // the NEW session or a DIFFERENT server scope.
+      if (stillOurs()) {
+        fetchCategories();
+        useServerStore.getState().selectServer(expandedServerId);
+      }
     } catch { /* silently fail */ }
-    setIsDeletingCategory(false);
-    setDeletingCategoryId(null);
+    if (stillOurs()) {
+      setIsDeletingCategory(false);
+      setDeletingCategoryId(null);
+    }
   };
 
   const handleEditCategoryKeyDown = (e: KeyboardEvent<HTMLInputElement>, catId: string) => {
@@ -168,10 +209,18 @@ export function UnifiedSidebar() {
     e.preventDefault();
     const trimmed = newChannelName.trim().toLowerCase().replace(/\s+/g, '-');
     if (!trimmed) return;
+    // Workflow-owned: this writes the channel list straight into the shared store,
+    // so a boundary during either await must stop it from overwriting the NEW
+    // session's channels with the old server's list.
+    const generation = captureSessionGeneration();
     try {
       await apiCreateChannel(serverId, trimmed, undefined, createChannelInCategory || undefined);
-      const updated = await apiGetChannels(serverId);
-      useServerStore.setState({ channels: (Array.isArray(updated) ? updated : []).sort((a, b) => a.position - b.position) });
+      if (!isSessionGenerationCurrent(generation)) return;
+      // Owned read-after-write refresh: the store action claims the lineage at
+      // start and commits only while it still owns it and the server is still
+      // selected -- a realtime commit mid-refresh supersedes it.
+      await useServerStore.getState().refreshChannels(serverId);
+      if (!isSessionGenerationCurrent(generation)) return;
       setNewChannelName('');
       setShowCreateChannel(false);
       setCreateChannelInCategory(null);
@@ -203,7 +252,9 @@ export function UnifiedSidebar() {
 
   const handleSelectDM = useCallback((channelId: string) => {
     selectDM(channelId);
-    useServerStore.setState({ selectedChannelId: null });
+    // Claim the channel lineage: a held selectServer settling after we entered DM
+    // scope must not select a server channel that would shadow this DM.
+    useServerStore.getState().clearServerSelection();
   }, [selectDM]);
 
   const handleSelectChannel = useCallback((channelId: string) => {

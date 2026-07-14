@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { apiGetPinnedMessages, apiUnpinMessage } from '../../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { resolveMediaUrl } from '../../platform';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import type { PinnedMessage } from '../../types';
@@ -15,21 +16,54 @@ interface PinnedMessagesProps {
 export function PinnedMessages({ open, onOpenChange, channelId }: PinnedMessagesProps) {
   const [pins, setPins] = useState<PinnedMessage[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  // Track the current channel for scope checks in mutation continuations. Updated
+  // DURING RENDER (the sanctioned latest-prop mirror), not in a passive effect --
+  // an effect leaves a post-render/pre-effect window where a continuation would
+  // compare against the stale value and wrongly commit.
+  const channelIdRef = useRef(channelId);
+  channelIdRef.current = channelId;
+  // Only the LATEST fetch owns the pins and loading flag -- across session
+  // boundaries AND channel switches (the effect refetches on channelId change,
+  // claiming a new sequence, which supersedes reads and mutation continuations
+  // started for the previous channel).
+  const fetchSeqRef = useRef(0);
 
   useEffect(() => {
     if (!open || !channelId) return;
     setIsLoading(true);
+    const generation = captureSessionGeneration();
+    const seq = ++fetchSeqRef.current;
+    const owns = () => seq === fetchSeqRef.current && isSessionGenerationCurrent(generation);
     apiGetPinnedMessages(channelId)
-      .then(setPins)
-      .catch(() => setPins([]))
-      .finally(() => setIsLoading(false));
+      .then((p) => {
+        if (owns()) setPins(p);
+      })
+      .catch(() => {
+        if (owns()) setPins([]);
+      })
+      .finally(() => {
+        if (owns()) setIsLoading(false);
+      });
   }, [open, channelId]);
 
   // Listen for pin updates
   useEffect(() => {
     const handler = () => {
       if (open && channelId) {
-        apiGetPinnedMessages(channelId).then(setPins).catch(() => {});
+        const generation = captureSessionGeneration();
+        const seq = ++fetchSeqRef.current;
+        const owns = () => seq === fetchSeqRef.current && isSessionGenerationCurrent(generation);
+        apiGetPinnedMessages(channelId)
+          .then((p) => {
+            if (owns()) setPins(p);
+          })
+          .catch(() => {})
+          .finally(() => {
+            // This refresh may have superseded a held initial fetch (whose own
+            // finally is then skipped) -- the owning fetch must clear loading, or
+            // the spinner would hide the pins it just committed.
+            if (owns()) setIsLoading(false);
+          });
       }
     };
     eventBus.on('bastion:pin-update', handler);
@@ -37,9 +71,22 @@ export function PinnedMessages({ open, onOpenChange, channelId }: PinnedMessages
   }, [open, channelId]);
 
   const handleUnpin = async (messageId: string) => {
+    // Owned by the SESSION and the CHANNEL it was started for. It must NOT be
+    // sequence-gated (the unpin's own WebSocket pin-update advances the shared
+    // sequence, and if that refresh fails the filter here removes the pin) -- but
+    // a completion from a PREVIOUS channel must commit nothing: advancing the
+    // shared sequence then would discard the current channel's in-flight pins
+    // response and strand its spinner.
+    const generation = captureSessionGeneration();
+    const channelAtStart = channelId;
     try {
       await apiUnpinMessage(channelId, messageId);
+      if (!isSessionGenerationCurrent(generation)) return;
+      if (channelIdRef.current !== channelAtStart) return;
       setPins((prev) => prev.filter((p) => p.id !== messageId));
+      // The COMMITTED mutation supersedes every in-flight read that predates it:
+      // an older (pre-unpin) refresh settling later must not resurrect the pin.
+      fetchSeqRef.current += 1;
     } catch { /* handled */ }
   };
 

@@ -15,12 +15,10 @@ export function ServerList() {
   const [dialogOpen, setDialogOpen] = useState(false);
 
   const handleHomeClick = () => {
-    // Deselect server to show DM view
-    useServerStore.setState({
-      selectedServerId: null,
-      selectedChannelId: null,
-      channels: [],
-    });
+    // Deselect server to show DM view -- through the store action, which claims
+    // the channel lineage so a held selectServer cannot install its channels
+    // (and shadow the DM view) after we entered empty scope.
+    useServerStore.getState().clearServerSelection();
     selectDM(null);
   };
 

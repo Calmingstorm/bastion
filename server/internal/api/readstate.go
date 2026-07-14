@@ -58,30 +58,76 @@ func (h *ReadStateHandler) Ack(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The acked message must belong to this channel, so a message ID from another
-	// channel cannot be recorded against this one.
-	var msgExists bool
+	// channel cannot be recorded against this one. Its database-assigned seq is
+	// the READ WATERMARK: everything at or below it is covered by this ack.
+	var msgSeq int64
 	if err := h.db.QueryRow(r.Context(),
-		`SELECT EXISTS(SELECT 1 FROM messages WHERE id = $1 AND channel_id = $2)`,
+		`SELECT seq FROM messages WHERE id = $1 AND channel_id = $2`,
 		messageID, channelID,
-	).Scan(&msgExists); err != nil || !msgExists {
+	).Scan(&msgSeq); err != nil {
 		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "message not found"))
 		return
 	}
 
-	_, err = h.db.Exec(r.Context(),
-		`INSERT INTO read_states (user_id, channel_id, last_message_id, last_read_at, mention_count)
-		 VALUES ($1, $2, $3, NOW(), 0)
-		 ON CONFLICT (user_id, channel_id)
-		 DO UPDATE SET last_message_id = $3, last_read_at = NOW(), mention_count = 0`,
-		userID, channelID, messageID,
-	)
+	// The update is gated on the watermark advancing: a stale acknowledgment
+	// (an older message acked after a newer one -- racing devices, a delayed
+	// retry) must not move last_message_id/last_read_at/last_read_seq backwards.
+	// It records ONLY the watermark; the mention badge is computed from the
+	// mentions table (COUNT above last_read_seq), so advancing the watermark
+	// clears exactly the mentions it now covers and no others.
+	// The gated upsert and the read-back of the committed state run in ONE
+	// transaction: a concurrent cascade (channel or user delete) cannot remove
+	// the read_states row between them, so the re-read always finds it and the
+	// response is a consistent snapshot rather than a spurious 500.
+	tx, err := h.db.Begin(r.Context())
 	if err != nil {
+		log.Error().Err(err).Msg("failed to begin ack")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+
+	if _, err = tx.Exec(r.Context(),
+		`INSERT INTO read_states (user_id, channel_id, last_message_id, last_read_at, last_read_seq, projection_revision)
+		 VALUES ($1, $2, $3, NOW(), $4, 1)
+		 ON CONFLICT (user_id, channel_id)
+		 DO UPDATE SET last_message_id = $3, last_read_at = NOW(),
+		   last_read_seq = $4,
+		   projection_revision = read_states.projection_revision + 1
+		 WHERE COALESCE(read_states.last_read_seq, -1) < $4`,
+		userID, channelID, messageID, msgSeq,
+	); err != nil {
 		log.Error().Err(err).Msg("failed to ack channel")
 		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	// Return the COMMITTED read state, not a bare status: the update may have
+	// no-op'd (a stale/duplicate ack the watermark gate rejected), in which case
+	// the response carries the truth already on disk -- a watermark possibly
+	// AHEAD of what this ack asked for, and the mention badge computed from the
+	// mentions table above that watermark. The client commits this authoritative
+	// state instead of optimistically guessing what the ack cleared.
+	var rs models.ReadState
+	if err := tx.QueryRow(r.Context(),
+		`SELECT rs.user_id, rs.channel_id, rs.last_message_id, rs.last_read_at, rs.last_read_seq, rs.projection_revision,
+		        (SELECT COUNT(*) FROM mentions m
+		         WHERE m.user_id = rs.user_id AND m.channel_id = rs.channel_id
+		           AND m.seq > COALESCE(rs.last_read_seq, 0)) AS mention_count
+		 FROM read_states rs WHERE rs.user_id = $1 AND rs.channel_id = $2`,
+		userID, channelID,
+	).Scan(&rs.UserID, &rs.ChannelID, &rs.LastMessageID, &rs.LastReadAt, &rs.LastReadSeq, &rs.ProjectionRevision, &rs.MentionCount); err != nil {
+		log.Error().Err(err).Msg("failed to read committed read state after ack")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		log.Error().Err(err).Msg("failed to commit ack")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, rs)
 }
 
 func (h *ReadStateHandler) ListReadStates(w http.ResponseWriter, r *http.Request) {
@@ -97,9 +143,14 @@ func (h *ReadStateHandler) ListReadStates(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// mention_count is COMPUTED, not stored: the number of this user's mentions
+	// in the channel whose message seq is above the read watermark.
 	rows, err := h.db.Query(r.Context(),
-		`SELECT user_id, channel_id, last_message_id, last_read_at, mention_count
-		 FROM read_states WHERE user_id = $1 AND channel_id = ANY($2)`, userID, viewable,
+		`SELECT rs.user_id, rs.channel_id, rs.last_message_id, rs.last_read_at, rs.last_read_seq, rs.projection_revision,
+		        (SELECT COUNT(*) FROM mentions m
+		         WHERE m.user_id = rs.user_id AND m.channel_id = rs.channel_id
+		           AND m.seq > COALESCE(rs.last_read_seq, 0)) AS mention_count
+		 FROM read_states rs WHERE rs.user_id = $1 AND rs.channel_id = ANY($2)`, userID, viewable,
 	)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to list read states")
@@ -112,7 +163,7 @@ func (h *ReadStateHandler) ListReadStates(w http.ResponseWriter, r *http.Request
 	for rows.Next() {
 		var rs models.ReadState
 		if err := rows.Scan(&rs.UserID, &rs.ChannelID, &rs.LastMessageID,
-			&rs.LastReadAt, &rs.MentionCount); err != nil {
+			&rs.LastReadAt, &rs.LastReadSeq, &rs.ProjectionRevision, &rs.MentionCount); err != nil {
 			log.Error().Err(err).Msg("failed to scan read state")
 			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return

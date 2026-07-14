@@ -328,3 +328,122 @@ func TestCloseSlowIdempotentUnderFlood(t *testing.T) {
 		t.Fatalf("broadcasting stalled under flood: 500 broadcasts took %v", elapsed)
 	}
 }
+
+// TestRemoveChannelDropsSubscriberSet: a deleted channel's subscriptions must
+// not outlive the row -- they would pin client pointers until those clients
+// disconnect, and channel ids are never reused.
+func TestRemoveChannelDropsSubscriberSet(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	userID := uuid.New()
+	channelID := uuid.New()
+	client := newDroppingClient(userID)
+
+	hub.RegisterUser(client)
+	hub.Subscribe(channelID, client)
+	if !channelHas(hub, channelID, client) {
+		t.Fatal("subscribe should be visible")
+	}
+	hub.RemoveChannel(channelID)
+	if channelHas(hub, channelID, client) {
+		t.Fatal("RemoveChannel must drop the channel's subscriber set")
+	}
+}
+
+// TestRemoveChannelBumpsReconcileGen: a concurrently CONNECTING client read its
+// viewable snapshot while the channel still existed; without a generation bump
+// it would install that stale snapshot and resurrect the dead subscription set.
+func TestRemoveChannelBumpsReconcileGen(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	before := hub.ReconcileGen()
+	hub.RemoveChannel(uuid.New())
+	if hub.ReconcileGen() == before {
+		t.Fatal("RemoveChannel must bump the reconcile generation")
+	}
+}
+
+// TestReconcileChannelUsersDropsPreexistingUnauthorizedClient: channel-create
+// reconciliation must replace the entire live set, not only users subscribed by
+// that call. A stale client installed by a concurrent connect before revocation
+// must be removed by the authoritative set.
+func TestReconcileChannelUsersDropsPreexistingUnauthorizedClient(t *testing.T) {
+	hub := NewHub()
+	staleUser := uuid.New()
+	authorizedUser := uuid.New()
+	channelID := uuid.New()
+	staleClient := newDroppingClient(staleUser)
+	authorizedClient := newDroppingClient(authorizedUser)
+	hub.RegisterUser(staleClient)
+	hub.RegisterUser(authorizedClient)
+	hub.Subscribe(channelID, staleClient)
+
+	hub.ReconcileChannelUsers(channelID, []uuid.UUID{authorizedUser})
+
+	if channelHas(hub, channelID, staleClient) {
+		t.Fatal("authoritative reconciliation left a pre-existing unauthorized client subscribed")
+	}
+	if !channelHas(hub, channelID, authorizedClient) {
+		t.Fatal("authoritative reconciliation did not subscribe the authorized client")
+	}
+}
+
+// TestSubscribeAuthorizedStableConvergesUnderGenChurn: with a STABLE authorized
+// set, SubscribeAuthorizedStable converges even while the reconcile generation
+// keeps moving (a spurious/grant bump) -- two agreeing reads confirm membership --
+// and KEEPS the subscription installed for live delivery. The prior design rolled
+// back and returned ErrConnectUnstable on any generation move, dropping delivery.
+func TestSubscribeAuthorizedStableConvergesUnderGenChurn(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	userID := uuid.New()
+	channelID := uuid.New()
+	client := newDroppingClient(userID)
+	hub.RegisterUser(client)
+
+	exists, err := hub.SubscribeAuthorizedStable(channelID, func() ([]uuid.UUID, bool, error) {
+		// Move the generation on every read; the authorized set stays {userID}.
+		hub.BumpReconcileGen()
+		return []uuid.UUID{userID}, true, nil
+	})
+	if err != nil {
+		t.Fatalf("a stable authorized set must converge, got err %v", err)
+	}
+	if !exists {
+		t.Fatal("expected exists=true")
+	}
+	// Delivery reads the LIVE hub set (never a returned slice); assert the member
+	// is actually subscribed there, which is what makes live delivery work.
+	if !channelHas(hub, channelID, client) {
+		t.Fatal("a converged pass must keep the authorized member subscribed for live delivery")
+	}
+}
+
+// TestSubscribeAuthorizedStableBestEffortOnFlood: if authorization genuinely never
+// stabilizes (the set differs on every read), the primitive does NOT error and
+// does NOT hang -- it best-efforts within its bounded attempts and returns. The
+// caller delivers to the live hub set regardless; a wrongly-included member is
+// cleaned up by their own revocation's reconcile.
+func TestSubscribeAuthorizedStableBestEffortOnFlood(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	channelID := uuid.New()
+	exists, err := hub.SubscribeAuthorizedStable(channelID, func() ([]uuid.UUID, bool, error) {
+		hub.BumpReconcileGen()
+		return []uuid.UUID{uuid.New()}, true, nil // a different set every read
+	})
+	if err != nil {
+		t.Fatalf("a non-stabilizing flood must best-effort, not error, got %v", err)
+	}
+	if !exists {
+		t.Fatal("expected exists=true on best-effort")
+	}
+}

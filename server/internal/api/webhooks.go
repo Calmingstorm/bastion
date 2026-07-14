@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -508,20 +509,22 @@ func (h *WebhookHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	var msg models.Message
 	var msgAuthor models.Author
 	var returnedEmbedsJSON, returnedOverrideJSON []byte
-	err = h.db.QueryRow(r.Context(),
-		`WITH new_msg AS (
-			INSERT INTO messages (channel_id, author_id, content, embeds, author_override)
-			VALUES ($1, $2, $3, $4, $5)
-			RETURNING id, channel_id, author_id, content, edited_at, embeds, author_override, created_at
-		)
-		SELECT m.id, m.channel_id, m.content, m.edited_at, m.created_at,
-			   u.id, u.username, u.display_name, u.avatar_url, u.is_bot, m.embeds, m.author_override
-		FROM new_msg m
-		INNER JOIN users u ON u.id = m.author_id`,
-		wh.ChannelID, wh.UserID, req.Content, whEmbedsJSON, authorOverrideJSON,
-	).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.CreatedAt,
-		&msgAuthor.ID, &msgAuthor.Username, &msgAuthor.DisplayName, &msgAuthor.AvatarURL, &msgAuthor.IsBot,
-		&returnedEmbedsJSON, &returnedOverrideJSON)
+	err = insertMessageTx(r.Context(), h.db, wh.ChannelID, func(tx pgx.Tx) error {
+		return tx.QueryRow(r.Context(),
+			`WITH new_msg AS (
+				INSERT INTO messages (channel_id, author_id, content, embeds, author_override)
+				VALUES ($1, $2, $3, $4, $5)
+				RETURNING id, channel_id, author_id, content, edited_at, embeds, author_override, created_at, seq
+			)
+			SELECT m.id, m.channel_id, m.content, m.edited_at, m.created_at, m.seq,
+				   u.id, u.username, u.display_name, u.avatar_url, u.is_bot, m.embeds, m.author_override
+			FROM new_msg m
+			INNER JOIN users u ON u.id = m.author_id`,
+			wh.ChannelID, wh.UserID, req.Content, whEmbedsJSON, authorOverrideJSON,
+		).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.CreatedAt, &msg.Seq,
+			&msgAuthor.ID, &msgAuthor.Username, &msgAuthor.DisplayName, &msgAuthor.AvatarURL, &msgAuthor.IsBot,
+			&returnedEmbedsJSON, &returnedOverrideJSON)
+	})
 	if err != nil {
 		log.Error().Err(err).Msg("failed to insert webhook message")
 		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
@@ -539,7 +542,7 @@ func (h *WebhookHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	// Broadcast to WebSocket subscribers
 	h.hub.BroadcastToChannel(wh.ChannelID, realtime.Event{
 		Type: realtime.EventMessageCreate,
-		Data: msg,
+		Data: map[string]any{"message": msg, "eventAt": time.Now().UTC()},
 	})
 
 	writeJSON(w, http.StatusOK, msg)

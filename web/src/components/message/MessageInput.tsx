@@ -4,6 +4,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { useDMStore } from '../../stores/dmStore';
 import { wsClient } from '../../api/websocket';
 import { apiGetMembers, apiExecuteInteraction } from '../../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { MentionAutocomplete } from './MentionAutocomplete';
 import { SlashCommandPicker } from './SlashCommandPicker';
 import { EmojiInputPicker } from './EmojiInputPicker';
@@ -34,6 +35,9 @@ export function MessageInput() {
 
   // Mention autocomplete state
   const [members, setMembers] = useState<MemberWithUser[]>([]);
+  // Shared recency for the initial and event-driven member fetches: only the
+  // LATEST fetch may populate the mention list.
+  const membersSeqRef = useRef(0);
   const [showMentions, setShowMentions] = useState(false);
   const [mentionQuery, setMentionQuery] = useState('');
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -65,10 +69,25 @@ export function MessageInput() {
   // Fetch members when server changes
   useEffect(() => {
     if (!selectedServerId) {
+      // Empty scope invalidates outstanding reads too: claim the lineage so a
+      // held old-server response cannot repopulate the cleared list.
+      membersSeqRef.current += 1;
       setMembers([]);
       return;
     }
-    apiGetMembers(selectedServerId).then(setMembers).catch(() => {});
+    // Server-owned: clear the previous server's members immediately, so they are
+    // never usable in this server's mention list while the fetch is in flight.
+    setMembers([]);
+    // Owned by session AND recency: a stale response must not repopulate the
+    // mention list across a boundary, and an older fetch must not overwrite a
+    // newer one's members.
+    const generation = captureSessionGeneration();
+    const seq = ++membersSeqRef.current;
+    apiGetMembers(selectedServerId)
+      .then((m) => {
+        if (seq === membersSeqRef.current && isSessionGenerationCurrent(generation)) setMembers(m);
+      })
+      .catch(() => {});
   }, [selectedServerId]);
 
   // Fetch slash commands when server changes
@@ -84,7 +103,13 @@ export function MessageInput() {
   useEffect(() => {
     if (!selectedServerId) return;
     const handler = () => {
-      apiGetMembers(selectedServerId).then(setMembers).catch(() => {});
+      const generation = captureSessionGeneration();
+      const seq = ++membersSeqRef.current;
+      apiGetMembers(selectedServerId)
+        .then((m) => {
+          if (seq === membersSeqRef.current && isSessionGenerationCurrent(generation)) setMembers(m);
+        })
+        .catch(() => {});
     };
     eventBus.on('bastion:member-join', handler);
     return () => eventBus.off('bastion:member-join', handler);

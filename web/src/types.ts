@@ -81,6 +81,8 @@ export interface AuthorOverride {
 export interface Message {
   id: string;
   channelId: string;
+  /** Server-owned insertion sequence: the causal watermark for unread state. */
+  seq?: number;
   author: MessageAuthor;
   content: string;
   embeds?: Embed[];
@@ -150,6 +152,10 @@ export interface ReadState {
   channelId: string;
   lastMessageId?: string;
   lastReadAt: string;
+  /** Server-owned read watermark: the seq of the acknowledged message. */
+  lastReadSeq?: number;
+  /** DB-ordered revision for equal-watermark mention projections. */
+  projectionRevision?: number;
   mentionCount: number;
 }
 
@@ -286,6 +292,7 @@ export type WSEventType =
   | 'CHANNEL_CREATE'
   | 'CHANNEL_UPDATE'
   | 'CHANNEL_DELETE'
+  | 'CHANNELS_STALE'
   | 'SERVER_UPDATE'
   | 'MEMBER_JOIN'
   | 'MEMBER_LEAVE'
