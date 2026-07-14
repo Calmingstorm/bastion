@@ -16,6 +16,9 @@ interface PinnedMessagesProps {
 export function PinnedMessages({ open, onOpenChange, channelId }: PinnedMessagesProps) {
   const [pins, setPins] = useState<PinnedMessage[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  // Track the current channel for scope checks in mutation continuations.
+  const channelIdRef = useRef(channelId);
+  useEffect(() => { channelIdRef.current = channelId; }, [channelId]);
   // Only the LATEST fetch owns the pins and loading flag -- across session
   // boundaries AND channel switches (the effect refetches on channelId change,
   // claiming a new sequence, which supersedes reads and mutation continuations
@@ -65,15 +68,18 @@ export function PinnedMessages({ open, onOpenChange, channelId }: PinnedMessages
   }, [open, channelId]);
 
   const handleUnpin = async (messageId: string) => {
-    // Owned by the SESSION only. Removing a message id from whatever same-session
-    // list is current is always safe (ids are globally unique, so a different
-    // channel's list is unaffected) -- and it must NOT be sequence-gated: the
-    // unpin's own WebSocket pin-update advances the shared sequence, and if that
-    // event-driven refresh fails, the filter here is what removes the pin.
+    // Owned by the SESSION and the CHANNEL it was started for. It must NOT be
+    // sequence-gated (the unpin's own WebSocket pin-update advances the shared
+    // sequence, and if that refresh fails the filter here removes the pin) -- but
+    // a completion from a PREVIOUS channel must commit nothing: advancing the
+    // shared sequence then would discard the current channel's in-flight pins
+    // response and strand its spinner.
     const generation = captureSessionGeneration();
+    const channelAtStart = channelId;
     try {
       await apiUnpinMessage(channelId, messageId);
       if (!isSessionGenerationCurrent(generation)) return;
+      if (channelIdRef.current !== channelAtStart) return;
       setPins((prev) => prev.filter((p) => p.id !== messageId));
       // The COMMITTED mutation supersedes every in-flight read that predates it:
       // an older (pre-unpin) refresh settling later must not resurrect the pin.

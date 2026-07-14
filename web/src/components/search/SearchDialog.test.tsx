@@ -66,6 +66,23 @@ describe('SearchDialog session/query ownership', () => {
     useServerStore.setState({ selectedServerId: null });
   });
 
+  it('a server switch during the debounce gap cancels the pending search (no permanent loading)', async () => {
+    const user = userEvent.setup();
+    useServerStore.setState({ selectedServerId: 'server-a' });
+    const searchSpy = vi.spyOn(client, 'apiSearch').mockResolvedValue([]);
+    const { container } = render(<SearchDialog open onClose={vi.fn()} />);
+    await user.type(screen.getByPlaceholderText('Search messages...'), 'query');
+    // BEFORE the 400ms debounce fires, the scope changes.
+    await act(async () => {
+      useServerStore.setState({ selectedServerId: 'server-b' });
+      await new Promise((r) => setTimeout(r, 450)); // let the (cancelled) timer window pass
+    });
+
+    expect(searchSpy).not.toHaveBeenCalled(); // the stale timer started nothing
+    expect(container.querySelector('.animate-spin')).toBeNull(); // and no stuck loading
+    useServerStore.setState({ selectedServerId: null });
+  });
+
   it('clearing the input supersedes an in-flight search', async () => {
     const user = userEvent.setup();
     let resolveSearch!: (r: SearchResult[]) => void;

@@ -130,6 +130,40 @@ describe('PinnedMessages session ownership', () => {
     expect(screen.queryByText(/doomed-pin/)).toBeNull(); // and cannot resurrect it
   });
 
+  it('an old-channel unpin cannot invalidate the current channel pins fetch', async () => {
+    let resolveB!: (p: PinnedMessage[]) => void;
+    vi.spyOn(client, 'apiGetPinnedMessages')
+      .mockResolvedValueOnce([pin('m1', 'channel-a-pin')]) // channel A loads
+      .mockImplementationOnce(
+        () => new Promise((res) => { resolveB = res as (p: PinnedMessage[]) => void; })
+      );
+    let resolveUnpin!: () => void;
+    vi.spyOn(client, 'apiUnpinMessage').mockImplementation(
+      () => new Promise<void>((res) => { resolveUnpin = () => res(); })
+    );
+    const user = userEvent.setup();
+    const { rerender } = render(<PinnedMessages open onOpenChange={vi.fn()} channelId="chan-a" />);
+    await screen.findByText(/channel-a-pin/);
+
+    await user.click(screen.getByRole('button', { name: 'Unpin' })); // A-unpin held
+
+    rerender(<PinnedMessages open onOpenChange={vi.fn()} channelId="chan-b" />); // switch; B fetch held
+
+    await act(async () => {
+      resolveUnpin(); // the OLD channel's unpin settles first
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await act(async () => {
+      resolveB([pin('m2', 'channel-b-pin')]); // then B's pins arrive
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // B's response must commit (the stale unpin did not advance the sequence):
+    // pins shown, no permanent spinner.
+    expect(screen.getByText(/channel-b-pin/)).toBeInTheDocument();
+    expect(document.querySelector('.animate-spin')).toBeNull();
+  });
+
   it('a stale unpin completion does not edit the current session list', async () => {
     vi.spyOn(client, 'apiGetPinnedMessages').mockResolvedValue([pin('m1', 'still-pinned')]);
     let resolveUnpin!: () => void;

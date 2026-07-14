@@ -159,8 +159,10 @@ export function ChannelList() {
     }).catch(() => {});
   }, [selectedServerId]);
 
-  // Fetch categories when server changes
+  // Fetch categories when server changes -- clearing FIRST, so server A's
+  // categories are never displayed under server B (even if B's fetch fails).
   useEffect(() => {
+    setCategories([]);
     fetchCategories();
   }, [fetchCategories]);
 
@@ -209,10 +211,14 @@ export function ChannelList() {
     const trimmed = newCategoryName.trim();
     if (!trimmed || !selectedServerId) return;
 
+    // Owned by session AND server scope: a continuation settling after a server
+    // switch must not refetch (or reselect) the OLD server under the new one.
     const generation = captureSessionGeneration();
+    const serverIdAtStart = selectedServerId;
     try {
       await apiCreateCategory(selectedServerId, trimmed);
       if (!isSessionGenerationCurrent(generation)) return;
+      if (useServerStore.getState().selectedServerId !== serverIdAtStart) return;
       setNewCategoryName('');
       setShowCreateCategory(false);
       fetchCategories();
@@ -233,9 +239,13 @@ export function ChannelList() {
       return;
     }
     const generation = captureSessionGeneration();
+    const serverIdAtStart = selectedServerId;
     try {
       await apiUpdateCategory(selectedServerId, catId, { name: trimmed });
-      if (isSessionGenerationCurrent(generation)) fetchCategories();
+      if (isSessionGenerationCurrent(generation)
+        && useServerStore.getState().selectedServerId === serverIdAtStart) {
+        fetchCategories();
+      }
     } catch {
       // silently fail
     }
@@ -246,11 +256,13 @@ export function ChannelList() {
     if (!deletingCategoryId || !selectedServerId) return;
     setIsDeletingCategory(true); // locks the dialog so it can't be dismissed mid-request
     const generation = captureSessionGeneration();
+    const serverIdAtStart = selectedServerId;
     try {
       await apiDeleteCategory(selectedServerId, deletingCategoryId);
       // A stale delete completing must not refetch into -- or reselect within --
-      // the NEW session (server ids can be shared across accounts).
-      if (isSessionGenerationCurrent(generation)) {
+      // the NEW session or a DIFFERENT server scope.
+      if (isSessionGenerationCurrent(generation)
+        && useServerStore.getState().selectedServerId === serverIdAtStart) {
         fetchCategories();
         // Channels in deleted category become uncategorized — refetch channels
         useServerStore.getState().selectServer(selectedServerId);

@@ -72,6 +72,9 @@ export function MessageInput() {
       setMembers([]);
       return;
     }
+    // Server-owned: clear the previous server's members immediately, so they are
+    // never usable in this server's mention list while the fetch is in flight.
+    setMembers([]);
     // Owned by session AND recency: a stale response must not repopulate the
     // mention list across a boundary, and an older fetch must not overwrite a
     // newer one's members.

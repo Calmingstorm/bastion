@@ -191,6 +191,12 @@ const TIMEOUT_OPTIONS = [
 function ModActions({ serverId, userId, onDone }: { serverId: string; userId: string; onDone: () => void }) {
   const [showTimeoutPicker, setShowTimeoutPicker] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
+  // Track the current target: the card is REUSED across (server, user) targets, so
+  // a completion for a previous target must not close the current target's card.
+  const targetRef = useRef({ serverId, userId });
+  useEffect(() => { targetRef.current = { serverId, userId }; }, [serverId, userId]);
+  const sameTarget = () =>
+    targetRef.current.serverId === serverId && targetRef.current.userId === userId;
 
   useEffect(() => {
     if (!showTimeoutPicker) return;
@@ -204,11 +210,12 @@ function ModActions({ serverId, userId, onDone }: { serverId: string; userId: st
   }, [showTimeoutPicker]);
 
   const handleTimeout = async (seconds: number) => {
-    // A stale completion must not call onDone() and close the NEW session's card.
+    // A stale completion (session ended OR the card retargeted) must not call
+    // onDone() and close the current card.
     const generation = captureSessionGeneration();
     try {
       await apiTimeoutMember(serverId, userId, seconds);
-      if (!isSessionGenerationCurrent(generation)) return;
+      if (!isSessionGenerationCurrent(generation) || !sameTarget()) return;
       onDone();
     } catch { /* ignored */ }
   };
@@ -217,7 +224,7 @@ function ModActions({ serverId, userId, onDone }: { serverId: string; userId: st
     const generation = captureSessionGeneration();
     try {
       await apiKickMember(serverId, userId);
-      if (!isSessionGenerationCurrent(generation)) return;
+      if (!isSessionGenerationCurrent(generation) || !sameTarget()) return;
       onDone();
     } catch { /* ignored */ }
   };
@@ -226,7 +233,7 @@ function ModActions({ serverId, userId, onDone }: { serverId: string; userId: st
     const generation = captureSessionGeneration();
     try {
       await apiBanMember(serverId, userId);
-      if (!isSessionGenerationCurrent(generation)) return;
+      if (!isSessionGenerationCurrent(generation) || !sameTarget()) return;
       onDone();
     } catch { /* ignored */ }
   };

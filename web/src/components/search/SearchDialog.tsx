@@ -39,6 +39,10 @@ export function SearchDialog({ open, onClose }: SearchDialogProps) {
   // and clears results, so server A's matches never render under server B.
   useEffect(() => {
     searchSeqRef.current += 1;
+    // Cancel the pending debounce too: a timer armed under the old scope would
+    // otherwise fire, set loading, and be unable to clear it (its finally is
+    // superseded) -- a permanent spinner.
+    if (debounceRef.current) clearTimeout(debounceRef.current);
     setResults([]);
     setLoading(false);
   }, [selectedServerId]);
@@ -78,6 +82,9 @@ export function SearchDialog({ open, onClose }: SearchDialogProps) {
       return;
     }
     debounceRef.current = setTimeout(() => {
+      // Superseded before firing (scope change, newer query): start nothing --
+      // setting loading here could never be cleared by this callback.
+      if (seq !== searchSeqRef.current) return;
       const generation = captureSessionGeneration();
       const owns = () => seq === searchSeqRef.current && isSessionGenerationCurrent(generation);
       setLoading(true);

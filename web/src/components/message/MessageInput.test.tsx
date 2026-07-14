@@ -54,4 +54,29 @@ describe('MessageInput member fetch recency', () => {
     expect(await screen.findByText(/newbie/)).toBeInTheDocument();
     expect(screen.queryByText(/oldie/)).toBeNull();
   });
+
+  // F38 round 18: the member list is SERVER-owned -- switching servers clears the
+  // previous server's members immediately, so they are never usable in the new
+  // server's mention list while its fetch is in flight.
+  it('a server switch clears the old members while the new fetch is held', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(client, 'apiGetMembers')
+      .mockResolvedValueOnce([
+        { serverId: 's1', userId: 'ua', username: 'server-a-user', role: 'member', status: 'online' } as MemberWithUser,
+      ])
+      .mockImplementationOnce(() => new Promise(() => {})); // server B's fetch held
+
+    render(<MessageInput />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0)); // A's members land
+    });
+
+    await act(async () => {
+      useServerStore.setState({ selectedServerId: 's2' }); // switch; B held
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    await user.type(screen.getByPlaceholderText('Message #general'), '@');
+    expect(screen.queryByText(/server-a-user/)).toBeNull(); // A's member not usable under B
+  });
 });

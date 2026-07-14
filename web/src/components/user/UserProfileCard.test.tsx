@@ -64,6 +64,40 @@ describe('UserProfileCard session ownership', () => {
     useAuthStore.setState({ user: null });
   });
 
+  it('a moderation completion for a previous target does not close the retargeted card', async () => {
+    const user = userEvent.setup();
+    useAuthStore.setState({ user: { id: 'me' } as User });
+    vi.spyOn(client, 'apiGetUser').mockResolvedValue({ id: 'u1', username: 'target-user' } as User);
+    let resolveKick!: () => void;
+    vi.spyOn(client, 'apiKickMember').mockImplementation(
+      () => new Promise<void>((res) => { resolveKick = () => res(); })
+    );
+    const { rerender } = render(
+      <UserProfileCard userId="u1" serverId="server-a" canModerate>
+        <button>open profile</button>
+      </UserProfileCard>
+    );
+    await user.click(screen.getByRole('button', { name: 'open profile' }));
+    await screen.findAllByText(/target-user/);
+
+    await user.click(screen.getByRole('button', { name: 'Kick' })); // held, target (A, u1)
+
+    rerender(
+      <UserProfileCard userId="u1" serverId="server-b" canModerate>
+        <button>open profile</button>
+      </UserProfileCard>
+    ); // the card is reused for target (B, u1)
+
+    await act(async () => {
+      resolveKick(); // the (A, u1) completion settles after retargeting
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // onDone() must not run for the previous target: B's card stays open.
+    expect(screen.getAllByText(/target-user/).length).toBeGreaterThan(0);
+    useAuthStore.setState({ user: null });
+  });
+
   it('a userId change clears the old profile, refetches, and ignores the older response', async () => {
     const user = userEvent.setup();
     let resolveFirst!: (u: User) => void;

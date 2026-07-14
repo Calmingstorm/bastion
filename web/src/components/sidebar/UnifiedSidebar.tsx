@@ -107,8 +107,16 @@ export function UnifiedSidebar() {
     }).catch(() => {});
   }, [expandedServerId]);
 
-  // Fetch categories when expanded server changes
-  useEffect(() => { fetchCategories(); }, [fetchCategories]);
+  // Track the current expanded server for scope checks in mutation continuations.
+  const expandedServerIdRef = useRef(expandedServerId);
+  useEffect(() => { expandedServerIdRef.current = expandedServerId; }, [expandedServerId]);
+
+  // Fetch categories when expanded server changes -- clearing FIRST, so server A's
+  // categories are never displayed under server B (even if B's fetch fails).
+  useEffect(() => {
+    setCategories([]);
+    fetchCategories();
+  }, [fetchCategories]);
 
   // Listen for category WS events to refetch
   useEffect(() => {
@@ -129,10 +137,13 @@ export function UnifiedSidebar() {
     e.preventDefault();
     const trimmed = newCategoryName.trim();
     if (!trimmed) return;
+    // Owned by session AND server scope: a continuation settling after the
+    // expanded server changed must not refetch the OLD server under the new one.
     const generation = captureSessionGeneration();
     try {
       await apiCreateCategory(serverId, trimmed);
       if (!isSessionGenerationCurrent(generation)) return;
+      if (expandedServerIdRef.current !== serverId) return;
       setNewCategoryName('');
       setShowCreateCategory(null);
       fetchCategories();
@@ -151,9 +162,12 @@ export function UnifiedSidebar() {
       return;
     }
     const generation = captureSessionGeneration();
+    const serverIdAtStart = expandedServerId;
     try {
       await apiUpdateCategory(expandedServerId, catId, { name: trimmed });
-      if (isSessionGenerationCurrent(generation)) fetchCategories();
+      if (isSessionGenerationCurrent(generation) && expandedServerIdRef.current === serverIdAtStart) {
+        fetchCategories();
+      }
     } catch { /* silently fail */ }
     setEditingCategoryId(null);
   };
@@ -162,11 +176,12 @@ export function UnifiedSidebar() {
     if (!deletingCategoryId || !expandedServerId) return;
     setIsDeletingCategory(true); // locks the dialog so it can't be dismissed mid-request
     const generation = captureSessionGeneration();
+    const serverIdAtStart = expandedServerId;
     try {
       await apiDeleteCategory(expandedServerId, deletingCategoryId);
       // A stale delete completing must not refetch into -- or reselect within --
-      // the NEW session (server ids can be shared across accounts).
-      if (isSessionGenerationCurrent(generation)) {
+      // the NEW session or a DIFFERENT server scope.
+      if (isSessionGenerationCurrent(generation) && expandedServerIdRef.current === serverIdAtStart) {
         fetchCategories();
         useServerStore.getState().selectServer(expandedServerId);
       }

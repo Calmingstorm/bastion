@@ -110,3 +110,34 @@ describe('UnifiedSidebar category fetch recency', () => {
     expect(screen.queryByText(/OldCat/)).toBeNull();
   });
 });
+
+describe('UnifiedSidebar category server scope', () => {
+  it('a server switch clears the old categories even when the new fetch fails', async () => {
+    useAuthStore.setState({ user: { id: 'u1', username: 'me' } as never, isAuthenticated: true });
+    useDMStore.setState({ dmChannels: [], selectedDMId: null });
+    useServerStore.setState({
+      servers: [
+        { id: 's1', name: 'S1', ownerId: 'u1' } as Server,
+        { id: 's2', name: 'S2', ownerId: 'u1' } as Server,
+      ],
+      selectedServerId: 's1',
+      channels: [],
+      selectedChannelId: null,
+      isLoadingChannels: false,
+    });
+    const api = await import('../../api/client');
+    vi.mocked(api.apiGetCategories)
+      .mockResolvedValueOnce([{ id: 'cat-a', name: 'SidebarACat', position: 0 }] as never)
+      .mockRejectedValueOnce(new Error('server B categories failed'));
+
+    render(<UnifiedSidebar />);
+    expect(await screen.findByText(/SidebarACat/)).toBeInTheDocument();
+
+    await act(async () => {
+      useServerStore.setState({ selectedServerId: 's2' }); // switch; B's fetch fails
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(screen.queryByText(/SidebarACat/)).toBeNull();
+  });
+});
