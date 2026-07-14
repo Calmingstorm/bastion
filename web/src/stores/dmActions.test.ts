@@ -51,4 +51,30 @@ describe('openDirectMessage', () => {
     expect(useServerStore.getState().selectedChannelId).toBe('c1');
     expect(useDMStore.getState().selectedDMId).not.toBe('dm-old');
   });
+
+  // F38 round 6: the boundary can also land AFTER createDM settles (its internal
+  // check passed) but BEFORE this helper's continuation runs its side effects. The
+  // workflow must own its own generation, not rely on createDM's.
+  it('does not select or switch views when the session changes after the create settles', async () => {
+    let resolveCreate!: (dm: DMChannel) => void;
+    vi.spyOn(client, 'apiCreateDM').mockImplementation(
+      () =>
+        new Promise((res) => {
+          resolveCreate = res as (dm: DMChannel) => void;
+        })
+    );
+
+    const pending = openDirectMessage(['u1']);
+    resolveCreate({ id: 'dm-old' } as DMChannel);
+    // One microtask: createDM's continuation runs (its own check passes, it returns
+    // the DM) -- but openDirectMessage's continuation has NOT run yet.
+    await Promise.resolve();
+    invalidateSession(); // the boundary lands in exactly that window
+    const dm = await pending;
+
+    expect(dm).toBeUndefined();
+    expect(useServerStore.getState().selectedServerId).toBe('s1');
+    expect(useServerStore.getState().selectedChannelId).toBe('c1');
+    expect(useDMStore.getState().selectedDMId).not.toBe('dm-old');
+  });
 });

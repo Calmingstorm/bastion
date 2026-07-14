@@ -64,4 +64,33 @@ describe('NewDMDialog session guard', () => {
     await waitFor(() => expect(useDMStore.getState().selectedDMId).toBe('dm-new'));
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
+
+  // F38 round 6: the workflow spans more than the create -- a session change during
+  // the post-create fetchDMs() must also stop the select/close. The dialog owns the
+  // whole sequence with one generation captured at its start.
+  it('does not select or close when the session changes during the post-create fetch', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(client, 'apiCreateDM').mockResolvedValue({ id: 'dm-new' } as DMChannel);
+    let resolveGetDMs!: (dms: DMChannel[]) => void;
+    const getDMsSpy = vi.spyOn(client, 'apiGetDMs').mockImplementation(
+      () =>
+        new Promise((res) => {
+          resolveGetDMs = res as (dms: DMChannel[]) => void;
+        })
+    );
+    const onOpenChange = vi.fn();
+
+    render(<NewDMDialog open onOpenChange={onOpenChange} />);
+    await selectAliceAndCreate(user); // create succeeded; fetchDMs now in flight
+    await waitFor(() => expect(getDMsSpy).toHaveBeenCalled());
+
+    await act(async () => {
+      invalidateSession(); // a new account logs in during the fetch
+      resolveGetDMs([]);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(useDMStore.getState().selectedDMId).not.toBe('dm-new');
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+  });
 });

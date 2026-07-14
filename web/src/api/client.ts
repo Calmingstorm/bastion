@@ -1,7 +1,11 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios';
 import { wsClient } from './websocket';
 import { storage } from '../utils/storage';
-import { captureSessionGeneration, isSessionGenerationCurrent } from './session';
+import {
+  captureSessionGeneration,
+  isSessionGenerationCurrent,
+  onSessionInvalidated,
+} from './session';
 import type {
   User,
   Server,
@@ -155,6 +159,18 @@ function processQueue(error: unknown, token: string | null, generation: number):
   failedQueue = keep;
 }
 
+// An identity boundary must settle prior-session waiters AT the boundary. Generation
+// scoping alone only drains them when their refresh settles -- but the refresh is a
+// bare axios.post that abortInFlightRequests() cannot cancel, so if it hangs, its
+// queued requests would stay pending forever. Reject them here instead; their callers
+// are generation-guarded and ignore the rejection.
+onSessionInvalidated(() => {
+  const stale = failedQueue.filter((prom) => !isSessionGenerationCurrent(prom.generation));
+  if (stale.length === 0) return;
+  failedQueue = failedQueue.filter((prom) => isSessionGenerationCurrent(prom.generation));
+  stale.forEach((prom) => prom.reject(new Error('session changed')));
+});
+
 apiClient.interceptors.response.use(
   (response) => response,
   async (error: AxiosError) => {
@@ -192,6 +208,14 @@ apiClient.interceptors.response.use(
         return new Promise<string>((resolve, reject) => {
           failedQueue.push({ resolve, reject, generation: queuedGeneration });
         }).then((token) => {
+          // The refresh resolved for the session this request was queued under, but
+          // an identity boundary can land between that resolution and this
+          // continuation. Retrying then would re-enter the interceptor, which would
+          // re-stamp the old request with the NEW session's generation and bearer
+          // token. Recheck before retrying; the caller is generation-guarded.
+          if (!isSessionGenerationCurrent(queuedGeneration)) {
+            return Promise.reject(error);
+          }
           if (originalRequest.headers) {
             originalRequest.headers.Authorization = `Bearer ${token}`;
           }

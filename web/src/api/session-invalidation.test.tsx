@@ -380,4 +380,101 @@ describe('session invalidation', () => {
     expect(await leaderSettled).toBe('rejected');
     postSpy.mockRestore();
   });
+
+  // F38 round 6 (blocker 1): the boundary itself must settle queued waiters. If the
+  // stale refresh HANGS (a bare axios.post that abortInFlightRequests cannot cancel),
+  // generation-scoped draining never runs -- invalidateSession() has to reject the
+  // prior session's waiters directly.
+  it('invalidateSession immediately rejects requests queued behind a hung refresh', async () => {
+    storage.setItem('accessToken', 'a-access');
+    storage.setItem('refreshToken', 'a-refresh');
+
+    let refreshStarted!: () => void;
+    const refreshInFlight = new Promise<void>((r) => (refreshStarted = r));
+    const postSpy = vi.spyOn(axios, 'post').mockImplementation(() => {
+      refreshStarted();
+      return new Promise(() => {}); // the refresh NEVER settles
+    });
+
+    apiClient.defaults.adapter = (async (config) => {
+      const err = new Error('Unauthorized') as Error & Record<string, unknown>;
+      err.config = config;
+      err.response = { status: 401, data: {} };
+      err.isAxiosError = true;
+      throw err;
+    }) as AxiosAdapter;
+
+    const leader = apiClient.get('/leader'); // 401 -> starts the hung refresh
+    void leader.then(() => {}, () => {}); // never settles; keep it handled regardless
+    await refreshInFlight;
+
+    const queued = apiClient.get('/queued'); // 401 -> queues behind the hung refresh
+    const queuedSettled = queued.then(() => 'resolved', () => 'rejected');
+    await new Promise((r) => setTimeout(r, 0)); // genuinely on failedQueue
+
+    invalidateSession(); // the boundary must drain the queue -- nothing else ever will
+
+    const outcome = await Promise.race([
+      queuedSettled,
+      new Promise((r) => setTimeout(() => r('pending'), 50)),
+    ]);
+    expect(outcome).toBe('rejected');
+    postSpy.mockRestore();
+  });
+
+  // F38 round 6 (blocker 2): a queued request resolved by its refresh must re-check
+  // its generation in the continuation. A boundary can land between the queue being
+  // resolved and the waiter's .then() running -- retrying then would re-stamp the old
+  // request with the NEW session's generation and bearer token.
+  it('a queued request does not retry with the new session credentials when the boundary lands before its continuation', async () => {
+    storage.setItem('accessToken', 'a-access');
+    storage.setItem('refreshToken', 'a-refresh');
+
+    let resolveRefresh!: (v: unknown) => void;
+    let refreshStarted!: () => void;
+    const refreshInFlight = new Promise<void>((r) => (refreshStarted = r));
+    const postSpy = vi.spyOn(axios, 'post').mockImplementation(() => {
+      refreshStarted();
+      return new Promise((res) => {
+        resolveRefresh = res as (v: unknown) => void;
+      });
+    });
+
+    // 401 on first sight of a URL, 200 on its retry; count sends per URL.
+    const sends: Record<string, number> = {};
+    apiClient.defaults.adapter = (async (config) => {
+      const url = config.url ?? '';
+      sends[url] = (sends[url] ?? 0) + 1;
+      if (sends[url] > 1) {
+        return { data: { url }, status: 200, statusText: 'OK', headers: {}, config } as AxiosResponse;
+      }
+      const err = new Error('Unauthorized') as Error & Record<string, unknown>;
+      err.config = config;
+      err.response = { status: 401, data: {} };
+      err.isAxiosError = true;
+      throw err;
+    }) as AxiosAdapter;
+
+    const r1 = apiClient.get('/r1'); // leader: 401 -> starts refresh (held)
+    const r1Settled = r1.then(() => 'resolved', () => 'rejected');
+    await refreshInFlight;
+
+    const r2 = apiClient.get('/r2'); // queues behind the refresh
+    const r2Settled = r2.then(() => 'resolved', () => 'rejected');
+    await new Promise((r) => setTimeout(r, 0)); // genuinely queued
+
+    resolveRefresh({ data: { accessToken: 'a-access-2' } });
+    // One microtask: the leader's continuation runs (its own generation check passes,
+    // the queue is resolved with the token) -- but the waiter's .then has NOT run yet.
+    await Promise.resolve();
+    invalidateSession(); // the boundary lands in exactly that window
+    storage.setItem('accessToken', 'b-access');
+    storage.setItem('refreshToken', 'b-refresh');
+    await new Promise((r) => setTimeout(r, 0)); // let everything settle
+
+    expect(await r2Settled).toBe('rejected'); // not retried across the boundary
+    expect(sends['/r2']).toBe(1); // and never re-sent with the new credentials
+    expect(await r1Settled).toBe('resolved'); // the leader retried inside its own (pre-boundary) turn
+    postSpy.mockRestore();
+  });
 });

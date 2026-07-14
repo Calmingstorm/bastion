@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { apiSearchUsers } from '../../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { useDMStore } from '../../stores/dmStore';
 import { resolveMediaUrl } from '../../platform';
 import type { MessageAuthor } from '../../types';
@@ -72,15 +73,20 @@ export function NewDMDialog({ open, onOpenChange }: NewDMDialogProps) {
     if (selected.length === 0) return;
     setIsCreating(true);
     setError(null);
+    // The whole create -> refresh -> select workflow is owned by the session it
+    // started under: it spans several awaits, and an identity boundary during ANY of
+    // them (not just the create) must stop the remaining side effects -- otherwise a
+    // DM belonging to the previous account gets selected in the new session.
+    const generation = captureSessionGeneration();
     try {
-      // Route through the guarded store action: if the session changes mid-create it
-      // returns undefined, and we must not select a DM created for the old account.
       const dm = await createDM(selected.map((u) => u.id));
-      if (!dm) return;
+      if (!dm || !isSessionGenerationCurrent(generation)) return;
       await fetchDMs();
+      if (!isSessionGenerationCurrent(generation)) return;
       selectDM(dm.id);
       onOpenChange(false);
     } catch {
+      if (!isSessionGenerationCurrent(generation)) return;
       setError('Failed to create conversation.');
     } finally {
       setIsCreating(false);
