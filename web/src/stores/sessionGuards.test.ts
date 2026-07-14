@@ -831,11 +831,12 @@ describe('session-boundary guards', () => {
     useDMStore.getState().reset();
   });
 
-  it('a message event revives a channel whose delete broadcast failed server-side', async () => {
-    // The delete was broadcast (tombstone laid) but the transaction failed: the
-    // channel is alive, every same-scope snapshot CONTAINS it, so omission can
-    // never testify and presence-gated updates cannot assert an absent target.
-    // The arriving message is the proof of life.
+  it('a pre-delete message cannot clear a channel deletion tombstone', async () => {
+    // Odin round 26 blocker 5: a message inserted concurrently with a delete
+    // can be broadcast AFTER the delete broadcast (different goroutines), so a
+    // message is NOT proof a channel delete failed -- there is deliberately no
+    // channel-lineage assertion on MESSAGE_CREATE (only the DM lineage has one,
+    // where reopening is a real server behavior). The tombstone must hold.
     useServerStore.setState({
       servers: [], selectedServerId: 'srv-a', selectedChannelId: 'c-a',
       channels: [
@@ -843,18 +844,22 @@ describe('session-boundary guards', () => {
         { id: 'c-b', name: 'b', serverId: 'srv-a', position: 1 } as Channel,
       ],
     });
-    useServerStore.getState().removeChannel('c-b', 'srv-a'); // broadcast; DB delete then FAILS
-    useServerStore.getState().noteChannelAlive('c-b'); // someone messages in it
+    useServerStore.getState().removeChannel('c-b', 'srv-a'); // delete broadcast: tombstone laid
+    // The pre-delete message's event arrives late; the DM-side proof-of-life
+    // assert fires (as wsStore does for every message) -- different lineage,
+    // and nothing may touch the channel tombstone.
+    useDMStore.getState().noteChannelAlive('c-b');
     const dRef = deferred<Channel[]>();
     vi.mocked(client.apiGetChannels).mockReturnValue(dRef.promise);
     const pRef = useServerStore.getState().refreshChannels('srv-a');
     dRef.resolve([
       { id: 'c-a', name: 'a', serverId: 'srv-a', position: 0 } as Channel,
-      { id: 'c-b', name: 'b', serverId: 'srv-a', position: 1 } as Channel, // truthfully alive
+      { id: 'c-b', name: 'b', serverId: 'srv-a', position: 1 } as Channel, // stale pre-delete read
     ]);
     await pRef;
-    expect(useServerStore.getState().channels.map((c) => c.id)).toEqual(['c-a', 'c-b']); // revived
+    expect(useServerStore.getState().channels.map((c) => c.id)).toEqual(['c-a']); // no resurrection
     useServerStore.getState().reset();
+    useDMStore.getState().reset();
   });
 
   it('a second still-stale fetch cannot resurrect a deleted channel', async () => {
@@ -1058,36 +1063,52 @@ describe('session-boundary guards', () => {
     useServerStore.getState().reset();
   });
 
-  // F38 round 24.5 (self-found): unreadStore had the same discard-model defect --
-  // fetchReadStates wholesale-replaced the map, erasing overlapping acks and
-  // mention badges. Same lineage treatment as the server/DM lists.
+  // F38 rounds 24.5-27: unread counts are SERVER-OWNED. Local writes apply an
+  // optimistic update then TRIGGER an authoritative fetch through the lineage;
+  // supersession orders the world, and no committed count is client-computed.
   it('a held read-state fetch does not erase an overlapping ack', async () => {
     useUnreadStore.setState({ readStates: {}, unreadChannels: new Set(['c1']) });
-    const dFetch = deferred<unknown>();
-    vi.mocked(client.apiGetReadStates).mockReturnValue(dFetch.promise as never);
+    const dHeld = deferred<unknown>();
+    const dTriggered = deferred<unknown>();
+    vi.mocked(client.apiGetReadStates)
+      .mockReturnValueOnce(dHeld.promise as never)
+      .mockReturnValueOnce(dTriggered.promise as never);
     vi.mocked(client.apiAckChannel).mockResolvedValue(undefined as never);
     const pFetch = useUnreadStore.getState().fetchReadStates(); // snapshot held
     await useUnreadStore.getState().ackChannel('c1', 'm9'); // user reads c1 mid-flight
-    dFetch.resolve([
-      { channelId: 'c1', lastMessageId: 'm1', mentionCount: 3 }, // pre-ack read
+    dHeld.resolve([
+      { channelId: 'c1', lastMessageId: 'm1', mentionCount: 3 }, // pre-ack read: SUPERSEDED
       { channelId: 'c2', lastMessageId: 'm2', mentionCount: 1 },
     ]);
     await pFetch;
     expect(useUnreadStore.getState().readStates['c1']?.mentionCount).toBe(0); // ack survived
-    expect(useUnreadStore.getState().readStates['c1']?.lastMessageId).toBe('m9');
+    dTriggered.resolve([
+      { channelId: 'c1', lastMessageId: 'm9', mentionCount: 0 }, // post-ack truth
+      { channelId: 'c2', lastMessageId: 'm2', mentionCount: 1 },
+    ]);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(useUnreadStore.getState().readStates['c1']?.mentionCount).toBe(0);
     expect(useUnreadStore.getState().readStates['c2']?.mentionCount).toBe(1); // snapshot row survived
     useUnreadStore.getState().reset();
   });
 
-  it('a held read-state fetch does not eat a mention badge raised mid-flight', async () => {
+  it('a held pre-mention fetch is superseded by the mention-triggered authoritative fetch', async () => {
     useUnreadStore.setState({ readStates: {}, unreadChannels: new Set() });
-    const dFetch = deferred<unknown>();
-    vi.mocked(client.apiGetReadStates).mockReturnValue(dFetch.promise as never);
+    const dHeld = deferred<unknown>();
+    const dTriggered = deferred<unknown>();
+    vi.mocked(client.apiGetReadStates)
+      .mockReturnValueOnce(dHeld.promise as never)
+      .mockReturnValueOnce(dTriggered.promise as never);
     const pFetch = useUnreadStore.getState().fetchReadStates();
-    useUnreadStore.getState().incrementMention('c3'); // ping lands mid-flight
-    dFetch.resolve([]); // snapshot predates the mention
+    useUnreadStore.getState().incrementMention('c3'); // ping lands mid-flight; triggers a fetch
+    dHeld.resolve([]); // pre-mention snapshot: SUPERSEDED, cannot eat the badge
     await pFetch;
-    expect(useUnreadStore.getState().getMentionCount('c3')).toBe(1); // badge NOT vanished
+    expect(useUnreadStore.getState().getMentionCount('c3')).toBe(1); // optimistic badge intact
+    dTriggered.resolve([{ channelId: 'c3', lastMessageId: 'm1', mentionCount: 1 }]); // server counted it
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(useUnreadStore.getState().getMentionCount('c3')).toBe(1);
     useUnreadStore.getState().reset();
   });
 
@@ -1103,21 +1124,21 @@ describe('session-boundary guards', () => {
     useUnreadStore.getState().reset();
   });
 
-  it('a journal-gap read-state fetch retries with a fresh snapshot', async () => {
-    useUnreadStore.setState({ readStates: {}, unreadChannels: new Set() });
-    const d1 = deferred<unknown>();
-    const d2 = deferred<unknown>();
-    vi.mocked(client.apiGetReadStates)
-      .mockReturnValueOnce(d1.promise as never)
-      .mockReturnValueOnce(d2.promise as never);
-    const pFetch = useUnreadStore.getState().fetchReadStates();
-    for (let i = 0; i < 129; i += 1) useUnreadStore.getState().incrementMention('c-hot');
-    d1.resolve([]); // unreconcilable: journal outran the fetch
-    await Promise.resolve();
-    d2.resolve([{ channelId: 'c9', lastMessageId: 'm1', mentionCount: 2 }]);
-    await pFetch;
-    expect(vi.mocked(client.apiGetReadStates)).toHaveBeenCalledTimes(2); // retried
-    expect(useUnreadStore.getState().readStates['c9']?.mentionCount).toBe(2);
+  it('an ack held across reset neither repopulates the store nor fires its follow-up fetch', async () => {
+    useUnreadStore.setState({
+      readStates: { c5: { userId: '', channelId: 'c5', lastMessageId: 'm1', lastReadAt: '', mentionCount: 2 } },
+      unreadChannels: new Set(['c5']),
+    });
+    const dAck = deferred<void>();
+    vi.mocked(client.apiAckChannel).mockReturnValue(dAck.promise as never);
+    vi.mocked(client.apiGetReadStates).mockClear();
+    const pAck = useUnreadStore.getState().ackChannel('c5', 'm9');
+    useUnreadStore.getState().reset(); // same auth generation
+    dAck.resolve();
+    await pAck;
+    expect(useUnreadStore.getState().readStates).toEqual({}); // no write into the reset store
+    expect(useUnreadStore.getState().unreadChannels.size).toBe(0);
+    expect(vi.mocked(client.apiGetReadStates)).not.toHaveBeenCalled(); // no orphan follow-up
     useUnreadStore.getState().reset();
   });
 
@@ -1146,14 +1167,23 @@ describe('session-boundary guards', () => {
     useServerStore.getState().reset();
   });
 
-  it('a mention already included in the snapshot is not double-counted', async () => {
+  it('a late-handled notification defers to the already-committed authoritative count', async () => {
+    // Odin round 26 blocker 1: the snapshot commits count 1 FIRST, then the
+    // matching event is handled. The committed count must come from the server
+    // (the mention-triggered follow-up fetch), never from client arithmetic.
     useUnreadStore.setState({ readStates: {}, unreadChannels: new Set() });
-    const dFetch = deferred<unknown>();
-    vi.mocked(client.apiGetReadStates).mockReturnValue(dFetch.promise as never);
-    const pFetch = useUnreadStore.getState().fetchReadStates();
-    useUnreadStore.getState().incrementMention('c1'); // the event lands mid-flight
-    dFetch.resolve([{ channelId: 'c1', lastMessageId: 'm0', mentionCount: 1 }]); // snapshot ALREADY counted it
-    await pFetch;
+    const d1 = deferred<unknown>();
+    const d2 = deferred<unknown>();
+    vi.mocked(client.apiGetReadStates)
+      .mockReturnValueOnce(d1.promise as never)
+      .mockReturnValueOnce(d2.promise as never);
+    const p1 = useUnreadStore.getState().fetchReadStates();
+    d1.resolve([{ channelId: 'c1', lastMessageId: 'm0', mentionCount: 1 }]); // already counted it
+    await p1;
+    useUnreadStore.getState().incrementMention('c1'); // its event is handled AFTER the commit
+    d2.resolve([{ channelId: 'c1', lastMessageId: 'm0', mentionCount: 1 }]); // server truth
+    await Promise.resolve();
+    await Promise.resolve();
     expect(useUnreadStore.getState().getMentionCount('c1')).toBe(1); // one mention, count 1 -- not 2
     useUnreadStore.getState().reset();
   });
@@ -1165,35 +1195,54 @@ describe('session-boundary guards', () => {
     });
     const dAck = deferred<void>();
     vi.mocked(client.apiAckChannel).mockReturnValue(dAck.promise as never);
+    const dMention = deferred<unknown>();
+    const dAckFollow = deferred<unknown>();
+    vi.mocked(client.apiGetReadStates)
+      .mockReturnValueOnce(dMention.promise as never)
+      .mockReturnValueOnce(dAckFollow.promise as never);
     const pAck = useUnreadStore.getState().ackChannel('c1', 'm1'); // reading up to m1
     useUnreadStore.getState().incrementMention('c1'); // a NEW ping lands mid-flight
     useUnreadStore.getState().markUnread('c1');
     dAck.resolve();
     await pAck;
-    expect(useUnreadStore.getState().getMentionCount('c1')).toBe(1); // the newer mention survives
+    expect(useUnreadStore.getState().getMentionCount('c1')).toBe(3); // optimistic state untouched by the ack
     expect(useUnreadStore.getState().isUnread('c1')).toBe(true); // unread flag not erased
+    dMention.resolve([{ channelId: 'c1', lastMessageId: 'm1', mentionCount: 1 }]); // superseded
+    dAckFollow.resolve([{ channelId: 'c1', lastMessageId: 'm1', mentionCount: 1 }]); // post-ack truth: the new ping
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(useUnreadStore.getState().getMentionCount('c1')).toBe(1); // the newer mention survives
+    expect(useUnreadStore.getState().isUnread('c1')).toBe(true);
     useUnreadStore.getState().reset();
   });
 
-  it('a mid-flight authoritative fetch does not inflate a late ack residual', async () => {
-    // The fetch carries cross-device mentions the ack actually covered: a count
-    // DELTA would commit them as "new since entry" (false badge right after
-    // reading); the residual must count locally-observed mention EVENTS only.
+  it('a delayed ack does not zero an authoritative rebase; the server settles it', async () => {
+    // Odin round 26 blocker 2: a post-ack fetch commits a newer count, then the
+    // delayed ack settles. The ack applies NO arithmetic -- its optimistic zero
+    // is gated on nothing having moved, and its follow-up fetch commits truth.
     useUnreadStore.setState({
       readStates: { c4: { userId: '', channelId: 'c4', lastMessageId: 'm1', lastReadAt: '', mentionCount: 2 } },
       unreadChannels: new Set(['c4']),
     });
     const dAck = deferred<void>();
     vi.mocked(client.apiAckChannel).mockReturnValue(dAck.promise as never);
-    const pAck = useUnreadStore.getState().ackChannel('c4', 'm9'); // reading everything
-    const dFetch = deferred<unknown>();
-    vi.mocked(client.apiGetReadStates).mockReturnValue(dFetch.promise as never);
-    const pFetch = useUnreadStore.getState().fetchReadStates();
-    dFetch.resolve([{ channelId: 'c4', lastMessageId: 'm1', mentionCount: 5 }]); // cross-device count
-    await pFetch;
-    dAck.resolve(); // the ack covered all of them (m9 is the newest)
+    const dRebase = deferred<unknown>();
+    const dFollow = deferred<unknown>();
+    vi.mocked(client.apiGetReadStates)
+      .mockReturnValueOnce(dRebase.promise as never)
+      .mockReturnValueOnce(dFollow.promise as never);
+    const pAck = useUnreadStore.getState().ackChannel('c4', 'm1');
+    const pRebase = useUnreadStore.getState().fetchReadStates();
+    dRebase.resolve([{ channelId: 'c4', lastMessageId: 'm1', mentionCount: 5 }]); // authoritative rebase
+    await pRebase;
+    expect(useUnreadStore.getState().getMentionCount('c4')).toBe(5);
+    dAck.resolve(); // the delayed ack settles AFTER the rebase
     await pAck;
-    expect(useUnreadStore.getState().getMentionCount('c4')).toBe(0); // no phantom residual
+    expect(useUnreadStore.getState().getMentionCount('c4')).toBe(5); // NOT zeroed by arithmetic
+    dFollow.resolve([{ channelId: 'c4', lastMessageId: 'm1', mentionCount: 3 }]); // post-ack server truth
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(useUnreadStore.getState().getMentionCount('c4')).toBe(3); // the server settled it
     useUnreadStore.getState().reset();
   });
 
@@ -1203,9 +1252,15 @@ describe('session-boundary guards', () => {
       unreadChannels: new Set(['c2']),
     });
     vi.mocked(client.apiAckChannel).mockResolvedValue(undefined as never);
+    vi.mocked(client.apiGetReadStates).mockResolvedValue([
+      { channelId: 'c2', lastMessageId: 'm9', mentionCount: 0 },
+    ] as never);
     await useUnreadStore.getState().ackChannel('c2', 'm9');
     expect(useUnreadStore.getState().getMentionCount('c2')).toBe(0);
     expect(useUnreadStore.getState().isUnread('c2')).toBe(false);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(useUnreadStore.getState().getMentionCount('c2')).toBe(0); // follow-up agrees
     useUnreadStore.getState().reset();
   });
 
@@ -1224,22 +1279,44 @@ describe('session-boundary guards', () => {
     usePermissionStore.getState().reset();
   });
 
-  it('a late close response yields to mid-flight proof of reopening', async () => {
+  it('a close racing a reopen asks the server: the reopen won', async () => {
+    // A message arrived during the close's flight. Which mutation won is the
+    // SERVER's knowledge -- the close installs neither removal nor tombstone
+    // and triggers an authoritative fetch instead.
     useDMStore.setState({ dmChannels: [{ id: 'dm-c' } as DMChannel] });
     const dClose = deferred<void>();
     vi.mocked(client.apiCloseDM).mockReturnValue(dClose.promise as never);
-    const pClose = useDMStore.getState().closeDM('dm-c'); // close in flight
-    useDMStore.getState().noteChannelAlive('dm-c'); // MESSAGE_CREATE: reopened mid-flight
-    dClose.resolve();
-    await pClose;
-    expect(useDMStore.getState().dmChannels.map((d2) => d2.id)).toEqual(['dm-c']); // not removed
-    // And no tombstone was installed: the authoritative reopened snapshot commits.
     const dFetch = deferred<DMChannel[]>();
     vi.mocked(client.apiGetDMs).mockReturnValue(dFetch.promise);
-    const pFetch = useDMStore.getState().fetchDMs();
-    dFetch.resolve([{ id: 'dm-c' } as DMChannel]);
-    await pFetch;
+    const pClose = useDMStore.getState().closeDM('dm-c'); // close in flight
+    useDMStore.getState().noteChannelAlive('dm-c'); // MESSAGE_CREATE: proof of life mid-flight
+    dClose.resolve();
+    await pClose; // triggers the deciding fetch
+    expect(useDMStore.getState().dmChannels.map((d2) => d2.id)).toEqual(['dm-c']); // not guessed away
+    dFetch.resolve([{ id: 'dm-c' } as DMChannel]); // server: the reopen won
+    await Promise.resolve();
+    await Promise.resolve();
     expect(useDMStore.getState().dmChannels.map((d2) => d2.id)).toEqual(['dm-c']);
+    useDMStore.getState().reset();
+  });
+
+  it('a close racing a reopen asks the server: the close won', async () => {
+    // Odin round 26 blocker 4: the message committed first and the close
+    // committed after -- the DM is genuinely closed, and suppressing the close
+    // because "proof of life arrived" would leave a ghost conversation open.
+    useDMStore.setState({ dmChannels: [{ id: 'dm-d' } as DMChannel] });
+    const dClose = deferred<void>();
+    vi.mocked(client.apiCloseDM).mockReturnValue(dClose.promise as never);
+    const dFetch = deferred<DMChannel[]>();
+    vi.mocked(client.apiGetDMs).mockReturnValue(dFetch.promise);
+    const pClose = useDMStore.getState().closeDM('dm-d');
+    useDMStore.getState().noteChannelAlive('dm-d'); // message event, but the close committed later
+    dClose.resolve();
+    await pClose;
+    dFetch.resolve([]); // server: the close won -- the list omits it
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(useDMStore.getState().dmChannels).toEqual([]); // the row dropped out honestly
     useDMStore.getState().reset();
   });
 

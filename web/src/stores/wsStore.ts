@@ -56,13 +56,17 @@ export const useWSStore = create<WSState>((set) => ({
           useUnreadStore.getState().markUnread(message.channelId);
         }
 
-        // A message in a channel is proof the channel is ALIVE: clear any DM
-        // close-tombstone BEFORE the refetch below (or the authoritative
-        // response revealing a reopened DM gets filtered as a stale read) and
-        // any channel deletion tombstone (the recovery path for a delete that
-        // was broadcast but failed server-side).
+        // A message in a channel is proof a DM is ALIVE: clear any DM
+        // close-tombstone BEFORE the refetch below, or the authoritative
+        // response revealing a reopened DM gets filtered as a stale read.
+        // Deliberately NOT asserted on the channel lineage: a message inserted
+        // concurrently with a channel delete can be broadcast AFTER the delete
+        // broadcast (different request goroutines), so it is not proof the
+        // delete failed -- clearing that tombstone would let a stale snapshot
+        // resurrect the deleted channel. Recovery for a genuinely failed
+        // delete-after-broadcast belongs to the server-side ordering fix
+        // (broadcast after commit).
         useDMStore.getState().noteChannelAlive(message.channelId);
-        useServerStore.getState().noteChannelAlive(message.channelId);
 
         // If this message is for a channel not in our lists, refetch DMs
         // (handles reopened DMs where the user had closed the conversation)

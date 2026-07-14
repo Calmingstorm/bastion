@@ -34,7 +34,6 @@ interface ServerState {
   createServer: (name: string) => Promise<void>;
   createChannel: (serverId: string, name: string, topic?: string, categoryId?: string) => Promise<void>;
   addServer: (server: Server) => void;
-  noteChannelAlive: (channelId: string) => void;
   updateServer: (server: Server) => void;
   addChannel: (channel: Channel) => void;
   updateChannel: (channel: Channel) => void;
@@ -370,18 +369,6 @@ export const useServerStore = create<ServerState>((set, get) => ({
     const apply = upsertServer(server);
     serverListLineage.claim(apply, { asserts: [server.id] });
     set((state) => ({ servers: apply(state.servers) }));
-  },
-
-  // An event proved this channel is alive -- a message arrived in it. Clears any
-  // deletion tombstone: this is the recovery path for a delete that was
-  // broadcast but then FAILED server-side (presence-gated updates deliberately
-  // cannot assert an absent target, so without this the channel would be
-  // filtered forever -- same-scope snapshots always contain it, so omission
-  // never testifies). Safe against the stale-message hazard: the hub serializes
-  // a connection's events, so a message broadcast before a genuine delete is
-  // delivered before the tombstone is laid.
-  noteChannelAlive: (channelId: string) => {
-    channelLineage.assert([channelId]);
   },
 
   updateServer: (server: Server) => {

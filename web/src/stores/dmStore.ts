@@ -43,7 +43,7 @@ const upsertDM = (dm: DMChannel) => (list: DMChannel[]) => {
   return [merged, ...list.filter((d) => d.id !== dm.id)];
 };
 
-export const useDMStore = create<DMState>((set) => ({
+export const useDMStore = create<DMState>((set, get) => ({
   dmChannels: [],
   selectedDMId: null,
   isLoading: false,
@@ -109,12 +109,16 @@ export const useDMStore = create<DMState>((set) => ({
     // Deliberately a silent return (not a SessionSupersededError like the server
     // mutations): fire-and-forget callers have no success UI to mislead.
     if (!isSessionGenerationCurrent(generation)) return;
-    // Proof of life arrived during the flight: the server reopened this DM after
-    // processing the close. The close is superseded -- installing its tombstone
-    // now would filter the authoritative reopened snapshot. Skip entirely; if
-    // the reopen lost the server-side race instead, the next fetch omits the id
-    // and the row simply drops out (no tombstone needed for an honest close).
-    if ((aliveEpochs.get(channelId) ?? 0) !== epochAtEntry) return;
+    // Proof of life arrived during the flight. WHICH mutation won -- the close
+    // or the reopen -- is the server's knowledge; client arrival order cannot
+    // decide it. So neither guess: skip the local removal AND the tombstone,
+    // and ask -- the authoritative list either contains the id (reopen won) or
+    // omits it (close won, and the row simply drops out; an honest close needs
+    // no tombstone).
+    if ((aliveEpochs.get(channelId) ?? 0) !== epochAtEntry) {
+      void get().fetchDMs();
+      return;
+    }
     const apply = (list: DMChannel[]) => list.filter((d) => d.id !== channelId);
     // Journaled + tombstoned: an older snapshot -- even one whose fetch starts
     // after this close -- cannot resurrect the closed conversation.

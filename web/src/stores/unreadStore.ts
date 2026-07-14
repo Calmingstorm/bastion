@@ -16,42 +16,35 @@ interface UnreadState {
   reset: () => void;
 }
 
-// Reconciling lineage for read states (see lineage.ts), keyed by channelId: the
-// same fetch/write composition rules as the server and DM lists. A held
-// fetchReadStates snapshot must not erase an ack the user just made or a mention
-// badge a realtime event just raised -- overlapping writes are journaled and
-// re-applied onto the snapshot at commit.
+// Mention counts are SERVER-OWNED. The client never infers a committed count
+// from event arrival order -- server commit order and client arrival order are
+// different clocks, and every arithmetic bridge between them (additive bumps,
+// convergent max, entry-relative deltas) had a losing interleaving. Instead:
 //
-// Mention counting is CONVERGENT, not additive. A mention's journaled apply is
-// max(snapshot count, local count at claim time): a snapshot that already
-// includes the mention carries the same count the client computed, so max
-// deduplicates it; a snapshot that predates it carries one less, so max
-// preserves the badge. This works because a single socket delivers mention
-// events in the server's counting order. Residual (documented, not fixable
-// client-side without per-message ids in read-state payloads): a mention
-// counted by a snapshot whose own event is delivered only after that snapshot
-// commits can transiently over-count until the next ack or fetch.
+//   - A local write (mention event, ack response) applies an OPTIMISTIC direct
+//     update for instant UI, then TRIGGERS an authoritative fetch. The trigger
+//     claims the lineage, so every older in-flight snapshot is superseded, and
+//     the triggered snapshot is server truth minted after the write reached the
+//     server (a mention is committed before it is broadcast; an ack is
+//     committed before its response returns).
+//   - Nothing journals claims on this lineage: with every write followed by an
+//     owned fetch, supersession alone orders the world. The committed count is
+//     always a server-produced number, never a client-computed one.
 //
-// Acks are RELATIVE to their entry point, not absolute zero: mentions that
-// arrive while an ack is in flight were counted by the server AFTER it
-// processed the ack, so a late ack response commits "mentions since entry" and
-// clears the unread flag only if no new activity arrived during the flight.
+// The unread FLAG (unreadChannels) stays local -- fetches never write it; an
+// ack clears it only when no newer activity arrived during its flight.
 const readStateLineage = createLineage<ReadState>((rs) => rs.channelId);
 
 // Per-channel activity epochs, bumped by every locally-observed unread signal.
 // An ack captures the epoch at entry; a response settling after newer activity
-// must not erase that activity's badge.
+// must not clear the flag that activity raised.
 const activityEpochs = new Map<string, number>();
 const bumpActivity = (channelId: string) =>
   activityEpochs.set(channelId, (activityEpochs.get(channelId) ?? 0) + 1);
-// Mention EVENTS only (a subset of activity): the residual count a late ack
-// commits is the number of mention events observed during its flight -- a
-// count DELTA would be inflated by a mid-flight authoritative fetch carrying
-// cross-device mentions the ack actually covered (false badge right after
-// reading). Cross-device mentions newer than the ack point surface at the next
-// fetch instead; the ack endpoint returning the post-ack read state would make
-// this exact (server-side follow-up).
-const mentionEpochs = new Map<string, number>();
+
+// Bumped by reset(): an ack held across a store reset must not repopulate the
+// cleared store or fire its follow-up fetch (auth generation aside).
+let resetEpoch = 0;
 
 const toMap = (list: ReadState[]) => {
   const map: Record<string, ReadState> = {};
@@ -60,10 +53,6 @@ const toMap = (list: ReadState[]) => {
   });
   return map;
 };
-const upsertReadState = (rs: ReadState) => (list: ReadState[]) => [
-  rs,
-  ...list.filter((r) => r.channelId !== rs.channelId),
-];
 
 export const useUnreadStore = create<UnreadState>((set, get) => ({
   readStates: {},
@@ -94,42 +83,51 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
 
   ackChannel: async (channelId: string, messageId: string) => {
     const generation = captureSessionGeneration();
+    const epochAtReset = resetEpoch;
     const epochAtEntry = activityEpochs.get(channelId) ?? 0;
-    const mentionsAtEntry = mentionEpochs.get(channelId) ?? 0;
+    const countAtEntry = get().readStates[channelId]?.mentionCount || 0;
     try {
       await apiAckChannel(channelId, messageId);
       if (!isSessionGenerationCurrent(generation)) return;
-      // Mention EVENTS that arrived after this ack was initiated were counted by
-      // the server AFTER it processed the ack -- the committed state is "mention
-      // events since entry", never an unconditional zero that would erase them.
-      const mentionsSince = (mentionEpochs.get(channelId) ?? 0) - mentionsAtEntry;
-      const rs: ReadState = {
-        userId: '',
-        channelId,
-        lastMessageId: messageId,
-        lastReadAt: new Date().toISOString(),
-        mentionCount: mentionsSince,
-      };
-      const apply = upsertReadState(rs);
-      readStateLineage.claim(apply); // journaled: an older snapshot cannot revert the ack
+      if (epochAtReset !== resetEpoch) return; // reset() intervened: nothing to write
       set((state) => {
         const newUnread = new Set(state.unreadChannels);
         // Clear the unread flag only if nothing new arrived during the flight.
         if ((activityEpochs.get(channelId) ?? 0) === epochAtEntry) {
           newUnread.delete(channelId);
         }
+        // OPTIMISTIC zero, gated on nothing having moved since entry (no new
+        // activity, no authoritative rebase): if anything moved, leave the count
+        // alone -- the follow-up fetch settles it with server truth either way.
+        const untouched =
+          (activityEpochs.get(channelId) ?? 0) === epochAtEntry &&
+          (state.readStates[channelId]?.mentionCount || 0) === countAtEntry;
+        if (!untouched) return { unreadChannels: newUnread };
         return {
           unreadChannels: newUnread,
-          readStates: toMap(apply(Object.values(state.readStates))),
+          readStates: {
+            ...state.readStates,
+            [channelId]: {
+              userId: '',
+              channelId,
+              lastMessageId: messageId,
+              lastReadAt: new Date().toISOString(),
+              mentionCount: 0,
+            },
+          },
         };
       });
+      // AUTHORITATIVE follow-up: the server committed this ack before replying,
+      // so a fetch started now returns the post-ack truth (including mentions
+      // the ack did NOT cover) and supersedes every older in-flight snapshot.
+      void get().fetchReadStates();
     } catch {
       // Silent fail
     }
   },
 
   // unreadChannels is a purely local set that fetchReadStates never writes, so
-  // markUnread needs no lineage claim -- there is no snapshot to race.
+  // markUnread needs no follow-up fetch -- there is no server count to sync.
   markUnread: (channelId: string) => {
     bumpActivity(channelId);
     set((state) => {
@@ -141,26 +139,27 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
 
   incrementMention: (channelId: string) => {
     bumpActivity(channelId);
-    mentionEpochs.set(channelId, (mentionEpochs.get(channelId) ?? 0) + 1);
-    // CONVERGENT apply (see module comment): the claim captures the count the
-    // client computed for this mention; replay takes max(snapshot, captured), so
-    // a snapshot that already includes the mention is not double-counted and one
-    // that predates it still gains the badge.
-    const countAtClaim = (get().readStates[channelId]?.mentionCount || 0) + 1;
-    const apply = (list: ReadState[]) => {
-      const existing = list.find((r) => r.channelId === channelId);
-      const next: ReadState = {
-        ...existing,
-        userId: existing?.userId || '',
-        channelId,
-        lastMessageId: existing?.lastMessageId,
-        lastReadAt: existing?.lastReadAt || new Date().toISOString(),
-        mentionCount: Math.max(existing?.mentionCount || 0, countAtClaim),
+    // OPTIMISTIC bump for instant UI only -- the committed count comes from the
+    // follow-up fetch (the server counted this mention before broadcasting it,
+    // so the triggered snapshot includes it; it also corrects the bump if an
+    // authoritative snapshot had ALREADY counted this mention).
+    set((state) => {
+      const existing = state.readStates[channelId];
+      return {
+        readStates: {
+          ...state.readStates,
+          [channelId]: {
+            ...existing,
+            userId: existing?.userId || '',
+            channelId,
+            lastMessageId: existing?.lastMessageId,
+            lastReadAt: existing?.lastReadAt || new Date().toISOString(),
+            mentionCount: (existing?.mentionCount || 0) + 1,
+          },
+        },
       };
-      return [next, ...list.filter((r) => r.channelId !== channelId)];
-    };
-    readStateLineage.claim(apply); // journaled: a held snapshot cannot eat the badge
-    set((state) => ({ readStates: toMap(apply(Object.values(state.readStates))) }));
+    });
+    void get().fetchReadStates();
   },
 
   isUnread: (channelId: string) => {
@@ -174,7 +173,7 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
   reset: () => {
     readStateLineage.reset(); // held fetches must not repopulate; no cross-account leakage
     activityEpochs.clear();
-    mentionEpochs.clear();
+    resetEpoch += 1;
     set({ readStates: {}, unreadChannels: new Set() });
   },
 }));
