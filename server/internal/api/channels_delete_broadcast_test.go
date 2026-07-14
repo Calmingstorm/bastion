@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -80,8 +81,8 @@ func TestChannelDeleteFanoutOncePerMember(t *testing.T) {
 // deduplicated AUTHORIZED recipient set, not raw membership. A member whose
 // ViewChannel was revoked must receive no CHANNEL_CREATE/UPDATE/DELETE --
 // create and update payloads carry channel metadata that would otherwise leak,
-// and a create would install the hidden channel into client state. The delete's
-// recipient set is captured before the row is removed.
+// and a create would install the hidden channel into client state. Every
+// event's recipient set is evaluated at delivery time.
 func TestChannelEventsOnlyToAuthorizedMembers(t *testing.T) {
 	h := testutil.New(t)
 	owner := h.Register("owner")
@@ -213,9 +214,19 @@ func TestServerCreateSubscribesConnectedOwner(t *testing.T) {
 	ws.Drain(400 * time.Millisecond)
 
 	serverID := h.CreateServer(owner, "Fresh")
-	chID := h.CreateChannel(owner, serverID, "general")
-	ws.Drain(400 * time.Millisecond) // discard the create announcements
-	if code := postTextMessage(h, owner, chID, "hello"); code != http.StatusCreated {
+	// Use the DEFAULT channel created inside the server-create transaction --
+	// creating another channel through the channel-create API would subscribe
+	// the owner via THAT path and leave this regression green with the
+	// server-create fix removed.
+	var channels []struct {
+		ID string `json:"id"`
+	}
+	if code := h.Request(http.MethodGet, "/api/v1/servers/"+serverID+"/channels",
+		owner.AccessToken, nil, &channels); code != http.StatusOK || len(channels) == 0 {
+		t.Fatalf("list channels: code %d, %d channels", code, len(channels))
+	}
+	ws.Drain(400 * time.Millisecond) // discard any create announcements
+	if code := postTextMessage(h, owner, channels[0].ID, "hello"); code != http.StatusCreated {
 		t.Fatalf("post: expected 201, got %d", code)
 	}
 	if n := ws.CountEvents("MESSAGE_CREATE", 800*time.Millisecond); n != 1 {
@@ -400,8 +411,170 @@ func TestAckWatermarkNeverRegresses(t *testing.T) {
 
 	ack(newID)
 	high := readSeq()
+
+	// A mention lands after the ack; then a STALE ack (the older message)
+	// arrives. The gated upsert must no-op entirely: the watermark holds AND the
+	// newer mention state survives (an ungated update would zero it).
+	if _, err := h.Pool.Exec(context.Background(),
+		`UPDATE read_states SET mention_count = 1 WHERE channel_id = $1`, channelID); err != nil {
+		t.Fatalf("seed mention: %v", err)
+	}
 	ack(oldID) // the stale ack lands second
 	if got := readSeq(); got != high {
 		t.Fatalf("the watermark must not regress: had %d, got %d", high, got)
+	}
+	var mentions int
+	if err := h.Pool.QueryRow(context.Background(),
+		`SELECT mention_count FROM read_states WHERE channel_id = $1`, channelID).Scan(&mentions); err != nil {
+		t.Fatalf("read mentions: %v", err)
+	}
+	if mentions != 1 {
+		t.Fatalf("a stale ack must not erase newer mention state, got count %d", mentions)
+	}
+}
+
+// TestCreateRaceRevocationIsCorrected: a ViewChannel revocation landing between
+// the create's subscription loop and its post-check (via the test seam) must
+// leave the member unsubscribed -- messages in the new channel do not reach a
+// socket whose authorization was revoked mid-create.
+func TestCreateRaceRevocationIsCorrected(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	member := h.Register("member")
+	serverID := h.CreateServer(owner, "S")
+	joinServer(h, owner, member, serverID)
+
+	ws := h.DialWS(member)
+	ws.Drain(400 * time.Millisecond)
+
+	def := defaultRoleID(h, owner, serverID)
+	api.AfterChannelCreateSubscribeForTest = func() {
+		if code := patchRolePerms(h, owner, serverID, def, permissions.SendMessages); code != http.StatusOK {
+			t.Errorf("revoke ViewChannel: got %d", code)
+		}
+	}
+	t.Cleanup(func() { api.AfterChannelCreateSubscribeForTest = nil })
+
+	chID := h.CreateChannel(owner, serverID, "contested")
+	// The revoked member must receive neither the announcement nor messages.
+	if n := ws.CountEvents("CHANNEL_CREATE", 500*time.Millisecond); n != 0 {
+		t.Fatalf("revoked member must not be announced to, got %d", n)
+	}
+	if code := postTextMessage(h, owner, chID, "secret"); code != http.StatusCreated {
+		t.Fatalf("post: expected 201, got %d", code)
+	}
+	if n := ws.CountEvents("MESSAGE_CREATE", 600*time.Millisecond); n != 0 {
+		t.Fatalf("revoked member must not receive messages in the contested channel, got %d", n)
+	}
+}
+
+// TestInsertLockSerializesPerChannel: the message-insert advisory lock is the
+// seq-order = commit-order guarantee. Proven by BLOCKING (the pin-cap lesson:
+// hold the lock externally and assert the insert cannot proceed until release),
+// not by timing.
+func TestInsertLockSerializesPerChannel(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	serverID := h.CreateServer(owner, "S")
+	channelID := h.CreateChannel(owner, serverID, "general")
+
+	// Hold the channel's insert lock in an external transaction.
+	ctx := context.Background()
+	tx, err := h.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext('msg-insert:' || $1))`, channelID); err != nil {
+		t.Fatalf("hold lock: %v", err)
+	}
+
+	done := make(chan int, 1)
+	go func() { done <- postTextMessage(h, owner, channelID, "blocked") }()
+
+	select {
+	case code := <-done:
+		t.Fatalf("insert must block while the channel lock is held, returned %d", code)
+	case <-time.After(700 * time.Millisecond):
+		// Blocked, as required.
+	}
+	_ = tx.Rollback(ctx) // release
+	select {
+	case code := <-done:
+		if code != http.StatusCreated {
+			t.Fatalf("insert after release: expected 201, got %d", code)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("insert did not complete after the lock was released")
+	}
+}
+
+// TestMentionIncrementRespectsWatermark: processMentions runs after the insert
+// commits and after the broadcast, so an ack of that very message can land
+// FIRST (open channel auto-ack, a second device). The increment is gated on the
+// member's read watermark -- ungated, it would wedge a phantom badge forever,
+// since re-acking the same message is a deliberate no-op. The replay below runs
+// the exact production query with the message's own seq.
+func TestMentionIncrementRespectsWatermark(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	member := h.Register("member")
+	serverID := h.CreateServer(owner, "S")
+	channelID := h.CreateChannel(owner, serverID, "general")
+	joinServer(h, owner, member, serverID)
+
+	// The ack lands INSIDE processMentions, after the message committed and
+	// broadcast but before the increment runs -- via the seam, so the exact
+	// production statement executes against a watermark that already covers it.
+	api.BeforeMentionIncrementForTest = func() {
+		var msgID string
+		if err := h.Pool.QueryRow(context.Background(),
+			`SELECT id FROM messages WHERE channel_id = $1 ORDER BY seq DESC LIMIT 1`,
+			channelID).Scan(&msgID); err != nil {
+			t.Errorf("read message: %v", err)
+			return
+		}
+		if code := h.Request(http.MethodPost, "/api/v1/channels/"+channelID+"/ack",
+			member.AccessToken, map[string]string{"messageId": msgID}, nil); code != http.StatusOK {
+			t.Errorf("ack: got %d", code)
+		}
+	}
+	t.Cleanup(func() { api.BeforeMentionIncrementForTest = nil })
+
+	if code := postTextMessage(h, owner, channelID, "@member ping"); code != http.StatusCreated {
+		t.Fatalf("mention: expected 201, got %d", code)
+	}
+	var count int
+	if err := h.Pool.QueryRow(context.Background(),
+		`SELECT mention_count FROM read_states WHERE user_id = $1 AND channel_id = $2`,
+		member.ID, channelID).Scan(&count); err != nil {
+		t.Fatalf("read count: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("a mention already inside the watermark must not re-badge, got %d", count)
+	}
+}
+
+// TestServerDeleteBroadcastsOnlyAfterCommit: SERVER_DELETE follows the same
+// contract as channel deletion -- broadcast only after the row is gone (a
+// failed delete desyncs nothing), exactly once per member.
+func TestServerDeleteBroadcastsOnlyAfterCommit(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	member := h.Register("member")
+	serverID := h.CreateServer(owner, "S")
+	h.CreateChannel(owner, serverID, "extra") // several channels: fanout must still be once
+	joinServer(h, owner, member, serverID)
+
+	ws := h.DialWS(member)
+	ws.Drain(400 * time.Millisecond)
+
+	if code := h.Request(http.MethodDelete, "/api/v1/servers/"+serverID,
+		owner.AccessToken, nil, nil); code != http.StatusOK {
+		t.Fatalf("delete server: expected 200, got %d", code)
+	}
+	if n := ws.CountEvents("SERVER_DELETE", 800*time.Millisecond); n != 1 {
+		t.Fatalf("a member must receive SERVER_DELETE exactly once, got %d", n)
 	}
 }

@@ -168,6 +168,43 @@ func requireChannelPermission(db *pgxpool.Pool, w http.ResponseWriter, r *http.R
 	return true
 }
 
+// BeforeMentionIncrementForTest runs immediately before each mention-count
+// increment (nil in production). Tests use it to acknowledge the very message
+// being processed, proving the increment is gated on the read watermark -- the
+// ack-races-processMentions window is otherwise not deterministically
+// reachable.
+var BeforeMentionIncrementForTest func()
+
+// insertMessageTx runs fn inside a transaction holding the channel's
+// message-insert advisory lock. The lock serializes message inserts per
+// channel, so a message's database-assigned seq order matches its
+// commit/visibility order WITHIN the channel -- without it, a transaction
+// could allocate a lower seq, stall uncommitted while a later message commits
+// and is acknowledged, and then surface as "already read". Every path that
+// persists a message MUST insert through this (or take the same lock in its
+// own transaction). The key domain is distinct from other per-channel advisory
+// locks (pins).
+func insertMessageTx(ctx context.Context, db *pgxpool.Pool, channelID uuid.UUID, fn func(tx pgx.Tx) error) error {
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockChannelForInsert(ctx, tx, channelID); err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func lockChannelForInsert(ctx context.Context, tx pgx.Tx, channelID uuid.UUID) error {
+	_, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext('msg-insert:' || $1))`, channelID.String())
+	return err
+}
+
 // subscribeViewable subscribes the user's WebSocket clients to the given
 // channels, but only those the user may currently view — so joining (even with
 // an already-connected socket) never subscribes to a hidden channel.
@@ -499,19 +536,21 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 
 	var msg models.Message
 	var author models.Author
-	err = h.db.QueryRow(r.Context(),
-		`WITH new_msg AS (
-			INSERT INTO messages (channel_id, author_id, content, reply_to_id, embeds, created_at)
-			VALUES ($1, $2, $3, $4, $5, COALESCE($6, NOW()))
-			RETURNING id, channel_id, author_id, content, edited_at, reply_to_id, embeds, created_at, seq
-		)
-		SELECT m.id, m.channel_id, m.content, m.edited_at, m.reply_to_id, m.created_at, m.seq,
-			   u.id, u.username, u.display_name, u.avatar_url, u.is_bot, m.embeds
-		FROM new_msg m
-		INNER JOIN users u ON u.id = m.author_id`,
-		channelID, userID, req.Content, req.ReplyToID, embedsJSON, req.CreatedAt,
-	).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.ReplyToID, &msg.CreatedAt, &msg.Seq,
-		&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL, &author.IsBot, &embedsJSON)
+	err = insertMessageTx(r.Context(), h.db, channelID, func(tx pgx.Tx) error {
+		return tx.QueryRow(r.Context(),
+			`WITH new_msg AS (
+				INSERT INTO messages (channel_id, author_id, content, reply_to_id, embeds, created_at)
+				VALUES ($1, $2, $3, $4, $5, COALESCE($6, NOW()))
+				RETURNING id, channel_id, author_id, content, edited_at, reply_to_id, embeds, created_at, seq
+			)
+			SELECT m.id, m.channel_id, m.content, m.edited_at, m.reply_to_id, m.created_at, m.seq,
+				   u.id, u.username, u.display_name, u.avatar_url, u.is_bot, m.embeds
+			FROM new_msg m
+			INNER JOIN users u ON u.id = m.author_id`,
+			channelID, userID, req.Content, req.ReplyToID, embedsJSON, req.CreatedAt,
+		).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.ReplyToID, &msg.CreatedAt, &msg.Seq,
+			&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL, &author.IsBot, &embedsJSON)
+	})
 	if err != nil {
 		log.Error().Err(err).Msg("failed to insert message")
 		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
@@ -813,12 +852,20 @@ func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, a
 			continue
 		}
 
-		// Increment mention count in read_states
+		// Increment mention count in read_states -- gated on the member's read
+		// watermark: processMentions runs after the insert commits and after the
+		// broadcast, so an ack of this very message can land first (channel open,
+		// second device). Incrementing past that ack would wedge a phantom badge
+		// forever, because re-acking the same message is now a deliberate no-op.
+		if BeforeMentionIncrementForTest != nil {
+			BeforeMentionIncrementForTest()
+		}
 		_, err := h.db.Exec(r.Context(),
 			`INSERT INTO read_states (user_id, channel_id, mention_count)
 			 VALUES ($1, $2, 1)
-			 ON CONFLICT (user_id, channel_id) DO UPDATE SET mention_count = read_states.mention_count + 1`,
-			uid, channelID,
+			 ON CONFLICT (user_id, channel_id) DO UPDATE SET mention_count = read_states.mention_count + 1
+			 WHERE COALESCE(read_states.last_read_seq, -1) < $3`,
+			uid, channelID, msgSeq,
 		)
 		if err != nil {
 			log.Error().Err(err).Msg("failed to increment mention count")
@@ -918,6 +965,14 @@ func (h *MessageHandler) BulkImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+
+	// Seq order must match commit order (see insertMessageTx): the whole import
+	// holds the channel's insert lock, so its block of seqs commits atomically.
+	if err := lockChannelForInsert(r.Context(), tx, channelID); err != nil {
+		log.Error().Err(err).Msg("failed to lock channel for bulk import")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
 
 	// Fetch author info once
 	var author models.Author

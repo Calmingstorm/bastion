@@ -1411,6 +1411,85 @@ describe('session-boundary guards', () => {
     useUnreadStore.getState().reset();
   });
 
+  it('the optimistic ack preserves the known watermark: covered events stay covered mid-flight', async () => {
+    // Odin round 31 blocker 4: the optimistic write must not DROP lastReadSeq --
+    // while the follow-up fetch is pending (or forever, if it fails), a delayed
+    // event already covered by the previous watermark would re-flag the channel.
+    useUnreadStore.setState({
+      readStates: {
+        c9: { userId: '', channelId: 'c9', lastMessageId: 'm5', lastReadAt: '2026-07-14T12:00:00Z', lastReadSeq: 90, mentionCount: 0 },
+      },
+      unreadChannels: new Set(['c9']),
+    });
+    vi.mocked(client.apiAckChannel).mockResolvedValue(undefined as never);
+    vi.mocked(client.apiGetReadStates).mockReturnValue(new Promise(() => {}) as never); // follow-up never settles
+    await useUnreadStore.getState().ackChannel('c9', 'm9');
+    expect(useUnreadStore.getState().readStates['c9']?.lastReadSeq).toBe(90); // watermark survived
+    useUnreadStore.getState().markUnread('c9', { seq: 85, at: '2026-07-14T12:00:20Z' }); // delayed covered event
+    expect(useUnreadStore.getState().isUnread('c9')).toBe(false); // still covered
+    useUnreadStore.getState().reset();
+  });
+
+  it('a mention never fabricates a client-clock read time', async () => {
+    // The fallback watermark compares lastReadAt against SERVER-minted message
+    // times; a client-clock fabrication ahead of the server would swallow
+    // genuinely new messages as already-read, permanently and silently.
+    useUnreadStore.setState({ readStates: {}, unreadChannels: new Set() });
+    vi.mocked(client.apiGetReadStates).mockResolvedValue([] as never);
+    useUnreadStore.getState().incrementMention('c11'); // never-acked channel
+    expect(useUnreadStore.getState().readStates['c11']?.lastReadAt).toBe(''); // no watermark, not "now"
+    // A message with a server time in the past must still raise the flag.
+    useUnreadStore.getState().markUnread('c11', { at: '2020-01-01T00:00:00Z' });
+    expect(useUnreadStore.getState().isUnread('c11')).toBe(true);
+    useUnreadStore.getState().reset();
+  });
+
+  it('re-acking the already-recorded message with nothing new is a local no-op', async () => {
+    // Scroll handlers re-ack the newest message on every wheel tick: each call
+    // must not fire another POST + follow-up fetch when the record is current.
+    useUnreadStore.setState({
+      readStates: {
+        c12: { userId: '', channelId: 'c12', lastMessageId: 'm9', lastReadAt: '2026-07-14T12:00:00Z', lastReadSeq: 9, mentionCount: 0 },
+      },
+      unreadChannels: new Set(),
+    });
+    vi.mocked(client.apiAckChannel).mockClear();
+    vi.mocked(client.apiGetReadStates).mockClear();
+    await useUnreadStore.getState().ackChannel('c12', 'm9'); // identical, nothing new
+    expect(vi.mocked(client.apiAckChannel)).not.toHaveBeenCalled();
+    expect(vi.mocked(client.apiGetReadStates)).not.toHaveBeenCalled();
+    // But with an unread flag up, the same ack DOES go through.
+    useUnreadStore.getState().markUnread('c12', { seq: 10 });
+    vi.mocked(client.apiAckChannel).mockResolvedValue(undefined as never);
+    vi.mocked(client.apiGetReadStates).mockResolvedValue([] as never);
+    await useUnreadStore.getState().ackChannel('c12', 'm10');
+    expect(vi.mocked(client.apiAckChannel)).toHaveBeenCalledTimes(1);
+    useUnreadStore.getState().reset();
+  });
+
+  it('a covered delayed event does not suppress an in-flight ack flag clear', async () => {
+    // The activity epoch answers "did anything UNREAD arrive during the ack's
+    // flight" -- a delayed event already covered by the watermark must be a
+    // complete no-op, or it strands a flag that has no watermark to retire it.
+    useUnreadStore.setState({
+      readStates: {
+        c10: { userId: '', channelId: 'c10', lastMessageId: 'm5', lastReadAt: '2026-07-14T12:00:00Z', lastReadSeq: 90, mentionCount: 0 },
+      },
+      unreadChannels: new Set(),
+    });
+    useUnreadStore.getState().markUnread('c10'); // raised with NO watermark (legacy path)
+    expect(useUnreadStore.getState().isUnread('c10')).toBe(true);
+    const dAck = deferred<void>();
+    vi.mocked(client.apiAckChannel).mockReturnValue(dAck.promise as never);
+    vi.mocked(client.apiGetReadStates).mockResolvedValue([] as never);
+    const pAck = useUnreadStore.getState().ackChannel('c10', 'm9');
+    useUnreadStore.getState().markUnread('c10', { seq: 85 }); // covered: NOT activity
+    dAck.resolve();
+    await pAck;
+    expect(useUnreadStore.getState().isUnread('c10')).toBe(false); // the ack's clear was not suppressed
+    useUnreadStore.getState().reset();
+  });
+
   it('a committed lastReadSeq retires a flag raised on the seq axis', async () => {
     useUnreadStore.setState({
       readStates: {

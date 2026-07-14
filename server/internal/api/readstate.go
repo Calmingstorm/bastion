@@ -69,13 +69,20 @@ func (h *ReadStateHandler) Ack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The ENTIRE update is gated on the watermark advancing: a stale
+	// acknowledgment (an older message acked after a newer one -- racing
+	// devices, a delayed retry) must not zero the mention count or move
+	// last_message_id/last_read_at backwards either. Strict '<' also makes a
+	// duplicate ack of the same message a no-op, so it cannot erase mentions
+	// that arrived after the first copy.
 	_, err = h.db.Exec(r.Context(),
 		`INSERT INTO read_states (user_id, channel_id, last_message_id, last_read_at, last_read_seq, mention_count)
 		 VALUES ($1, $2, $3, NOW(), $4, 0)
 		 ON CONFLICT (user_id, channel_id)
 		 DO UPDATE SET last_message_id = $3, last_read_at = NOW(),
-		   last_read_seq = GREATEST(COALESCE(read_states.last_read_seq, 0), $4),
-		   mention_count = 0`,
+		   last_read_seq = $4,
+		   mention_count = 0
+		 WHERE COALESCE(read_states.last_read_seq, -1) < $4`,
 		userID, channelID, messageID, msgSeq,
 	)
 	if err != nil {

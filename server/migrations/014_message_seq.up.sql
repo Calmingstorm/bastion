@@ -8,8 +8,8 @@ CREATE SEQUENCE IF NOT EXISTS messages_seq;
 
 ALTER TABLE messages ADD COLUMN seq BIGINT;
 
--- Backfill existing history in channel-presentation order (created_at, id --
--- the pagination keyset), so coverage comparisons against pre-migration acks
+-- Backfill existing history in channel-presentation order (created_at, then id
+-- as a stable tiebreak), so coverage comparisons against pre-migration acks
 -- match what users had actually scrolled past.
 WITH ordered AS (
     SELECT id, row_number() OVER (ORDER BY created_at, id) AS rn

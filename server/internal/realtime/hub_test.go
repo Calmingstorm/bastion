@@ -351,3 +351,18 @@ func TestRemoveChannelDropsSubscriberSet(t *testing.T) {
 		t.Fatal("RemoveChannel must drop the channel's subscriber set")
 	}
 }
+
+// TestRemoveChannelBumpsReconcileGen: a concurrently CONNECTING client read its
+// viewable snapshot while the channel still existed; without a generation bump
+// it would install that stale snapshot and resurrect the dead subscription set.
+func TestRemoveChannelBumpsReconcileGen(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	before := hub.ReconcileGen()
+	hub.RemoveChannel(uuid.New())
+	if hub.ReconcileGen() == before {
+		t.Fatal("RemoveChannel must bump the reconcile generation")
+	}
+}

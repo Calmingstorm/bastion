@@ -87,10 +87,6 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
           token = readStateLineage.startFetch(); // retry with a fresh snapshot
           continue;
         }
-        // Reconcile the unread FLAG with the committed truth: a server-minted
-        // lastReadAt at or beyond the message that raised a flag means the user
-        // has read it (possibly from another device, possibly an ack this flag's
-        // delayed notification predated).
         // Reconcile the unread FLAG with the committed truth: a committed read
         // watermark at or beyond what raised the flag means the user has read
         // it (possibly from another device, possibly an ack this flag's delayed
@@ -124,6 +120,18 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
   },
 
   ackChannel: async (channelId: string, messageId: string) => {
+    // DEDUPE: scroll handlers re-ack the newest message on every scroll event;
+    // re-acking the exact message already recorded -- with nothing new having
+    // arrived -- is a no-op server-side (the watermark gate) and must not fire
+    // another POST + follow-up fetch per wheel tick.
+    const known = get().readStates[channelId];
+    if (
+      known?.lastMessageId === messageId &&
+      !get().unreadChannels.has(channelId) &&
+      (known?.mentionCount || 0) === 0
+    ) {
+      return;
+    }
     const generation = captureSessionGeneration();
     const epochAtReset = resetEpoch;
     const epochAtEntry = activityEpochs.get(channelId) ?? 0;
@@ -159,6 +167,11 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
               // createdAt against this field, and mixing clocks would corrupt
               // that comparison. The follow-up fetch supplies the fresh value.
               lastReadAt: state.readStates[channelId]?.lastReadAt ?? '',
+              // PRESERVE the known read watermark: dropping it would let a
+              // delayed event already covered by it re-flag the channel while
+              // the follow-up fetch is pending -- or forever, if that fetch
+              // fails. The follow-up advances it.
+              lastReadSeq: state.readStates[channelId]?.lastReadSeq,
               mentionCount: 0,
             },
           },
@@ -178,12 +191,17 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
   // not unread (its notification was delayed past the ack that read it), and
   // the raise is recorded so a LATER committed watermark can retire the flag.
   markUnread: (channelId: string, mark?: { seq?: number; at?: string }) => {
-    bumpActivity(channelId);
     const rs = get().readStates[channelId];
     const seq = mark?.seq;
+    // COVERED events are complete no-ops -- the activity epoch must not move
+    // either: it answers "did anything the user has NOT read arrive during the
+    // ack's flight", and a delayed already-read event would otherwise suppress
+    // that ack's flag-clear (stranding a flag that has no watermark to retire
+    // it).
     if (seq !== undefined) {
       // Primary tier: the server-owned sequence.
-      if (rs?.lastReadSeq !== undefined && seq <= rs.lastReadSeq) return; // covered by the ack
+      if (rs?.lastReadSeq !== undefined && seq <= rs.lastReadSeq) return;
+      bumpActivity(channelId);
       const prev = flagRaised.get(channelId);
       flagRaised.set(channelId, {
         seq: prev?.seq == null ? seq : Math.max(prev.seq, seq),
@@ -194,11 +212,14 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
       const raisedAt = mark?.at ? Date.parse(mark.at) : NaN;
       if (!Number.isNaN(raisedAt)) {
         if (rs?.lastReadAt && Date.parse(rs.lastReadAt) >= raisedAt) return; // already read
+        bumpActivity(channelId);
         const prev = flagRaised.get(channelId);
         flagRaised.set(channelId, {
           seq: prev?.seq ?? null,
           at: prev?.at == null ? raisedAt : Math.max(prev.at, raisedAt),
         });
+      } else {
+        bumpActivity(channelId); // no watermark at all: conservatively activity
       }
     }
     set((state) => {
@@ -224,7 +245,11 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
             userId: existing?.userId || '',
             channelId,
             lastMessageId: existing?.lastMessageId,
-            lastReadAt: existing?.lastReadAt || new Date().toISOString(),
+            // NEVER fabricate a read time from the client clock: the fallback
+            // watermark compares this field against server-minted message
+            // times, and a fabricated value ahead of the server would swallow
+            // genuinely new messages as "already read". '' means no watermark.
+            lastReadAt: existing?.lastReadAt || '',
             mentionCount: (existing?.mentionCount || 0) + 1,
           },
         },

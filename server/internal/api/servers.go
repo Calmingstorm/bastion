@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"path/filepath"
@@ -538,26 +539,61 @@ func (h *ServerHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Broadcast SERVER_DELETE to all server channels before deletion
+	// Capture the recipient set and channel ids while the rows still exist --
+	// membership and channels are cascade-deleted with the server, so nothing
+	// can be queried afterwards. The broadcast itself happens only AFTER the
+	// commit: broadcasting first had the same two failure modes as the old
+	// channel delete (a failed delete permanently desyncs every client; a
+	// racing fetch reads the server back into existence).
+	memberIDs := serverMemberIDs(r.Context(), h.db, serverID)
 	channelIDs, _ := getServerChannelIDs(r.Context(), h.db, serverID)
-	for _, chID := range channelIDs {
-		h.hub.BroadcastToChannel(chID, realtime.Event{
+
+	// Delete server — cascade deletes handle channels, messages, members, roles, bans, invites, categories, audit log
+	result, err := h.db.Exec(r.Context(), `DELETE FROM servers WHERE id = $1`, serverID)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to delete server")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+	if result.RowsAffected() == 0 {
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "server not found"))
+		return
+	}
+
+	for _, uid := range memberIDs {
+		h.hub.BroadcastToUser(uid, realtime.Event{
 			Type: realtime.EventServerDelete,
 			Data: map[string]string{
 				"serverId": serverID.String(),
 			},
 		})
 	}
-
-	// Delete server — cascade deletes handle channels, messages, members, roles, bans, invites, categories, audit log
-	_, err = h.db.Exec(r.Context(), `DELETE FROM servers WHERE id = $1`, serverID)
-	if err != nil {
-		log.Error().Err(err).Msg("failed to delete server")
-		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
-		return
+	// The cascaded channels' subscriber sets must not outlive their rows.
+	for _, chID := range channelIDs {
+		h.hub.RemoveChannel(chID)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// serverMemberIDs returns every member of the server (server-scoped events like
+// SERVER_DELETE go to all members -- membership itself is the authorization).
+func serverMemberIDs(ctx context.Context, db *pgxpool.Pool, serverID uuid.UUID) []uuid.UUID {
+	rows, err := db.Query(ctx, `SELECT user_id FROM server_members WHERE server_id = $1`, serverID)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to query server members for delete broadcast")
+		return nil
+	}
+	defer rows.Close()
+	var ids []uuid.UUID
+	for rows.Next() {
+		var uid uuid.UUID
+		if err := rows.Scan(&uid); err != nil {
+			continue
+		}
+		ids = append(ids, uid)
+	}
+	return ids
 }
 
 func (h *ServerHandler) UpdateNickname(w http.ResponseWriter, r *http.Request) {

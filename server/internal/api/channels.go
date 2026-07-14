@@ -29,6 +29,12 @@ type ChannelHandler struct {
 // reachable with a locked-row race.
 var AfterChannelDeleteExecForTest func()
 
+// AfterChannelCreateSubscribeForTest runs between the create's subscription
+// loop and its authorization post-check (nil in production). Tests use it to
+// revoke access inside that window and prove the post-check unsubscribes a
+// member whose revocation raced the create.
+var AfterChannelCreateSubscribeForTest func()
+
 func NewChannelHandler(db *pgxpool.Pool, hub *realtime.Hub) *ChannelHandler {
 	return &ChannelHandler{db: db, hub: hub}
 }
@@ -83,8 +89,8 @@ func (h *ChannelHandler) authorizedMemberIDs(r *http.Request, serverID uuid.UUID
 // broadcastToServer delivers a channel event exactly once per AUTHORIZED
 // member. Per-channel fanout delivered duplicates and, post-commit, missed
 // exclusive subscribers of a deleted channel; raw per-member fanout bypassed
-// ViewChannel. Deletion callers capture the recipient set BEFORE deleting and
-// pass it here (broadcast still happens only after the commit).
+// ViewChannel. Recipients are evaluated at DELIVERY time -- callers may pass a
+// just-confirmed set to avoid recomputing it.
 func (h *ChannelHandler) broadcastToServer(r *http.Request, serverID uuid.UUID, event realtime.Event, recipients ...[]uuid.UUID) {
 	var ids []uuid.UUID
 	if len(recipients) > 0 {
@@ -235,18 +241,35 @@ func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// A new channel must be USABLE by already-connected clients, not just
-	// announced: subscribe every authorized member's live sockets first, then
-	// broadcast the create to the same set -- without the subscription,
-	// subsequent messages in this channel would silently never reach them until
-	// reconnect. One recipient computation keeps subscribe and announce coherent.
+	// announced: subscribe every authorized member's live sockets first --
+	// without the subscription, subsequent messages in this channel would
+	// silently never reach them until reconnect. The post-check below re-reads
+	// authorization and the broadcast uses that CONFIRMED set.
 	recipients := h.authorizedMemberIDs(r, serverID)
 	for _, uid := range recipients {
 		h.hub.SubscribeUser(uid, ch.ID)
 	}
+	if AfterChannelCreateSubscribeForTest != nil {
+		AfterChannelCreateSubscribeForTest()
+	}
+	// POST-CHECK: a revocation can land between reading the recipient set and
+	// subscribing. Re-read and unsubscribe anyone no longer authorized; whoever
+	// runs last (this check or the revocation's own reconcile) leaves the hub
+	// consistent with the database.
+	still := make(map[uuid.UUID]bool)
+	confirmed := h.authorizedMemberIDs(r, serverID)
+	for _, uid := range confirmed {
+		still[uid] = true
+	}
+	for _, uid := range recipients {
+		if !still[uid] {
+			h.hub.UnsubscribeUser(uid, ch.ID)
+		}
+	}
 	h.broadcastToServer(r, serverID, realtime.Event{
 		Type: realtime.EventChannelCreate,
 		Data: ch,
-	}, recipients)
+	}, confirmed)
 
 	writeJSON(w, http.StatusCreated, ch)
 }

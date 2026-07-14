@@ -242,9 +242,16 @@ func (h *Hub) GetClientChannels(client *Client) []uuid.UUID {
 // subscriptions must not outlive the row (they would pin client pointers until
 // those clients disconnect, and ids are never reused).
 func (h *Hub) RemoveChannel(channelID uuid.UUID) {
+	// Bump the reconcile generation BEFORE mutating (the same ordering
+	// UnsubscribeUser documents as load-bearing): a client CONNECTING
+	// concurrently read its viewable snapshot while this channel still existed;
+	// bumping first guarantees its stability check sees the change and re-reads,
+	// instead of installing the dead subscription set forever if this goroutine
+	// were preempted between the mutation and a later bump.
+	h.revGen.Add(1)
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	delete(h.channels, channelID)
+	h.mu.Unlock()
 }
 
 // SubscribeUser subscribes all of a user's connected clients to a channel

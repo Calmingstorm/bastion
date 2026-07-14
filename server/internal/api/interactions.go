@@ -655,12 +655,14 @@ func (h *InteractionHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			"content":   req.Content,
 			"embeds":    req.Embeds,
 			"ephemeral": true,
-			"createdAt": time.Now(),
+			"createdAt": time.Now().UTC(),
 		}
 
+		// Same envelope as every persisted-message broadcast. Ephemeral messages
+		// have no seq (nothing is inserted), so clients fall to the time tier.
 		h.hub.BroadcastToUser(invokerID, realtime.Event{
 			Type: realtime.EventMessageCreate,
-			Data: ephemeralMsg,
+			Data: map[string]any{"message": ephemeralMsg, "eventAt": time.Now().UTC()},
 		})
 	} else {
 		// Insert a real message in the database
@@ -671,19 +673,21 @@ func (h *InteractionHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			embedsJSON, _ = json.Marshal(req.Embeds)
 		}
 
-		err = h.db.QueryRow(r.Context(),
-			`WITH new_msg AS (
-				INSERT INTO messages (channel_id, author_id, content, embeds)
-				VALUES ($1, $2, $3, $4)
-				RETURNING id, channel_id, author_id, content, edited_at, embeds, created_at
-			)
-			SELECT m.id, m.channel_id, m.content, m.edited_at, m.created_at,
-			       u.id, u.username, u.display_name, u.avatar_url, u.is_bot, m.embeds
-			FROM new_msg m
-			INNER JOIN users u ON u.id = m.author_id`,
-			channelID, botUserID, req.Content, embedsJSON,
-		).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.CreatedAt,
-			&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL, &author.IsBot, &embedsJSON)
+		err = insertMessageTx(r.Context(), h.db, channelID, func(tx pgx.Tx) error {
+			return tx.QueryRow(r.Context(),
+				`WITH new_msg AS (
+					INSERT INTO messages (channel_id, author_id, content, embeds)
+					VALUES ($1, $2, $3, $4)
+					RETURNING id, channel_id, author_id, content, edited_at, embeds, created_at, seq
+				)
+				SELECT m.id, m.channel_id, m.content, m.edited_at, m.created_at, m.seq,
+				       u.id, u.username, u.display_name, u.avatar_url, u.is_bot, m.embeds
+				FROM new_msg m
+				INNER JOIN users u ON u.id = m.author_id`,
+				channelID, botUserID, req.Content, embedsJSON,
+			).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.CreatedAt, &msg.Seq,
+				&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL, &author.IsBot, &embedsJSON)
+		})
 		if err != nil {
 			log.Error().Err(err).Msg("failed to insert interaction callback message")
 			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
@@ -696,7 +700,7 @@ func (h *InteractionHandler) Callback(w http.ResponseWriter, r *http.Request) {
 
 		h.hub.BroadcastToChannel(channelID, realtime.Event{
 			Type: realtime.EventMessageCreate,
-			Data: msg,
+			Data: map[string]any{"message": msg, "eventAt": time.Now().UTC()},
 		})
 	}
 
