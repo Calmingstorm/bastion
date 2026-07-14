@@ -3,6 +3,7 @@ import type { DMChannel } from '../types';
 import { apiGetDMs, apiCreateDM, apiCloseDM } from '../api/client';
 import { captureSessionGeneration, isSessionGenerationCurrent } from '../api/session';
 import { useToastStore } from './toastStore';
+import { createLineage } from './lineage';
 
 interface DMState {
   dmChannels: DMChannel[];
@@ -17,8 +18,14 @@ interface DMState {
   reset: () => void;
 }
 
-// Recency for the DM list: an older fetch must not overwrite a newer snapshot.
-let fetchDMsSeq = 0;
+// Reconciling lineage for the DM list (see lineage.ts): mutations journal their
+// functional application, so an overlapping fetch commits its snapshot WITH them
+// re-applied -- never discarding unaffected rows.
+const dmLineage = createLineage<DMChannel>();
+const upsertDM = (dm: DMChannel) => (list: DMChannel[]) => {
+  const without = list.filter((d) => d.id !== dm.id);
+  return [dm, ...without];
+};
 
 export const useDMStore = create<DMState>((set) => ({
   dmChannels: [],
@@ -28,15 +35,21 @@ export const useDMStore = create<DMState>((set) => ({
 
   fetchDMs: async () => {
     const generation = captureSessionGeneration();
-    const seq = ++fetchDMsSeq;
-    const owns = () => seq === fetchDMsSeq && isSessionGenerationCurrent(generation);
+    const token = dmLineage.startFetch();
     set({ isLoading: true, error: null });
     try {
       const channels = await apiGetDMs();
-      if (!owns()) return;
-      set({ dmChannels: Array.isArray(channels) ? channels : [], isLoading: false });
+      if (!isSessionGenerationCurrent(generation)) return;
+      const outcome = dmLineage.reconcile(token, Array.isArray(channels) ? channels : []);
+      if (outcome.kind === 'superseded') return;
+      if (outcome.kind === 'gap') {
+        set({ isLoading: false });
+        return;
+      }
+      set({ dmChannels: outcome.list, isLoading: false });
     } catch {
-      if (!owns()) return;
+      if (!isSessionGenerationCurrent(generation)) return;
+      if (dmLineage.reconcile(token, []).kind === 'superseded') return;
       set({ isLoading: false, error: 'Failed to load DMs' });
     }
   },
@@ -46,17 +59,11 @@ export const useDMStore = create<DMState>((set) => ({
     const dm = await apiCreateDM(recipientIds);
     // The DM was created for the OLD account; do not surface it in the new session.
     if (!isSessionGenerationCurrent(generation)) return undefined;
-    // Claim UNCONDITIONALLY: a successful create (even a same-ID reopen) is newer
-    // truth than any in-flight snapshot -- and it settles the loading flag of any
-    // fetch it supersedes.
-    fetchDMsSeq += 1;
-    set((state) => {
-      const exists = state.dmChannels.some((d) => d.id === dm.id);
-      if (!exists) {
-        return { dmChannels: [dm, ...state.dmChannels], isLoading: false };
-      }
-      return { isLoading: false };
-    });
+    // Journal an UPSERT unconditionally: a successful create (even a same-ID
+    // reopen) is newer truth; an overlapping fetch reconciles it onto its snapshot.
+    const apply = upsertDM(dm);
+    dmLineage.claim(apply);
+    set((state) => ({ dmChannels: apply(state.dmChannels) }));
     return dm;
   },
 
@@ -77,24 +84,23 @@ export const useDMStore = create<DMState>((set) => ({
     // Deliberately a silent return (not a SessionSupersededError like the server
     // mutations): fire-and-forget callers have no success UI to mislead.
     if (!isSessionGenerationCurrent(generation)) return;
-    set((state) => {
-      fetchDMsSeq += 1; // commit supersession: an older snapshot must not resurrect it
-      return {
-        dmChannels: state.dmChannels.filter((d) => d.id !== channelId),
-        selectedDMId: state.selectedDMId === channelId ? null : state.selectedDMId,
-        isLoading: false, // settle the loading of any superseded fetch
-      };
-    });
+    const apply = (list: DMChannel[]) => list.filter((d) => d.id !== channelId);
+    dmLineage.claim(apply); // journaled: an older snapshot cannot resurrect it
+    set((state) => ({
+      dmChannels: apply(state.dmChannels),
+      selectedDMId: state.selectedDMId === channelId ? null : state.selectedDMId,
+    }));
   },
 
   // Realtime DM_CREATE commits through here: the write claims the list lineage
   // (commit supersession) so an older fetch snapshot settling later cannot erase it.
   addDM: (dm: DMChannel) => {
-    fetchDMsSeq += 1; // claim unconditionally (see createDM)
-    set((state) => {
-      if (state.dmChannels.some((d) => d.id === dm.id)) return { isLoading: false };
-      return { dmChannels: [dm, ...state.dmChannels], isLoading: false };
-    });
+    // UPSERT unconditionally: replace any stale same-ID object with the fresh
+    // payload, and journal the application so an overlapping fetch cannot replace
+    // the list with a pre-event snapshot.
+    const apply = upsertDM(dm);
+    dmLineage.claim(apply);
+    set((state) => ({ dmChannels: apply(state.dmChannels) }));
   },
 
   selectDM: (channelId: string | null) => {

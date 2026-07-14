@@ -105,7 +105,10 @@ export const useWSStore = create<WSState>((set) => ({
     wsClient.on('CHANNEL_UPDATE', (data: unknown) => {
       const payload = data as { channel: Channel } | Channel;
       const channel = 'channel' in payload ? payload.channel : payload;
-      if (channel) {
+      // Reorder broadcasts arrive as partial {serverId, type} payloads -- they are
+      // not complete channels and must not be treated as one (an id-less "update"
+      // would journal a claim without a target).
+      if (channel && channel.id) {
         useServerStore.getState().updateChannel(channel);
       }
     });
@@ -113,7 +116,7 @@ export const useWSStore = create<WSState>((set) => ({
     wsClient.on('CHANNEL_DELETE', (data: unknown) => {
       const payload = data as { channelId: string; serverId: string };
       if (payload.channelId) {
-        useServerStore.getState().removeChannel(payload.channelId);
+        useServerStore.getState().removeChannel(payload.channelId, payload.serverId);
       }
     });
 
@@ -156,15 +159,11 @@ export const useWSStore = create<WSState>((set) => ({
       if (payload.serverId && payload.userId) {
         const { user } = useAuthStore.getState();
         if (user && payload.userId === user.id) {
-          // We were kicked — remove the server from our list
-          const { servers, selectedServerId } = useServerStore.getState();
-          const remaining = servers.filter((s) => s.id !== payload.serverId);
-          if (selectedServerId === payload.serverId) {
-            useServerStore.setState({ servers: remaining, selectedServerId: remaining[0]?.id || null, channels: [], selectedChannelId: null });
-            if (remaining[0]) useServerStore.getState().selectServer(remaining[0].id);
-          } else {
-            useServerStore.setState({ servers: remaining });
-          }
+          // We were kicked — remove the server through the store action, which
+          // journals the removal (a held server-list snapshot cannot resurrect
+          // it), barriers the channel resource when it was selected, and
+          // auto-reselects the next server.
+          useServerStore.getState().removeServer(payload.serverId);
         } else {
           // Someone else was kicked — refresh member list
           eventBus.emit('bastion:member-update', payload);
@@ -189,10 +188,10 @@ export const useWSStore = create<WSState>((set) => ({
     wsClient.on('DM_CREATE', (data: unknown) => {
       const dm = data as DMChannel;
       if (dm && dm.id) {
-        const exists = useDMStore.getState().dmChannels.some((d) => d.id === dm.id);
-        if (!exists) {
-          useDMStore.getState().addDM(dm); // claims the list lineage (commit supersession)
-        }
+        // Unconditional: addDM upserts (replacing any stale same-ID object) and
+        // claims the lineage -- gating on local novelty here would let an older
+        // fetch snapshot replace the list.
+        useDMStore.getState().addDM(dm);
       }
     });
 
@@ -255,15 +254,9 @@ export const useWSStore = create<WSState>((set) => ({
       if (payload.serverId && payload.userId) {
         const { user } = useAuthStore.getState();
         if (user && payload.userId === user.id) {
-          // We were banned — remove the server from our list
-          const { servers, selectedServerId } = useServerStore.getState();
-          const remaining = servers.filter((s) => s.id !== payload.serverId);
-          if (selectedServerId === payload.serverId) {
-            useServerStore.setState({ servers: remaining, selectedServerId: remaining[0]?.id || null, channels: [], selectedChannelId: null });
-            if (remaining[0]) useServerStore.getState().selectServer(remaining[0].id);
-          } else {
-            useServerStore.setState({ servers: remaining });
-          }
+          // We were banned — same store-action path as a kick (journaled removal,
+          // channel barrier when selected, auto-reselect).
+          useServerStore.getState().removeServer(payload.serverId);
         } else {
           // Someone else was banned — refresh member list
           eventBus.emit('bastion:member-update', payload);

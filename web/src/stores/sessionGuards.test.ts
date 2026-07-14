@@ -399,13 +399,19 @@ describe('session-boundary guards', () => {
     useServerStore.getState().reset();
   });
 
-  it('a DM commit settles a superseded DM fetch loading flag', async () => {
+  it('a DM fetch reconciles an overlapping commit and settles its own loading', async () => {
     useDMStore.setState({ dmChannels: [], isLoading: false });
-    vi.mocked(client.apiGetDMs).mockReturnValue(new Promise(() => {})); // held forever
-    void useDMStore.getState().fetchDMs();
+    const dFetch = deferred<DMChannel[]>();
+    vi.mocked(client.apiGetDMs).mockReturnValue(dFetch.promise);
+    const pFetch = useDMStore.getState().fetchDMs();
     expect(useDMStore.getState().isLoading).toBe(true);
-    useDMStore.getState().addDM({ id: 'dm-rt2' } as DMChannel); // realtime commit supersedes
-    expect(useDMStore.getState().isLoading).toBe(false); // settled by the commit
+    useDMStore.getState().addDM({ id: 'dm-rt2' } as DMChannel); // journaled, not discarding
+    dFetch.resolve([{ id: 'dm-other' } as DMChannel]); // the snapshot's unaffected row
+    await pFetch;
+    const ids = useDMStore.getState().dmChannels.map((d2) => d2.id);
+    expect(ids).toContain('dm-rt2'); // the commit survived
+    expect(ids).toContain('dm-other'); // AND the snapshot's rows survived -- reconciliation
+    expect(useDMStore.getState().isLoading).toBe(false); // the fetch settles its own loading
     useDMStore.getState().reset();
   });
 
@@ -431,6 +437,105 @@ describe('session-boundary guards', () => {
     await pList;
     expect(useServerStore.getState().servers.map((sv) => sv.id)).not.toContain('srv-x');
     useServerStore.getState().reset();
+  });
+
+  // F38 round 22: reconciliation, not amnesia -- a fetch overlapped by mutations
+  // commits its snapshot WITH them re-applied, preserving unaffected rows.
+  it('a channels fetch reconciles a mid-flight realtime create, keeping snapshot rows', async () => {
+    useServerStore.setState({ servers: [], selectedServerId: null, channels: [] });
+    const d = deferred<Channel[]>();
+    vi.mocked(client.apiGetChannels).mockReturnValue(d.promise);
+    vi.mocked(client.apiGetMemberPermissions).mockResolvedValue({ permissions: 0 });
+    const p = useServerStore.getState().selectServer('srv-a'); // snapshot held
+    useServerStore.getState().addChannel({ id: 'c-rt', name: 'rt', serverId: 'srv-a', position: 9 } as Channel);
+    d.resolve([{ id: 'c-snap', name: 'snap', serverId: 'srv-a', position: 0 } as Channel]);
+    await p;
+    const ids = useServerStore.getState().channels.map((c) => c.id);
+    expect(ids).toContain('c-rt'); // the mutation survived
+    expect(ids).toContain('c-snap'); // AND the snapshot's unaffected row survived
+    expect(useServerStore.getState().isLoadingChannels).toBe(false);
+    useServerStore.getState().reset();
+  });
+
+  it('a servers fetch reconciles mid-flight removal and update, keeping unaffected rows', async () => {
+    useServerStore.setState({
+      servers: [{ id: 'srv-dead', name: 'Dead', ownerId: 'u1' } as Server],
+      selectedServerId: null, channels: [],
+    });
+    const d = deferred<Server[]>();
+    vi.mocked(client.apiGetServers).mockReturnValue(d.promise);
+    const p = useServerStore.getState().fetchServers(); // snapshot held
+    useServerStore.getState().removeServer('srv-dead');
+    useServerStore.getState().updateServer({ id: 'srv-b', name: 'B-renamed' } as Server);
+    d.resolve([
+      { id: 'srv-dead', name: 'Dead', ownerId: 'u1' } as Server,
+      { id: 'srv-b', name: 'B', ownerId: 'u1' } as Server,
+      { id: 'srv-c', name: 'C', ownerId: 'u1' } as Server,
+    ]);
+    await p;
+    const byId = new Map(useServerStore.getState().servers.map((sv) => [sv.id, sv]));
+    expect(byId.has('srv-dead')).toBe(false); // removal applied to the snapshot
+    expect(byId.get('srv-b')?.name).toBe('B-renamed'); // update applied
+    expect(byId.has('srv-c')).toBe(true); // unaffected row preserved
+    useServerStore.getState().reset();
+  });
+
+  it('an event for another joined server does not disturb the selected server fetch', async () => {
+    useServerStore.setState({ servers: [], selectedServerId: null, channels: [] });
+    const d = deferred<Channel[]>();
+    vi.mocked(client.apiGetChannels).mockReturnValue(d.promise);
+    vi.mocked(client.apiGetMemberPermissions).mockResolvedValue({ permissions: 0 });
+    const p = useServerStore.getState().selectServer('srv-a'); // snapshot held
+    // Channel events belonging to ANOTHER joined server arrive mid-flight. The
+    // create is the observable one: without the scope check its upsert INSERTS
+    // the foreign channel into the selected server's list (immediately and via
+    // the journal at reconcile time). The update's merge-if-present apply is
+    // structurally inert for a foreign id but must not disturb the fetch either.
+    useServerStore.getState().addChannel({ id: 'c-x', name: 'x', serverId: 'srv-other', position: 0 } as Channel);
+    useServerStore.getState().updateChannel({ id: 'c-x', name: 'x2', serverId: 'srv-other', position: 0 } as Channel);
+    expect(useServerStore.getState().channels.map((c) => c.id)).not.toContain('c-x');
+    d.resolve([{ id: 'c-a', name: 'a', serverId: 'srv-a', position: 0 } as Channel]);
+    await p;
+    expect(useServerStore.getState().channels.map((c) => c.id)).toEqual(['c-a']); // fully committed, unpolluted
+    expect(useServerStore.getState().isLoadingChannels).toBe(false);
+    useServerStore.getState().reset();
+  });
+
+  it('removing the selected server barriers its held channel fetch', async () => {
+    useServerStore.setState({
+      servers: [{ id: 'srv-a', name: 'A', ownerId: 'u1' } as Server],
+      selectedServerId: null, channels: [],
+    });
+    const d = deferred<Channel[]>();
+    vi.mocked(client.apiGetChannels).mockReturnValue(d.promise);
+    vi.mocked(client.apiGetMemberPermissions).mockResolvedValue({ permissions: 0 });
+    const p = useServerStore.getState().selectServer('srv-a'); // channel fetch held
+    useServerStore.getState().removeServer('srv-a'); // kicked/banned/deleted
+    d.resolve([{ id: 'c-a', name: 'a', serverId: 'srv-a', position: 0 } as Channel]);
+    await p;
+    expect(useServerStore.getState().channels).toEqual([]); // nothing repopulated
+    expect(useServerStore.getState().selectedServerId).toBeNull();
+    expect(useServerStore.getState().isLoadingChannels).toBe(false);
+    useServerStore.getState().reset();
+  });
+
+  it('createChannel does not duplicate a WebSocket-first creation', async () => {
+    useServerStore.setState({ servers: [], selectedServerId: 'srv-a', channels: [] });
+    const chan = { id: 'c-new', name: 'new', serverId: 'srv-a', position: 0 } as Channel;
+    useServerStore.getState().addChannel(chan); // CHANNEL_CREATE broadcast lands first
+    vi.mocked(client.apiCreateChannel).mockResolvedValue(chan);
+    await useServerStore.getState().createChannel('srv-a', 'new'); // HTTP response second
+    const ids = useServerStore.getState().channels.map((c) => c.id);
+    expect(ids).toEqual(['c-new']); // upserted, not duplicated
+    useServerStore.getState().reset();
+  });
+
+  it('a same-ID realtime DM upserts the fresh payload over the stale object', async () => {
+    useDMStore.setState({ dmChannels: [{ id: 'dm-u', recipients: [] } as never] });
+    useDMStore.getState().addDM({ id: 'dm-u', recipients: [{ id: 'u9', username: 'fresh' }] } as never);
+    const dm = useDMStore.getState().dmChannels.find((d2) => d2.id === 'dm-u');
+    expect(dm?.recipients?.[0]?.username).toBe('fresh'); // replaced, not retained stale
+    useDMStore.getState().reset();
   });
 
   // F38 round 11: overlapping startup validations share one generation (React
