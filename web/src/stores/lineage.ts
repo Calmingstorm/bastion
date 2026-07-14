@@ -47,10 +47,10 @@ export interface Lineage<T> {
 }
 
 const JOURNAL_CAP = 128;
-// Larger than JOURNAL_CAP on purpose: every removal is also a journal claim, so
-// a fetch whose flight overlaps a tombstone prune has ALREADY hit the journal
-// gap (and retried) first -- tombstone pruning never silently loses evidence an
-// active fetch depends on.
+// Pruning evicts the OLDEST tombstone, and only once 256 newer removals exist --
+// so an evicted deletion is 256 removals old, far beyond the ms-scale
+// broadcast-before-commit window tombstones exist to cover. Genuinely recent
+// removals are always resident.
 const TOMBSTONE_CAP = 256;
 
 export function createLineage<T>(getId: (item: T) => string): Lineage<T> {

@@ -365,12 +365,17 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   removeChannel: (channelId: string, serverId?: string) => {
-    // Scope check when the event carries its server. The removal is journaled AND
-    // tombstoned: the backend broadcasts CHANNEL_DELETE before its database
-    // deletion executes, so a fetch STARTING after this event can still return a
-    // snapshot containing the row -- the tombstone stops that resurrection where
-    // the journal (which only covers post-start claims) cannot.
-    if (serverId && get().selectedServerId !== serverId) return;
+    // NOT scope-gated, unlike add/update: removals are subtractive (a foreign id
+    // can never collide with the selected list, so the claim and the local filter
+    // are harmless no-ops cross-scope), and the tombstone MUST outlive the current
+    // scope -- selecting the event's server later, while its held fetch returns a
+    // pre-delete snapshot, would otherwise resurrect a channel whose delete event
+    // was silently dropped here. The removal is journaled AND tombstoned: the
+    // backend broadcasts CHANNEL_DELETE before its database deletion executes, so
+    // a fetch STARTING after this event can still return a snapshot containing
+    // the row -- the tombstone stops that resurrection where the journal (which
+    // only covers post-start claims) cannot.
+    void serverId; // kept for caller symmetry with add/update; removals need no scope
     const apply = (list: Channel[]) => list.filter((c) => c.id !== channelId);
     channelLineage.claim(apply, { removes: [channelId] });
     set((state) => {

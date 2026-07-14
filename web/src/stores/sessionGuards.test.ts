@@ -742,6 +742,26 @@ describe('session-boundary guards', () => {
     useServerStore.getState().reset();
   });
 
+  it('a channel deleted in ANOTHER server is tombstoned for a later selection of it', async () => {
+    // Removals are subtractive, so they are NOT scope-gated: dropping a foreign
+    // CHANNEL_DELETE would lose the tombstone that a later selection of that
+    // server needs when its held fetch returns a pre-delete snapshot.
+    useServerStore.setState({ servers: [], selectedServerId: 'srv-b', channels: [] });
+    useServerStore.getState().removeChannel('c-x', 'srv-a'); // event for a server we are NOT viewing
+    const dSel = deferred<Channel[]>();
+    vi.mocked(client.apiGetChannels).mockReturnValue(dSel.promise);
+    vi.mocked(client.apiGetMemberPermissions).mockResolvedValue({ permissions: 0 });
+    const pSel = useServerStore.getState().selectServer('srv-a'); // now we select it
+    dSel.resolve([
+      { id: 'c-x', name: 'x', serverId: 'srv-a', position: 0 } as Channel, // stale read
+      { id: 'c-a', name: 'a', serverId: 'srv-a', position: 1 } as Channel,
+    ]);
+    await pSel;
+    expect(useServerStore.getState().channels.map((c) => c.id)).toEqual(['c-a']); // no ghost
+    expect(useServerStore.getState().selectedChannelId).toBe('c-a');
+    useServerStore.getState().reset();
+  });
+
   it('reset invalidates lineage-owned requests: a held fetch cannot repopulate the cleared store', async () => {
     useServerStore.setState({ servers: [], selectedServerId: 'srv-keep', channels: [] });
     useDMStore.setState({ dmChannels: [] });
