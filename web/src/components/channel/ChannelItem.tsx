@@ -4,6 +4,7 @@ import type { Channel, ChannelCategory } from '../../types';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useUnreadStore } from '../../stores/unreadStore';
 import { apiUpdateChannel, apiDeleteChannel } from '../../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { useServerStore } from '../../stores/serverStore';
 
 interface ChannelItemProps {
@@ -41,9 +42,14 @@ export function ChannelItem({ channel, isSelected, onClick, canManage, serverId,
       setIsEditing(false);
       return;
     }
+    // Workflow-owned by the session it started under: an update settling after an
+    // identity boundary must not rewrite a same-ID channel the new session loaded.
+    const generation = captureSessionGeneration();
     try {
       const updated = await apiUpdateChannel(serverId, channel.id, { name: trimmed });
-      useServerStore.getState().updateChannel(updated);
+      if (isSessionGenerationCurrent(generation)) {
+        useServerStore.getState().updateChannel(updated);
+      }
     } catch { /* handled */ }
     setIsEditing(false);
   };
@@ -51,9 +57,14 @@ export function ChannelItem({ channel, isSelected, onClick, canManage, serverId,
   const handleDelete = async () => {
     if (!serverId) return;
     setIsDeleting(true); // locks the dialog so it can't be dismissed mid-request
+    // Channel ids are stable across sessions: if the delete settles after an identity
+    // boundary, removing by id would delete a channel the NEW session has loaded.
+    const generation = captureSessionGeneration();
     try {
       await apiDeleteChannel(serverId, channel.id);
-      useServerStore.getState().removeChannel(channel.id);
+      if (isSessionGenerationCurrent(generation)) {
+        useServerStore.getState().removeChannel(channel.id);
+      }
     } catch { /* handled */ }
     setIsDeleting(false);
     setShowDeleteConfirm(false);
@@ -61,11 +72,14 @@ export function ChannelItem({ channel, isSelected, onClick, canManage, serverId,
 
   const handleMoveToCategory = async (categoryId: string | null) => {
     if (!serverId) return;
+    const generation = captureSessionGeneration();
     try {
       const updated = await apiUpdateChannel(serverId, channel.id, {
         categoryId: categoryId ?? '',
       });
-      useServerStore.getState().updateChannel(updated);
+      if (isSessionGenerationCurrent(generation)) {
+        useServerStore.getState().updateChannel(updated);
+      }
     } catch { /* handled */ }
   };
 

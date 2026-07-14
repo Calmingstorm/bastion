@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
 import { useServerStore } from '../stores/serverStore';
 import { apiJoinViaInvite } from '../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../api/session';
 
 export function InvitePage() {
   const { code } = useParams<{ code: string }>();
@@ -24,13 +25,21 @@ export function InvitePage() {
     attemptedRef.current = true;
     setIsJoining(true);
 
+    // Workflow-owned join: if an identity boundary passes during any step, the rest
+    // must not run -- a stale join must not drive the NEW session's server fetch,
+    // selection, or navigation with the old workflow's server id.
+    const generation = captureSessionGeneration();
     apiJoinViaInvite(code)
       .then(async (server) => {
+        if (!isSessionGenerationCurrent(generation)) return;
         await fetchServers();
+        if (!isSessionGenerationCurrent(generation)) return;
         await selectServer(server.id);
+        if (!isSessionGenerationCurrent(generation)) return;
         navigate('/app', { replace: true });
       })
       .catch((err: unknown) => {
+        if (!isSessionGenerationCurrent(generation)) return;
         if (err && typeof err === 'object' && 'response' in err) {
           const axiosErr = err as { response?: { data?: { error?: string } } };
           setError(axiosErr.response?.data?.error || 'Failed to join server.');

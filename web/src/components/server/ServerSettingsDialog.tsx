@@ -32,6 +32,7 @@ import {
   apiRegenerateBotToken,
 } from '../../api/client';
 import { useServerStore } from '../../stores/serverStore';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { resolveMediaUrl, getPlatform } from '../../platform';
 import { PERMISSIONS } from '../../utils/permissions';
 import type { Role, ServerBan, AuditLogEntry, MemberWithUser, Channel, Webhook, Bot } from '../../types';
@@ -208,10 +209,14 @@ function OverviewTab({ serverId }: { serverId: string }) {
   const handleSave = async (e: FormEvent) => {
     e.preventDefault();
     setIsSaving(true);
+    // Server ids are stable across sessions: an update settling after an identity
+    // boundary must not rewrite a same-ID server the new session has loaded.
+    const generation = captureSessionGeneration();
     try {
       // Upload icon first if changed
       if (iconFile) {
         const updated = await apiUploadServerIcon(serverId, iconFile);
+        if (!isSessionGenerationCurrent(generation)) return;
         useServerStore.getState().updateServer(updated);
         setIconFile(null);
         setIconPreview(null);
@@ -220,6 +225,7 @@ function OverviewTab({ serverId }: { serverId: string }) {
         name: name.trim(),
         description: description.trim() || undefined,
       });
+      if (!isSessionGenerationCurrent(generation)) return;
       useServerStore.getState().updateServer(updated);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -301,10 +307,15 @@ function OverviewTab({ serverId }: { serverId: string }) {
             onClick={async () => {
               setIsDeleting(true);
               setDeleteError(null);
+              // A delete settling after an identity boundary must not remove a
+              // same-ID server from the NEW session's store.
+              const generation = captureSessionGeneration();
               try {
                 await apiDeleteServer(serverId);
+                if (!isSessionGenerationCurrent(generation)) return;
                 useServerStore.getState().removeServer(serverId);
               } catch {
+                if (!isSessionGenerationCurrent(generation)) return;
                 setDeleteError('Failed to delete server.');
               } finally {
                 setIsDeleting(false);
@@ -344,8 +355,10 @@ function ChannelsTab({ serverId }: { serverId: string }) {
     const name = newName.trim().toLowerCase().replace(/\s+/g, '-');
     if (!name) return;
     setIsCreating(true);
+    const generation = captureSessionGeneration();
     try {
       const ch = await apiCreateChannel(serverId, name, newTopic.trim() || undefined);
+      if (!isSessionGenerationCurrent(generation)) return;
       setChannels((prev) => [...prev, ch].sort((a, b) => a.position - b.position));
       setNewName('');
       setNewTopic('');
@@ -357,8 +370,12 @@ function ChannelsTab({ serverId }: { serverId: string }) {
   const handleSaveEdit = async (channelId: string) => {
     const name = editName.trim().toLowerCase().replace(/\s+/g, '-');
     if (!name) return;
+    // Channel ids are stable across sessions: a late update must not rewrite a
+    // same-ID channel the new session has loaded.
+    const generation = captureSessionGeneration();
     try {
       const updated = await apiUpdateChannel(serverId, channelId, { name, topic: editTopic.trim() || undefined });
+      if (!isSessionGenerationCurrent(generation)) return;
       setChannels((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
       useServerStore.getState().updateChannel(updated);
     } catch { /* handled */ }
@@ -366,8 +383,10 @@ function ChannelsTab({ serverId }: { serverId: string }) {
   };
 
   const handleDelete = async (channelId: string) => {
+    const generation = captureSessionGeneration();
     try {
       await apiDeleteChannel(serverId, channelId);
+      if (!isSessionGenerationCurrent(generation)) return;
       setChannels((prev) => prev.filter((c) => c.id !== channelId));
       useServerStore.getState().removeChannel(channelId);
     } catch { /* handled */ }

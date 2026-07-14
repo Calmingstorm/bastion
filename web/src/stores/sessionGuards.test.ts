@@ -113,15 +113,28 @@ describe('session-boundary guards', () => {
     expect(useServerStore.getState().servers).toEqual([]);
   });
 
-  it('a mutation that resolves after the session ends does not alter the new session (held mutation)', async () => {
+  it('a mutation that resolves after the session ends REJECTS and does not alter the new session (held mutation)', async () => {
     useServerStore.setState({ channels: [] });
     const d = deferred<Channel>();
     vi.mocked(client.apiCreateChannel).mockReturnValue(d.promise);
     const p = useServerStore.getState().createChannel('s1', 'general');
     invalidateSession();
     d.resolve({ id: 'c-old', name: 'general', serverId: 's1', position: 0 } as Channel);
-    await p;
+    // F38 round 7: a superseded mutation must not FULFILL -- a caller cannot tell a
+    // silent stale return from success and would run its success UI.
+    await expect(p).rejects.toBeInstanceOf(SessionSupersededError);
     expect(useServerStore.getState().channels).toEqual([]); // stale create not added
+  });
+
+  it('createServer superseded mid-flight rejects with SessionSupersededError and adds nothing', async () => {
+    useServerStore.setState({ servers: [] });
+    const d = deferred<Server>();
+    vi.mocked(client.apiCreateServer).mockReturnValue(d.promise);
+    const p = useServerStore.getState().createServer('new-server');
+    invalidateSession();
+    d.resolve({ id: 's-old', name: 'new-server', ownerId: 'u1' } as Server);
+    await expect(p).rejects.toBeInstanceOf(SessionSupersededError);
+    expect(useServerStore.getState().servers).toEqual([]);
   });
 
   it('a value-returning mutation (createDM) returns undefined and does not add after the session ends', async () => {

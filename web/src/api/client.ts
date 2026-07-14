@@ -242,11 +242,25 @@ apiClient.interceptors.response.use(
         return Promise.reject(error);
       }
 
+      // The refresh is a bare axios.post that abortInFlightRequests() cannot cancel,
+      // and the leader awaits it directly -- so a hung refresh would leave the leader
+      // pending across an identity boundary even after its followers are drained.
+      // Race the refresh against the boundary itself: invalidation settles the await.
+      let boundaryReject!: (e: unknown) => void;
+      const boundary = new Promise<never>((_resolve, reject) => {
+        boundaryReject = reject;
+      });
+      const unsubscribeBoundary = onSessionInvalidated(() =>
+        boundaryReject(new Error('session changed'))
+      );
+
       try {
-        const response = await axios.post<{ accessToken: string }>(
-          `${apiBaseURL}/auth/refresh`,
-          { refreshToken }
-        );
+        const response = await Promise.race([
+          axios.post<{ accessToken: string }>(`${apiBaseURL}/auth/refresh`, {
+            refreshToken,
+          }),
+          boundary,
+        ]);
         // A logout during the in-flight refresh must remain authoritative: do not
         // write the new tokens back or update the socket. Reject this refresh's own
         // stale waiters (matched by generation) so they don't hang, but leave a
@@ -285,6 +299,7 @@ apiClient.interceptors.response.use(
         }
         return Promise.reject(refreshError);
       } finally {
+        unsubscribeBoundary();
         // Clear the flag only if this refresh still owns it -- i.e. no replacement
         // took over. A replacement always starts under a newer generation and
         // reassigns refreshGeneration, so an unchanged refreshGeneration means we

@@ -13,6 +13,7 @@ import { InviteDialog } from '../server/InviteDialog';
 import { ServerSettingsDialog } from '../server/ServerSettingsDialog';
 import { NewDMDialog } from '../dm/NewDMDialog';
 import { apiGetCategories, apiCreateCategory, apiUpdateCategory, apiDeleteCategory, apiCreateChannel, apiGetChannels } from '../../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { usePermissionStore } from '../../stores/permissionStore';
 import { PERMISSIONS } from '../../utils/permissions';
 import { eventBus } from '../../utils/eventBus';
@@ -93,7 +94,11 @@ export function UnifiedSidebar() {
 
   const fetchCategories = useCallback(() => {
     if (!expandedServerId) return;
+    // This component survives identity boundaries; a fetch settling after one must
+    // not populate the new session's sidebar with the old account's categories.
+    const generation = captureSessionGeneration();
     apiGetCategories(expandedServerId).then((cats) => {
+      if (!isSessionGenerationCurrent(generation)) return;
       const safeCats = Array.isArray(cats) ? cats : [];
       setCategories(safeCats.sort((a, b) => a.position - b.position));
     }).catch(() => {});
@@ -121,8 +126,10 @@ export function UnifiedSidebar() {
     e.preventDefault();
     const trimmed = newCategoryName.trim();
     if (!trimmed) return;
+    const generation = captureSessionGeneration();
     try {
       await apiCreateCategory(serverId, trimmed);
+      if (!isSessionGenerationCurrent(generation)) return;
       setNewCategoryName('');
       setShowCreateCategory(null);
       fetchCategories();
@@ -140,9 +147,10 @@ export function UnifiedSidebar() {
       setEditingCategoryId(null);
       return;
     }
+    const generation = captureSessionGeneration();
     try {
       await apiUpdateCategory(expandedServerId, catId, { name: trimmed });
-      fetchCategories();
+      if (isSessionGenerationCurrent(generation)) fetchCategories();
     } catch { /* silently fail */ }
     setEditingCategoryId(null);
   };
@@ -150,10 +158,15 @@ export function UnifiedSidebar() {
   const handleDeleteCategory = async () => {
     if (!deletingCategoryId || !expandedServerId) return;
     setIsDeletingCategory(true); // locks the dialog so it can't be dismissed mid-request
+    const generation = captureSessionGeneration();
     try {
       await apiDeleteCategory(expandedServerId, deletingCategoryId);
-      fetchCategories();
-      useServerStore.getState().selectServer(expandedServerId);
+      // A stale delete completing must not refetch into -- or reselect within --
+      // the NEW session (server ids can be shared across accounts).
+      if (isSessionGenerationCurrent(generation)) {
+        fetchCategories();
+        useServerStore.getState().selectServer(expandedServerId);
+      }
     } catch { /* silently fail */ }
     setIsDeletingCategory(false);
     setDeletingCategoryId(null);
@@ -168,9 +181,15 @@ export function UnifiedSidebar() {
     e.preventDefault();
     const trimmed = newChannelName.trim().toLowerCase().replace(/\s+/g, '-');
     if (!trimmed) return;
+    // Workflow-owned: this writes the channel list straight into the shared store,
+    // so a boundary during either await must stop it from overwriting the NEW
+    // session's channels with the old server's list.
+    const generation = captureSessionGeneration();
     try {
       await apiCreateChannel(serverId, trimmed, undefined, createChannelInCategory || undefined);
+      if (!isSessionGenerationCurrent(generation)) return;
       const updated = await apiGetChannels(serverId);
+      if (!isSessionGenerationCurrent(generation)) return;
       useServerStore.setState({ channels: (Array.isArray(updated) ? updated : []).sort((a, b) => a.position - b.position) });
       setNewChannelName('');
       setShowCreateChannel(false);

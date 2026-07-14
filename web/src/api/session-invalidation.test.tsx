@@ -212,6 +212,9 @@ describe('session invalidation', () => {
     apiClient.defaults.adapter = adapter;
 
     const reqA = apiClient.get('/a'); // account A: 401 -> starts refresh A (held)
+    // The boundary settles the leader at invalidation time -- attach the handler at
+    // creation so the early rejection is never left dangling across macrotask gaps.
+    const reqASettled = reqA.then(() => 'resolved' as const, () => 'rejected' as const);
     await refreshAInFlight;
 
     invalidateSession(); // account B logs in
@@ -225,9 +228,9 @@ describe('session invalidation', () => {
     });
     expect((reqB?.data as { ok: boolean }).ok).toBe(true); // B succeeded on its own refresh
 
-    // Clean up the still-held refresh A.
+    // Clean up the (already boundary-settled) refresh A promise.
     rejectRefreshA(new Error('A refresh failed'));
-    await expect(reqA).rejects.toBeTruthy();
+    expect(await reqASettled).toBe('rejected');
     postSpy.mockRestore();
   });
 
@@ -293,6 +296,14 @@ describe('session invalidation', () => {
     }) as AxiosAdapter;
 
     const r1 = apiClient.get('/r1'); // 401 -> starts refresh A (held)
+    // The boundary settles the stale leader at invalidation time -- attach r1's
+    // handler at creation so its early rejection is never left dangling across the
+    // macrotask gaps below (Node would report an unhandled rejection). In production
+    // the caller awaits the request in a guarded try/catch immediately.
+    const r1Settled = r1.then(
+      () => 'resolved' as const,
+      () => 'rejected' as const
+    );
     await aInFlight;
 
     invalidateSession(); // account B logs in -> A is now stale
@@ -306,17 +317,6 @@ describe('session invalidation', () => {
     // A macrotask flush so r3 has genuinely 401'd and been pushed onto failedQueue
     // (the adapter is async; microtask flushes are not enough) before A settles.
     await new Promise((r) => setTimeout(r, 0));
-
-    // r1 (account A's original request) rejects when A fails, but it is not awaited
-    // until the end of the test -- and the macrotask gaps below would otherwise leave
-    // it momentarily rejected-with-no-handler, which Node reports as an unhandled
-    // rejection (failing the run even though every assertion passes). Attach its
-    // handler synchronously here. In production the caller awaits the request in a
-    // guarded try/catch immediately, so this window never exists.
-    const r1Settled = r1.then(
-      () => 'resolved' as const,
-      () => 'rejected' as const
-    );
 
     // A settles late: with the guard it must NOT reject r3 (which waits on B).
     rejectA(new Error('A failed'));
@@ -422,6 +422,42 @@ describe('session invalidation', () => {
     postSpy.mockRestore();
   });
 
+  // F38 round 7 (blocker 1): the LEADER of a hung refresh awaits the bare axios.post
+  // directly -- draining the queue settles only the followers. The refresh await is
+  // raced against the boundary so invalidation settles the leader too.
+  it('invalidateSession settles the leader awaiting a hung refresh', async () => {
+    storage.setItem('accessToken', 'a-access');
+    storage.setItem('refreshToken', 'a-refresh');
+
+    let refreshStarted!: () => void;
+    const refreshInFlight = new Promise<void>((r) => (refreshStarted = r));
+    const postSpy = vi.spyOn(axios, 'post').mockImplementation(() => {
+      refreshStarted();
+      return new Promise(() => {}); // the refresh NEVER settles
+    });
+
+    apiClient.defaults.adapter = (async (config) => {
+      const err = new Error('Unauthorized') as Error & Record<string, unknown>;
+      err.config = config;
+      err.response = { status: 401, data: {} };
+      err.isAxiosError = true;
+      throw err;
+    }) as AxiosAdapter;
+
+    const leader = apiClient.get('/leader'); // 401 -> awaits the hung refresh
+    const leaderSettled = leader.then(() => 'resolved', () => 'rejected');
+    await refreshInFlight;
+
+    invalidateSession(); // must settle the leader, not just queued followers
+
+    const outcome = await Promise.race([
+      leaderSettled,
+      new Promise((r) => setTimeout(() => r('pending'), 50)),
+    ]);
+    expect(outcome).toBe('rejected');
+    postSpy.mockRestore();
+  });
+
   // F38 round 6 (blocker 2): a queued request resolved by its refresh must re-check
   // its generation in the continuation. A boundary can land between the queue being
   // resolved and the waiter's .then() running -- retrying then would re-stamp the old
@@ -464,8 +500,10 @@ describe('session invalidation', () => {
     await new Promise((r) => setTimeout(r, 0)); // genuinely queued
 
     resolveRefresh({ data: { accessToken: 'a-access-2' } });
-    // One microtask: the leader's continuation runs (its own generation check passes,
-    // the queue is resolved with the token) -- but the waiter's .then has NOT run yet.
+    // Two microtasks: the refresh is awaited through a Promise.race (one hop) and
+    // then the leader's continuation runs (its own generation check passes, the
+    // queue is resolved with the token) -- but the waiter's .then has NOT run yet.
+    await Promise.resolve();
     await Promise.resolve();
     invalidateSession(); // the boundary lands in exactly that window
     storage.setItem('accessToken', 'b-access');

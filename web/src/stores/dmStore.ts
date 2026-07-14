@@ -52,6 +52,9 @@ export const useDMStore = create<DMState>((set) => ({
   closeDM: async (channelId: string) => {
     const generation = captureSessionGeneration();
     await apiCloseDM(channelId);
+    // Deliberately a silent return (not a SessionSupersededError like the server
+    // mutations): every caller is fire-and-forget with no success UI, so a stale
+    // rejection would only surface as an unhandled promise rejection.
     if (!isSessionGenerationCurrent(generation)) return;
     set((state) => ({
       dmChannels: state.dmChannels.filter((d) => d.id !== channelId),

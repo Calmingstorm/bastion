@@ -8,7 +8,11 @@ import {
   apiLeaveServer,
   apiDeleteServer,
 } from '../api/client';
-import { captureSessionGeneration, isSessionGenerationCurrent } from '../api/session';
+import {
+  captureSessionGeneration,
+  isSessionGenerationCurrent,
+  SessionSupersededError,
+} from '../api/session';
 import { extractErrorMessage } from '../utils/errors';
 import { usePermissionStore } from './permissionStore';
 
@@ -126,18 +130,23 @@ export const useServerStore = create<ServerState>((set, get) => ({
     set({ selectedChannelId: id });
   },
 
+  // Superseded mutations REJECT (SessionSupersededError) rather than fulfilling: a
+  // caller cannot tell a silent stale return from success and would run its success
+  // UI for an operation that belongs to a previous account. Callers swallow the
+  // typed error -- it is neither a success nor an error of the current session.
   createServer: async (name: string) => {
     const generation = captureSessionGeneration();
     try {
       const server = await apiCreateServer(name);
-      if (!isSessionGenerationCurrent(generation)) return;
+      if (!isSessionGenerationCurrent(generation)) throw new SessionSupersededError();
       set((state) => ({
         servers: [...state.servers, server],
       }));
       // Select the newly created server (itself session-guarded)
       await get().selectServer(server.id);
     } catch (err: unknown) {
-      if (!isSessionGenerationCurrent(generation)) return;
+      if (err instanceof SessionSupersededError) throw err;
+      if (!isSessionGenerationCurrent(generation)) throw new SessionSupersededError();
       const message = extractErrorMessage(err, 'Failed to create server.');
       set({ error: message });
       throw new Error(message);
@@ -148,7 +157,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
     const generation = captureSessionGeneration();
     try {
       const channel = await apiCreateChannel(serverId, name, topic, categoryId);
-      if (!isSessionGenerationCurrent(generation)) return;
+      if (!isSessionGenerationCurrent(generation)) throw new SessionSupersededError();
       set((state) => ({
         channels: [...state.channels, channel].sort(
           (a, b) => a.position - b.position
@@ -157,7 +166,8 @@ export const useServerStore = create<ServerState>((set, get) => ({
       // Select the newly created channel
       set({ selectedChannelId: channel.id });
     } catch (err: unknown) {
-      if (!isSessionGenerationCurrent(generation)) return;
+      if (err instanceof SessionSupersededError) throw err;
+      if (!isSessionGenerationCurrent(generation)) throw new SessionSupersededError();
       const message = extractErrorMessage(err, 'Failed to create channel.');
       set({ error: message });
       throw new Error(message);
@@ -209,14 +219,14 @@ export const useServerStore = create<ServerState>((set, get) => ({
   leaveServer: async (serverId: string) => {
     const generation = captureSessionGeneration();
     await apiLeaveServer(serverId);
-    if (!isSessionGenerationCurrent(generation)) return;
+    if (!isSessionGenerationCurrent(generation)) throw new SessionSupersededError();
     get().removeServer(serverId);
   },
 
   deleteServer: async (serverId: string) => {
     const generation = captureSessionGeneration();
     await apiDeleteServer(serverId);
-    if (!isSessionGenerationCurrent(generation)) return;
+    if (!isSessionGenerationCurrent(generation)) throw new SessionSupersededError();
     get().removeServer(serverId);
   },
 
