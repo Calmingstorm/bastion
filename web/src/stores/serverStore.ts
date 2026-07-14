@@ -144,6 +144,10 @@ export const useServerStore = create<ServerState>((set, get) => ({
       }));
       // Select the newly created server (itself session-guarded)
       await get().selectServer(server.id);
+      // selectServer never rejects, so a boundary during ITS await would otherwise
+      // let this mutation fulfill -- the contract covers every await, not just the
+      // first one.
+      if (!isSessionGenerationCurrent(generation)) throw new SessionSupersededError();
     } catch (err: unknown) {
       if (err instanceof SessionSupersededError) throw err;
       if (!isSessionGenerationCurrent(generation)) throw new SessionSupersededError();
@@ -218,14 +222,26 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
   leaveServer: async (serverId: string) => {
     const generation = captureSessionGeneration();
-    await apiLeaveServer(serverId);
+    try {
+      await apiLeaveServer(serverId);
+    } catch (err: unknown) {
+      // The failure arm honors the same contract: a stale rejection is the
+      // superseded outcome, not an error of the current session's concern.
+      if (!isSessionGenerationCurrent(generation)) throw new SessionSupersededError();
+      throw err;
+    }
     if (!isSessionGenerationCurrent(generation)) throw new SessionSupersededError();
     get().removeServer(serverId);
   },
 
   deleteServer: async (serverId: string) => {
     const generation = captureSessionGeneration();
-    await apiDeleteServer(serverId);
+    try {
+      await apiDeleteServer(serverId);
+    } catch (err: unknown) {
+      if (!isSessionGenerationCurrent(generation)) throw new SessionSupersededError();
+      throw err;
+    }
     if (!isSessionGenerationCurrent(generation)) throw new SessionSupersededError();
     get().removeServer(serverId);
   },

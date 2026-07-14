@@ -4,6 +4,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { useDMStore } from '../../stores/dmStore';
 import { wsClient } from '../../api/websocket';
 import { apiGetMembers, apiExecuteInteraction } from '../../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { MentionAutocomplete } from './MentionAutocomplete';
 import { SlashCommandPicker } from './SlashCommandPicker';
 import { EmojiInputPicker } from './EmojiInputPicker';
@@ -68,7 +69,13 @@ export function MessageInput() {
       setMembers([]);
       return;
     }
-    apiGetMembers(selectedServerId).then(setMembers).catch(() => {});
+    // A stale response must not repopulate the mention list across a boundary.
+    const generation = captureSessionGeneration();
+    apiGetMembers(selectedServerId)
+      .then((m) => {
+        if (isSessionGenerationCurrent(generation)) setMembers(m);
+      })
+      .catch(() => {});
   }, [selectedServerId]);
 
   // Fetch slash commands when server changes
@@ -84,7 +91,12 @@ export function MessageInput() {
   useEffect(() => {
     if (!selectedServerId) return;
     const handler = () => {
-      apiGetMembers(selectedServerId).then(setMembers).catch(() => {});
+      const generation = captureSessionGeneration();
+      apiGetMembers(selectedServerId)
+        .then((m) => {
+          if (isSessionGenerationCurrent(generation)) setMembers(m);
+        })
+        .catch(() => {});
     };
     eventBus.on('bastion:member-join', handler);
     return () => eventBus.off('bastion:member-join', handler);

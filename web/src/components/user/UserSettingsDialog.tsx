@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useAuthStore } from '../../stores/authStore';
 import { apiUpdateProfile, apiUploadAvatar, apiChangePassword, apiChangeEmail, apiDeleteAccount, clearTokens } from '../../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { useLayoutStore } from '../../stores/layoutStore';
 import { useThemeStore } from '../../stores/themeStore';
 import { useBreakpoints } from '../../hooks/useMediaQuery';
@@ -131,15 +132,21 @@ function ProfileTab({ onClose }: { onClose: () => void }) {
     e.preventDefault();
     setError(null);
     setIsSaving(true);
+    // A profile save resolving after an identity boundary belongs to the PREVIOUS
+    // account: it must not overwrite the new session's user (store + persistent
+    // storage) or close the dialog as a success.
+    const generation = captureSessionGeneration();
     try {
       const updated = await apiUpdateProfile({
         displayName: displayName.trim() || undefined,
         aboutMe: aboutMe.trim() || undefined,
       });
+      if (!isSessionGenerationCurrent(generation)) return;
       useAuthStore.setState({ user: updated });
       storage.setItem('user', JSON.stringify(updated));
       onClose();
     } catch {
+      if (!isSessionGenerationCurrent(generation)) return;
       setError('Failed to save profile.');
     } finally {
       setIsSaving(false);
@@ -152,11 +159,16 @@ function ProfileTab({ onClose }: { onClose: () => void }) {
     const reader = new FileReader();
     reader.onload = (ev) => setAvatarPreview(ev.target?.result as string);
     reader.readAsDataURL(file);
+    // Same ownership as the profile save: a stale upload must not overwrite the
+    // new session's user.
+    const generation = captureSessionGeneration();
     try {
       const updated = await apiUploadAvatar(file);
+      if (!isSessionGenerationCurrent(generation)) return;
       useAuthStore.setState({ user: updated });
       storage.setItem('user', JSON.stringify(updated));
     } catch {
+      if (!isSessionGenerationCurrent(generation)) return;
       setError('Failed to upload avatar.');
     }
   };
@@ -278,12 +290,16 @@ function ChangeEmailForm() {
         <button disabled={isSaving || !newEmail || !password}
           onClick={async () => {
             setIsSaving(true); setError(null);
+            // A stale email change must not overwrite the new session's user.
+            const generation = captureSessionGeneration();
             try {
               const updated = await apiChangeEmail(newEmail, password);
+              if (!isSessionGenerationCurrent(generation)) return;
               useAuthStore.setState({ user: updated });
               storage.setItem('user', JSON.stringify(updated));
               setShow(false); setNewEmail(''); setPassword('');
             } catch {
+              if (!isSessionGenerationCurrent(generation)) return;
               setError('Failed to change email. Check your password.');
             } finally { setIsSaving(false); }
           }}

@@ -137,6 +137,44 @@ describe('session-boundary guards', () => {
     expect(useServerStore.getState().servers).toEqual([]);
   });
 
+  // F38 round 8: the contract covers EVERY await. selectServer never rejects (it
+  // guards internally), so a boundary during createServer's nested selectServer
+  // await would otherwise let the mutation FULFILL.
+  it('createServer superseded during its nested selectServer await still rejects', async () => {
+    useServerStore.setState({ servers: [], selectedServerId: null });
+    vi.mocked(client.apiCreateServer).mockResolvedValue({ id: 's-new', name: 'X', ownerId: 'u1' } as Server);
+    vi.mocked(client.apiGetMemberPermissions).mockResolvedValue({ permissions: 0 });
+    const dChannels = deferred<Channel[]>();
+    vi.mocked(client.apiGetChannels).mockReturnValue(dChannels.promise);
+
+    const p = useServerStore.getState().createServer('X');
+    await new Promise((r) => setTimeout(r, 0)); // reach the held selectServer await
+    invalidateSession(); // boundary during the SECOND await
+    dChannels.resolve([]);
+
+    await expect(p).rejects.toBeInstanceOf(SessionSupersededError);
+  });
+
+  // F38 round 8: the failure arm honors the same contract -- a stale rejection is
+  // the superseded outcome, not the raw transport error.
+  it('leaveServer rejecting after the session ends surfaces SessionSupersededError, not the raw error', async () => {
+    const d = deferred<void>();
+    vi.mocked(client.apiLeaveServer).mockReturnValue(d.promise);
+    const p = useServerStore.getState().leaveServer('s1');
+    invalidateSession();
+    d.reject(new Error('boom'));
+    await expect(p).rejects.toBeInstanceOf(SessionSupersededError);
+  });
+
+  it('deleteServer rejecting after the session ends surfaces SessionSupersededError, not the raw error', async () => {
+    const d = deferred<void>();
+    vi.mocked(client.apiDeleteServer).mockReturnValue(d.promise);
+    const p = useServerStore.getState().deleteServer('s1');
+    invalidateSession();
+    d.reject(new Error('boom'));
+    await expect(p).rejects.toBeInstanceOf(SessionSupersededError);
+  });
+
   it('a value-returning mutation (createDM) returns undefined and does not add after the session ends', async () => {
     useDMStore.setState({ dmChannels: [] });
     const d = deferred<DMChannel>();

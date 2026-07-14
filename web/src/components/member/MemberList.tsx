@@ -3,6 +3,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { usePresenceStore } from '../../stores/presenceStore';
 import { useAuthStore } from '../../stores/authStore';
 import { apiGetMembers } from '../../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { eventBus } from '../../utils/eventBus';
 import { usePermissionStore } from '../../stores/permissionStore';
 import { PERMISSIONS } from '../../utils/permissions';
@@ -23,8 +24,13 @@ export function MemberList() {
   const fetchMemberList = useCallback(() => {
     if (!selectedServerId) return;
     setIsLoading(true);
+    // A members response settling after an identity boundary must not repopulate
+    // the NEW session's global presence store (or this list) with the old
+    // account's members.
+    const generation = captureSessionGeneration();
     apiGetMembers(selectedServerId)
       .then((m) => {
+        if (!isSessionGenerationCurrent(generation)) return;
         setMembers(m);
         const { setPresence } = usePresenceStore.getState();
         m.forEach((member) => setPresence(member.userId, member.status));
