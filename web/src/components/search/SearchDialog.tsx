@@ -37,8 +37,12 @@ export function SearchDialog({ open, onClose }: SearchDialogProps) {
 
   useEffect(() => {
     if (open) {
+      // The reset supersedes any in-flight search: an already-fired request must
+      // not land into the freshly-opened dialog.
+      searchSeqRef.current += 1;
       setQuery('');
       setResults([]);
+      setLoading(false);
       setTimeout(() => inputRef.current?.focus(), 50);
     }
   }, [open]);
@@ -55,15 +59,18 @@ export function SearchDialog({ open, onClose }: SearchDialogProps) {
 
   const doSearch = useCallback((q: string) => {
     setQuery(q);
+    // EVERY query change claims the sequence immediately -- clearing the input or
+    // typing again must supersede an already-fired in-flight request, not just the
+    // pending debounce timer. Otherwise stale results land beneath an empty input.
+    const seq = ++searchSeqRef.current;
     if (debounceRef.current) clearTimeout(debounceRef.current);
     if (!q.trim()) {
       setResults([]);
+      setLoading(false); // a superseded in-flight search will not clear this
       return;
     }
     debounceRef.current = setTimeout(() => {
-      // Only the LATEST fired search owns the results (session + query recency).
       const generation = captureSessionGeneration();
-      const seq = ++searchSeqRef.current;
       const owns = () => seq === searchSeqRef.current && isSessionGenerationCurrent(generation);
       setLoading(true);
       apiSearch(q.trim(), { serverId: selectedServerId || undefined })

@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import * as client from '../../api/client';
 import { PinnedMessages } from './PinnedMessages';
 import { invalidateSession } from '../../api/session';
+import { eventBus } from '../../utils/eventBus';
 import type { PinnedMessage } from '../../types';
 
 // F38 round 15: the pins read and unpin continuation are owned by the session and
@@ -37,6 +38,60 @@ describe('PinnedMessages session ownership', () => {
     expect(screen.queryByText(/old-pinned-content/)).toBeNull();
     // The dialog renders in a portal, so query the document for the spinner.
     expect(document.querySelector('.animate-spin')).not.toBeNull();
+  });
+
+  it('an event refresh that supersedes the initial fetch clears loading and shows its pins', async () => {
+    let resolveInitial!: (p: PinnedMessage[]) => void;
+    let resolveRefresh!: (p: PinnedMessage[]) => void;
+    vi.spyOn(client, 'apiGetPinnedMessages')
+      .mockImplementationOnce(
+        () => new Promise((res) => { resolveInitial = res as (p: PinnedMessage[]) => void; })
+      )
+      .mockImplementationOnce(
+        () => new Promise((res) => { resolveRefresh = res as (p: PinnedMessage[]) => void; })
+      );
+    render(<PinnedMessages open onOpenChange={vi.fn()} channelId="c1" />); // initial held
+
+    await act(async () => {
+      eventBus.emit('bastion:pin-update', {}); // refresh supersedes the initial fetch
+      resolveRefresh([pin('m2', 'refreshed-pin')]);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // The owning refresh committed AND cleared loading -- no permanent spinner.
+    expect(screen.getByText(/refreshed-pin/)).toBeInTheDocument();
+    expect(document.querySelector('.animate-spin')).toBeNull();
+
+    await act(async () => {
+      resolveInitial([pin('m1', 'superseded-initial')]); // the held initial settles late
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.queryByText(/superseded-initial/)).toBeNull(); // and commits nothing
+  });
+
+  it('a successful unpin applies even when its own event advances the sequence', async () => {
+    vi.spyOn(client, 'apiGetPinnedMessages')
+      .mockResolvedValueOnce([pin('m1', 'to-be-unpinned')])
+      .mockRejectedValueOnce(new Error('refresh failed')); // the event-driven refetch fails
+    let resolveUnpin!: () => void;
+    vi.spyOn(client, 'apiUnpinMessage').mockImplementation(
+      () => new Promise<void>((res) => { resolveUnpin = () => res(); })
+    );
+    const user = userEvent.setup();
+    render(<PinnedMessages open onOpenChange={vi.fn()} channelId="c1" />);
+    await screen.findByText(/to-be-unpinned/);
+
+    await user.click(screen.getByRole('button', { name: 'Unpin' })); // held
+
+    await act(async () => {
+      eventBus.emit('bastion:pin-update', {}); // the unpin's own WS event: refetch fails
+      await new Promise((r) => setTimeout(r, 0));
+      resolveUnpin(); // the unpin completes AFTER the sequence advanced
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // The unpin's filter still applies -- the removed pin must not remain visible.
+    expect(screen.queryByText(/to-be-unpinned/)).toBeNull();
   });
 
   it('a stale unpin completion does not edit the current session list', async () => {

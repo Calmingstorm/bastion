@@ -39,14 +39,18 @@ export function NewDMDialog({ open, onOpenChange }: NewDMDialogProps) {
   }, [open]);
 
   useEffect(() => {
+    // EVERY query change claims the sequence immediately -- clearing the input or
+    // typing again must supersede an already-fired in-flight request, not just the
+    // pending debounce timer. Otherwise stale results land beneath an empty input.
+    const seq = ++searchSeqRef.current;
     if (debounceRef.current) clearTimeout(debounceRef.current);
     if (!query.trim()) {
       setResults([]);
+      setIsSearching(false); // a superseded in-flight search will not clear this
       return;
     }
     debounceRef.current = setTimeout(async () => {
       const generation = captureSessionGeneration();
-      const seq = ++searchSeqRef.current;
       const owns = () => seq === searchSeqRef.current && isSessionGenerationCurrent(generation);
       setIsSearching(true);
       try {

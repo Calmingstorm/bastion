@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import * as Popover from '@radix-ui/react-popover';
 import { apiGetUser, apiKickMember, apiBanMember, apiTimeoutMember } from '../../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { useAuthStore } from '../../stores/authStore';
 import { openDirectMessage } from '../../stores/dmActions';
 import { resolveMediaUrl } from '../../platform';
@@ -22,11 +23,26 @@ export function UserProfileCard({ userId, roles, joinedAt, serverId, canModerate
   const [open, setOpen] = useState(false);
   const currentUser = useAuthStore((s) => s.user);
 
+  // Only the LATEST profile fetch owns the card (session + recency), and the
+  // displayed profile is keyed to the userId it was fetched for -- a userId change
+  // clears the previous profile instead of showing the wrong user while loading.
+  const profileSeqRef = useRef(0);
+  const shownForRef = useRef<string | null>(null);
+
   useEffect(() => {
-    if (open && !user) {
-      apiGetUser(userId).then(setUser).catch(() => {});
+    if (!open) return;
+    if (shownForRef.current !== userId) {
+      setUser(null);
+      shownForRef.current = userId;
     }
-  }, [open, userId, user]);
+    const generation = captureSessionGeneration();
+    const seq = ++profileSeqRef.current;
+    apiGetUser(userId)
+      .then((u) => {
+        if (seq === profileSeqRef.current && isSessionGenerationCurrent(generation)) setUser(u);
+      })
+      .catch(() => {});
+  }, [open, userId]);
 
   const handleMessage = async () => {
     // Session-guarded create + switch to DM view. openDirectMessage returns undefined

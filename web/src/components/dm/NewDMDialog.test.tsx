@@ -77,6 +77,28 @@ describe('NewDMDialog session guard', () => {
     expect(screen.queryByText(/oldaccountuser/)).toBeNull();
   });
 
+  it('clearing the input supersedes an in-flight search', async () => {
+    const user = userEvent.setup();
+    let resolveSearch!: (u: MessageAuthor[]) => void;
+    vi.spyOn(client, 'apiSearchUsers').mockImplementation(
+      () => new Promise((res) => { resolveSearch = res as (u: MessageAuthor[]) => void; })
+    );
+    render(<NewDMDialog open onOpenChange={vi.fn()} />);
+    const input = screen.getByPlaceholderText('Search by username...');
+    await user.type(input, 'query');
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 350)); // fired (held)
+    });
+
+    await user.clear(input);
+    await act(async () => {
+      resolveSearch([{ id: 'u9', username: 'stale-under-empty' } as MessageAuthor]);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(screen.queryByText(/stale-under-empty/)).toBeNull();
+  });
+
   it('a slower older search cannot overwrite newer results', async () => {
     const user = userEvent.setup();
     let resolveFirst!: (u: MessageAuthor[]) => void;

@@ -42,6 +42,28 @@ describe('SearchDialog session/query ownership', () => {
     expect(screen.queryByText(/old-account-result/)).toBeNull();
   });
 
+  it('clearing the input supersedes an in-flight search', async () => {
+    const user = userEvent.setup();
+    let resolveSearch!: (r: SearchResult[]) => void;
+    vi.spyOn(client, 'apiSearch').mockImplementation(
+      () => new Promise((res) => { resolveSearch = res as (r: SearchResult[]) => void; })
+    );
+    render(<SearchDialog open onClose={vi.fn()} />);
+    const input = screen.getByPlaceholderText('Search messages...');
+    await user.type(input, 'query');
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 450)); // fired (held)
+    });
+
+    await user.clear(input); // the user empties the input while the search is in flight
+    await act(async () => {
+      resolveSearch([result('m9', 'stale-under-empty-input')]);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(screen.queryByText(/stale-under-empty-input/)).toBeNull();
+  });
+
   it('a slower older search cannot overwrite newer results', async () => {
     const user = userEvent.setup();
     let resolveFirst!: (r: SearchResult[]) => void;

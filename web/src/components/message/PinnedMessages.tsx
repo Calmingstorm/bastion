@@ -46,11 +46,18 @@ export function PinnedMessages({ open, onOpenChange, channelId }: PinnedMessages
       if (open && channelId) {
         const generation = captureSessionGeneration();
         const seq = ++fetchSeqRef.current;
+        const owns = () => seq === fetchSeqRef.current && isSessionGenerationCurrent(generation);
         apiGetPinnedMessages(channelId)
           .then((p) => {
-            if (seq === fetchSeqRef.current && isSessionGenerationCurrent(generation)) setPins(p);
+            if (owns()) setPins(p);
           })
-          .catch(() => {});
+          .catch(() => {})
+          .finally(() => {
+            // This refresh may have superseded a held initial fetch (whose own
+            // finally is then skipped) -- the owning fetch must clear loading, or
+            // the spinner would hide the pins it just committed.
+            if (owns()) setIsLoading(false);
+          });
       }
     };
     eventBus.on('bastion:pin-update', handler);
@@ -58,13 +65,15 @@ export function PinnedMessages({ open, onOpenChange, channelId }: PinnedMessages
   }, [open, channelId]);
 
   const handleUnpin = async (messageId: string) => {
-    // The continuation is owned by the session AND the list it was started for: a
-    // newer fetch (channel switch or refresh) claims a new sequence, superseding it.
+    // Owned by the SESSION only. Removing a message id from whatever same-session
+    // list is current is always safe (ids are globally unique, so a different
+    // channel's list is unaffected) -- and it must NOT be sequence-gated: the
+    // unpin's own WebSocket pin-update advances the shared sequence, and if that
+    // event-driven refresh fails, the filter here is what removes the pin.
     const generation = captureSessionGeneration();
-    const seqAtStart = fetchSeqRef.current;
     try {
       await apiUnpinMessage(channelId, messageId);
-      if (seqAtStart !== fetchSeqRef.current || !isSessionGenerationCurrent(generation)) return;
+      if (!isSessionGenerationCurrent(generation)) return;
       setPins((prev) => prev.filter((p) => p.id !== messageId));
     } catch { /* handled */ }
   };
