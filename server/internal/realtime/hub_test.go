@@ -367,13 +367,12 @@ func TestRemoveChannelBumpsReconcileGen(t *testing.T) {
 	}
 }
 
-// TestSubscribeAuthorizedStableUnstableBails: when the read keeps failing (or the
-// generation keeps moving), SubscribeAuthorizedStable returns ErrConnectUnstable
-// and leaves no partial subscriptions behind -- the caller's abort path then
-// bumps the generation (RemoveChannel) so any client that legitimately
-// subscribed mid-pass re-reads. Here we assert the primitive itself: on repeated
-// generation churn it does not converge and installs nothing.
-func TestSubscribeAuthorizedStableUnstableBails(t *testing.T) {
+// TestSubscribeAuthorizedStableConvergesUnderGenChurn: with a STABLE authorized
+// set, SubscribeAuthorizedStable converges even while the reconcile generation
+// keeps moving (a spurious/grant bump) -- two agreeing reads confirm membership --
+// and KEEPS the subscription installed for live delivery. The prior design rolled
+// back and returned ErrConnectUnstable on any generation move, dropping delivery.
+func TestSubscribeAuthorizedStableConvergesUnderGenChurn(t *testing.T) {
 	hub := NewHub()
 	go hub.Run()
 	defer hub.Stop()
@@ -383,15 +382,43 @@ func TestSubscribeAuthorizedStableUnstableBails(t *testing.T) {
 	client := newDroppingClient(userID)
 	hub.RegisterUser(client)
 
-	ids, exists, err := hub.SubscribeAuthorizedStable(channelID, func() ([]uuid.UUID, bool, error) {
-		// Move the generation on every read so the re-check never matches.
-		hub.UnsubscribeUser(uuid.New(), uuid.New())
+	exists, err := hub.SubscribeAuthorizedStable(channelID, func() ([]uuid.UUID, bool, error) {
+		// Move the generation on every read; the authorized set stays {userID}.
+		hub.BumpReconcileGen()
 		return []uuid.UUID{userID}, true, nil
 	})
-	if !errors.Is(err, ErrConnectUnstable) {
-		t.Fatalf("expected ErrConnectUnstable, got %v (ids=%v exists=%v)", err, ids, exists)
+	if err != nil {
+		t.Fatalf("a stable authorized set must converge, got err %v", err)
 	}
-	if channelHas(hub, channelID, client) {
-		t.Fatal("a non-convergent pass must leave no subscription installed")
+	if !exists {
+		t.Fatal("expected exists=true")
+	}
+	// Delivery reads the LIVE hub set (never a returned slice); assert the member
+	// is actually subscribed there, which is what makes live delivery work.
+	if !channelHas(hub, channelID, client) {
+		t.Fatal("a converged pass must keep the authorized member subscribed for live delivery")
+	}
+}
+
+// TestSubscribeAuthorizedStableBestEffortOnFlood: if authorization genuinely never
+// stabilizes (the set differs on every read), the primitive does NOT error and
+// does NOT hang -- it best-efforts within its bounded attempts and returns. The
+// caller delivers to the live hub set regardless; a wrongly-included member is
+// cleaned up by their own revocation's reconcile.
+func TestSubscribeAuthorizedStableBestEffortOnFlood(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	channelID := uuid.New()
+	exists, err := hub.SubscribeAuthorizedStable(channelID, func() ([]uuid.UUID, bool, error) {
+		hub.BumpReconcileGen()
+		return []uuid.UUID{uuid.New()}, true, nil // a different set every read
+	})
+	if err != nil {
+		t.Fatalf("a non-stabilizing flood must best-effort, not error, got %v", err)
+	}
+	if !exists {
+		t.Fatal("expected exists=true on best-effort")
 	}
 }

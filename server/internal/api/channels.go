@@ -41,13 +41,6 @@ var AfterChannelCreateStableForTest func()
 // member whose revocation raced the create.
 var AfterChannelCreateSubscribeForTest func()
 
-// AfterBestEffortAuthzReadForTest runs in the non-convergence best-effort path,
-// AFTER the authorized set is read but BEFORE it is speculatively subscribed (nil
-// in production). Tests use it to revoke a member inside that window and prove the
-// generation guard rolls the speculative subscribe back -- a revoked member must
-// never be left subscribed by the fallback (the blocker-2 leak, back door).
-var AfterBestEffortAuthzReadForTest func()
-
 func NewChannelHandler(db *pgxpool.Pool, hub *realtime.Hub) *ChannelHandler {
 	return &ChannelHandler{db: db, hub: hub}
 }
@@ -261,13 +254,14 @@ func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// until reconnect. But two lifecycle transitions can race the subscribe: a
 	// concurrent ViewChannel revocation (must not leave the revoked member
 	// subscribed) and a concurrent deletion of THIS channel (must not resurrect
-	// its subscriptions or emit a phantom CHANNEL_CREATE). Both bump the hub's
-	// reconcile generation, so the subscribe runs inside a stability loop that
-	// re-reads authorization + existence and rolls back if the generation moved
-	// -- the same primitive the connect path uses. It returns the CONFIRMED,
-	// still-authorized recipient set; the broadcast goes only to that set, and
-	// only if the channel still exists.
-	_, exists, subErr := h.hub.SubscribeAuthorizedStable(ch.ID, func() ([]uuid.UUID, bool, error) {
+	// its subscriptions or emit a phantom CHANNEL_CREATE). SubscribeAuthorizedStable
+	// reconciles the hub subscription to the authorized set, re-reading until it is
+	// consistent with a committed snapshot (generation fast-path, else two agreeing
+	// authorized reads), keeping the subscription for live delivery. It returns
+	// exists=false if the channel was deleted (broadcast nothing). Delivery below
+	// is to the LIVE subscription set, so a revocation landing after it returns is
+	// excluded by its own synchronous unsubscribe.
+	exists, subErr := h.hub.SubscribeAuthorizedStable(ch.ID, func() ([]uuid.UUID, bool, error) {
 		var stillExists bool
 		if err := h.db.QueryRow(r.Context(),
 			`SELECT EXISTS(SELECT 1 FROM channels WHERE id = $1)`, ch.ID).Scan(&stillExists); err != nil {
@@ -282,103 +276,20 @@ func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 		// Test seam: fires AFTER the authorized set is read but before the loop's
 		// generation re-check, so a revocation (or delete) it triggers happens
-		// inside the stability window -- the member is included in THIS pass and
-		// must be rolled back and excluded on retry.
+		// inside a reconcile pass -- the member is included in THIS pass and must
+		// be excluded on the next.
 		if AfterChannelCreateSubscribeForTest != nil {
 			AfterChannelCreateSubscribeForTest()
 		}
 		return ids, true, nil
 	})
 	if subErr != nil {
-		// The stability loop could not converge (N consecutive racing
-		// revocations). Failing closed (drop all subscriptions, stay silent)
-		// starves connected authorized clients: they get no messages and the
-		// unknown-channel refetch never fires (no first message arrives). But
-		// blindly re-subscribing the authorized set and broadcasting can leave a
-		// member a concurrent revoke already committed subscribed FOREVER -- the
-		// blocker-2 leak through the back door, because this path has no
-		// generation guard. So apply the SAME discipline as the stability loop one
-		// final time: sample the reconcile generation, subscribe the authorized
-		// set, and re-check. If nothing raced, broadcast to the channel (full live
-		// delivery, provably leak-free). If a revocation DID race, roll the
-		// speculative subscriptions back (no leak), bump the generation so any
-		// concurrent legitimate join re-reads, and degrade to a one-time per-user
-		// CHANNEL_CREATE: members still learn the channel and self-heal live
-		// delivery on reconnect, while a member revoked in the last instant gets
-		// at most a transient event their CHANNELS_STALE reconciles away -- never a
-		// persistent subscription. If the channel was itself deleted amid the
-		// churn, clean up and stay silent.
-		log.Warn().Err(subErr).Msg("channel create: subscription did not stabilize; best-effort delivery")
-		var stillExists bool
-		if err := h.db.QueryRow(r.Context(),
-			`SELECT EXISTS(SELECT 1 FROM channels WHERE id = $1)`, ch.ID).Scan(&stillExists); err != nil || !stillExists {
-			h.hub.RemoveChannel(ch.ID)
-			writeJSON(w, http.StatusCreated, ch)
-			return
-		}
-		gen := h.hub.ReconcileGen()
-		if ids, authErr := h.authorizedMemberIDs(r, serverID); authErr == nil {
-			// Test seam: fires after the authorized set is read but before the
-			// speculative subscribe, so a revocation it triggers lands inside the
-			// guard window and MUST be rolled back below.
-			if AfterBestEffortAuthzReadForTest != nil {
-				AfterBestEffortAuthzReadForTest()
-			}
-			for _, uid := range ids {
-				h.hub.SubscribeUser(uid, ch.ID)
-			}
-			if h.hub.ReconcileGen() == gen {
-				// Converged: every subscribed member stayed authorized across the
-				// window, so channel delivery cannot leak.
-				h.hub.BroadcastToChannel(ch.ID, realtime.Event{
-					Type: realtime.EventChannelCreate,
-					Data: ch,
-				})
-				writeJSON(w, http.StatusCreated, ch)
-				return
-			}
-			// The generation also moves on a concurrent GRANT (a harmless bump) --
-			// we cannot tell it from a revoke, so we conservatively roll back and
-			// degrade in both cases. On a pure grant this only costs the members a
-			// live subscription until they reconnect; correctness is preserved.
-			// A revocation raced: undo the speculative subscriptions BEFORE any
-			// broadcast so a just-revoked member is never left subscribed, then
-			// force concurrent joins to re-read.
-			for _, uid := range ids {
-				h.hub.UnsubscribeUserFromChannel(uid, ch.ID)
-			}
-			h.hub.BumpReconcileGen()
-		} else {
-			log.Error().Err(authErr).Msg("channel create best-effort: authorized members read failed; degrading to no-op delivery")
-		}
-		// The generation also moves when THIS channel is deleted in the guard
-		// window (RemoveChannel bumps it). authorizedMemberIDs is server-scoped and
-		// would still return members for a now-gone channel, so a naive degraded
-		// broadcast would emit a phantom CHANNEL_CREATE for a deleted channel --
-		// and it would NOT self-heal (the members kept ViewChannel, so no
-		// CHANNELS_STALE fires; only a manual refetch clears it). Re-check
-		// existence before the floor and stay silent if the row is gone, mirroring
-		// the stable path. (A residual commit->check gap remains, identical to the
-		// stable path's inherent one.)
-		var floorExists bool
-		if err := h.db.QueryRow(r.Context(),
-			`SELECT EXISTS(SELECT 1 FROM channels WHERE id = $1)`, ch.ID).Scan(&floorExists); err != nil || !floorExists {
-			h.hub.RemoveChannel(ch.ID)
-			writeJSON(w, http.StatusCreated, ch)
-			return
-		}
-		// Degraded floor: one-time per-user delivery to the current authorized set
-		// (no persistent subscription). Live delivery self-heals on reconnect.
-		if ids, authErr := h.authorizedMemberIDs(r, serverID); authErr == nil {
-			for _, uid := range ids {
-				h.hub.BroadcastToUser(uid, realtime.Event{
-					Type: realtime.EventChannelCreate,
-					Data: ch,
-				})
-			}
-		} else {
-			log.Error().Err(authErr).Msg("channel create best-effort: authorized members read failed for degraded delivery")
-		}
+		// A genuine authorization/existence READ error (SubscribeAuthorizedStable
+		// no longer fails on authorization churn -- it converges or best-efforts).
+		// Recipients are indeterminate and the speculative subscriptions were
+		// rolled back; the row is committed, so the client self-heals on its next
+		// channel-list fetch. Emit nothing.
+		log.Error().Err(subErr).Msg("channel create: subscription read failed; client self-heals on refetch")
 		writeJSON(w, http.StatusCreated, ch)
 		return
 	}

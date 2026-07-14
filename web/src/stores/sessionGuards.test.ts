@@ -1278,6 +1278,25 @@ describe('session-boundary guards', () => {
     useUnreadStore.getState().reset();
   });
 
+  it('an equal-watermark ack does not regress mention state the client already holds', async () => {
+    // Odin round 35 blocker 1: two acks for the SAME last-read message can compute
+    // different counts (a mention landed above the watermark between the server
+    // reads). The client already holds the fresher {seq9, count1} (from the newer
+    // ack or the mention's NOTIFICATION +1); a stale {seq9, count0} settling last
+    // must NOT zero the badge -- equal watermark, so the ack cannot regress it.
+    useUnreadStore.setState({
+      readStates: { c1: { userId: '', channelId: 'c1', lastMessageId: 'm9', lastReadAt: '', lastReadSeq: 9, mentionCount: 1 } },
+      unreadChannels: new Set(['c1']),
+    });
+    vi.mocked(client.apiAckChannel).mockResolvedValue({
+      userId: '', channelId: 'c1', lastMessageId: 'm9', lastReadAt: '', lastReadSeq: 9, mentionCount: 0,
+    } as never);
+    await useUnreadStore.getState().ackChannel('c1', 'm9');
+    expect(useUnreadStore.getState().getMentionCount('c1')).toBe(1); // NOT regressed to 0
+    expect(useUnreadStore.getState().isUnread('c1')).toBe(true); // still flagged
+    useUnreadStore.getState().reset();
+  });
+
   it('an ack commits the server-returned count, not a local guess', async () => {
     // The response carries cross-device mentions the ack did NOT cover (count 2):
     // the client commits that, keeping the channel flagged, instead of zeroing.

@@ -996,13 +996,13 @@ func TestMentionAnchorFailureCommitsNoMention(t *testing.T) {
 	}
 }
 
-// TestCreateNonConvergenceStillDelivers: when the subscription stability loop
-// cannot converge, the create does NOT fail closed -- it best-effort subscribes
-// the authorized members and delivers CHANNEL_CREATE, so connected clients get
-// the channel and its messages instead of silence. Forced by an
-// AfterChannelCreateSubscribeForTest seam that revokes+regrants every pass so
-// the generation never stabilizes.
-func TestCreateNonConvergenceStillDelivers(t *testing.T) {
+// TestChurnConvergesWithLiveDelivery: under reconcile-generation churn with a
+// STABLE authorized set, SubscribeAuthorizedStable converges (two agreeing reads)
+// and KEEPS the subscription -- so the authorized member gets CHANNEL_CREATE AND
+// subsequent live messages, not a one-time announcement with no follow-up
+// (Odin round-35 blocker 4). The old design rolled back on every generation move
+// and fell to a per-user announce with no persistent subscription.
+func TestChurnConvergesWithLiveDelivery(t *testing.T) {
 	h := testutil.New(t)
 	owner := h.Register("owner")
 	member := h.Register("member")
@@ -1012,27 +1012,29 @@ func TestCreateNonConvergenceStillDelivers(t *testing.T) {
 	ws := h.DialWS(member)
 	ws.Drain(400 * time.Millisecond)
 
-	def := defaultRoleID(h, owner, serverID)
-	// Toggle a member's own default-role permission every pass so revGen keeps
-	// moving and SubscribeAuthorizedStable exhausts its attempts. Keep the member
-	// authorized (ViewChannel stays set) so best-effort delivery includes them.
-	toggle := true
-	api.AfterChannelCreateSubscribeForTest = func() {
-		if toggle {
-			_ = patchRolePerms(h, owner, serverID, def, permissions.ViewChannel|permissions.SendMessages|permissions.AttachFiles)
-		} else {
-			_ = patchRolePerms(h, owner, serverID, def, permissions.ViewChannel|permissions.SendMessages)
-		}
-		toggle = !toggle
-	}
-	t.Cleanup(func() { api.AfterChannelCreateSubscribeForTest = nil })
+	// Bump the generation on every pass (authorization untouched) so the fast path
+	// never holds; convergence must come from two agreeing authorized reads.
+	api.AfterChannelCreateSubscribeForTest = func() { h.Hub.BumpReconcileGen() }
 
+	var created struct {
+		ID string `json:"id"`
+	}
 	if code := h.Request(http.MethodPost, "/api/v1/servers/"+serverID+"/channels",
-		owner.AccessToken, map[string]string{"name": "churny"}, nil); code != http.StatusCreated {
+		owner.AccessToken, map[string]string{"name": "churny"}, &created); code != http.StatusCreated {
 		t.Fatalf("create: got %d", code)
 	}
+	api.AfterChannelCreateSubscribeForTest = nil
 	if n := ws.CountEvents("CHANNEL_CREATE", 900*time.Millisecond); n != 1 {
-		t.Fatalf("best-effort delivery must still send CHANNEL_CREATE to an authorized member, got %d", n)
+		t.Fatalf("an authorized member must receive CHANNEL_CREATE, got %d", n)
+	}
+	// The load-bearing half: the subscription persisted, so a later message is
+	// delivered live (not silence until reconnect).
+	if code := h.Request(http.MethodPost, "/api/v1/channels/"+created.ID+"/messages",
+		owner.AccessToken, map[string]any{"content": "live"}, nil); code != http.StatusCreated {
+		t.Fatalf("owner send: got %d", code)
+	}
+	if n := ws.CountEvents("MESSAGE_CREATE", 900*time.Millisecond); n != 1 {
+		t.Fatalf("converged subscription must deliver live messages, got %d MESSAGE_CREATE", n)
 	}
 }
 
@@ -1059,15 +1061,14 @@ func TestRevocationEmitsChannelsStale(t *testing.T) {
 	}
 }
 
-// TestBestEffortDoesNotLeakToRevokedMember: the non-convergence best-effort path
-// must apply the same generation guard as the stability loop. A member revoked in
-// the guard window (still in the just-read authorized set, so the speculative
-// subscribe re-adds them) must be rolled back -- otherwise every later message on
-// the channel leaks to a revoked member (blocker 2, back door). We force the
-// stability loop to exhaust (bump the generation every pass, authorization
-// untouched), then revoke the member inside the best-effort guard window, and
-// prove a subsequent message never reaches their socket.
-func TestBestEffortDoesNotLeakToRevokedMember(t *testing.T) {
+// TestRevokedDuringReconcileNotSubscribed: a member whose ViewChannel is revoked
+// while the create's subscription reconcile is in flight must NOT be left
+// subscribed. The targeted reconcile drops members no longer in a fresh authorized
+// read; even if an earlier pass speculatively subscribed them, a later pass reads
+// the committed revocation and unsubscribes them. We revoke the member inside a
+// reconcile pass and prove a subsequent message never reaches their socket
+// (Odin round-35 blocker 2 -- no persistent leak).
+func TestRevokedDuringReconcileNotSubscribed(t *testing.T) {
 	h := testutil.New(t)
 	owner := h.Register("owner")
 	member := h.Register("member")
@@ -1079,23 +1080,19 @@ func TestBestEffortDoesNotLeakToRevokedMember(t *testing.T) {
 
 	def := defaultRoleID(h, owner, serverID)
 
-	// Exhaust the stability loop without touching authorization: bump the reconcile
-	// generation on every pass so it can never confirm a stable snapshot.
-	api.AfterChannelCreateSubscribeForTest = func() { h.Hub.BumpReconcileGen() }
-	t.Cleanup(func() { api.AfterChannelCreateSubscribeForTest = nil })
-
-	// Inside the best-effort guard window (member already in the read authorized
-	// set), revoke the member exactly once. The buggy path subscribes them anyway;
-	// the guard must roll it back.
+	// Inside a reconcile pass (after the authorized set was read), revoke the member
+	// exactly once. This commits the revocation and bumps the generation, so the
+	// loop takes another pass, reads the member as no-longer-authorized, and drops
+	// the speculative subscription.
 	revoked := false
-	api.AfterBestEffortAuthzReadForTest = func() {
+	api.AfterChannelCreateSubscribeForTest = func() {
 		if revoked {
+			h.Hub.BumpReconcileGen() // keep churning so the loop reconciles again
 			return
 		}
 		revoked = true
 		_ = patchRolePerms(h, owner, serverID, def, permissions.SendMessages) // drop ViewChannel
 	}
-	t.Cleanup(func() { api.AfterBestEffortAuthzReadForTest = nil })
 
 	var created struct {
 		ID string `json:"id"`
@@ -1104,11 +1101,12 @@ func TestBestEffortDoesNotLeakToRevokedMember(t *testing.T) {
 		owner.AccessToken, map[string]string{"name": "leaky"}, &created); code != http.StatusCreated {
 		t.Fatalf("create: got %d", code)
 	}
+	api.AfterChannelCreateSubscribeForTest = nil
 	if created.ID == "" {
 		t.Fatal("create did not return a channel id")
 	}
 	if !revoked {
-		t.Fatal("best-effort guard window never ran; test did not exercise the fallback")
+		t.Fatal("reconcile seam never ran; test did not exercise the revoke race")
 	}
 	ws.Drain(300 * time.Millisecond) // absorb any CHANNEL_CREATE / CHANNELS_STALE
 
@@ -1123,14 +1121,13 @@ func TestBestEffortDoesNotLeakToRevokedMember(t *testing.T) {
 	}
 }
 
-// TestBestEffortDeletedInWindowEmitsNoPhantom: if the channel is DELETED inside
-// the best-effort guard window, the degraded floor must not broadcast a phantom
-// CHANNEL_CREATE for a gone channel. authorizedMemberIDs is server-scoped and
-// still returns members for a deleted channel, so without an existence re-check
-// the floor would emit a create that never self-heals (members kept ViewChannel,
-// so no CHANNELS_STALE). We force non-convergence, delete the row in the guard
-// window, and prove no CHANNEL_CREATE reaches the member.
-func TestBestEffortDeletedInWindowEmitsNoPhantom(t *testing.T) {
+// TestDeletedDuringReconcileNoCreate: if the channel is DELETED while the create's
+// subscription reconcile is in flight, the next pass reads it as gone, rolls back
+// the speculative subscriptions, and the caller broadcasts nothing -- no phantom
+// CHANNEL_CREATE for a confirmed-absent row (Odin round-35 blocker 3). Delivery is
+// to the live hub set (empty after rollback), and the existence read short-circuits
+// the broadcast, so the phantom is prevented structurally rather than by a floor.
+func TestDeletedDuringReconcileNoCreate(t *testing.T) {
 	h := testutil.New(t)
 	owner := h.Register("owner")
 	member := h.Register("member")
@@ -1140,15 +1137,13 @@ func TestBestEffortDeletedInWindowEmitsNoPhantom(t *testing.T) {
 	ws := h.DialWS(member)
 	ws.Drain(400 * time.Millisecond)
 
-	// Exhaust the stability loop (bump every pass, authorization untouched).
-	api.AfterChannelCreateSubscribeForTest = func() { h.Hub.BumpReconcileGen() }
-	t.Cleanup(func() { api.AfterChannelCreateSubscribeForTest = nil })
-
-	// Inside the best-effort guard window, delete the channel row and move the
-	// generation exactly once: the floor must detect the delete and stay silent.
+	// Inside a reconcile pass, delete the channel row and bump the generation once:
+	// the next pass's existence read returns false, so the subscribe rolls back and
+	// no CHANNEL_CREATE is broadcast.
 	deleted := false
-	api.AfterBestEffortAuthzReadForTest = func() {
+	api.AfterChannelCreateSubscribeForTest = func() {
 		if deleted {
+			h.Hub.BumpReconcileGen()
 			return
 		}
 		deleted = true
@@ -1156,16 +1151,16 @@ func TestBestEffortDeletedInWindowEmitsNoPhantom(t *testing.T) {
 			`DELETE FROM channels WHERE server_id = $1::uuid AND name = $2`, serverID, "ghost")
 		h.Hub.BumpReconcileGen()
 	}
-	t.Cleanup(func() { api.AfterBestEffortAuthzReadForTest = nil })
+	t.Cleanup(func() { api.AfterChannelCreateSubscribeForTest = nil })
 
 	if code := h.Request(http.MethodPost, "/api/v1/servers/"+serverID+"/channels",
 		owner.AccessToken, map[string]string{"name": "ghost"}, nil); code != http.StatusCreated {
 		t.Fatalf("create: got %d", code)
 	}
 	if !deleted {
-		t.Fatal("best-effort guard window never ran; test did not exercise the fallback")
+		t.Fatal("reconcile seam never ran; test did not exercise the delete race")
 	}
 	if n := ws.CountEvents("CHANNEL_CREATE", 800*time.Millisecond); n != 0 {
-		t.Fatalf("a channel deleted in the best-effort window must emit no phantom CHANNEL_CREATE, got %d", n)
+		t.Fatalf("a channel deleted during reconcile must emit no phantom CHANNEL_CREATE, got %d", n)
 	}
 }

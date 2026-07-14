@@ -274,49 +274,107 @@ func (h *Hub) unsubscribeUserFromChannel(userID, channelID uuid.UUID) {
 	}
 }
 
-// UnsubscribeUserFromChannel rolls back a speculative subscribe from OUTSIDE the
-// hub package (the channel-create best-effort path) WITHOUT bumping the reconcile
-// generation -- undoing our own optimistic add is not a revocation and must not
-// disturb other in-flight revalidations. Callers that need concurrent connects to
-// re-read after an abort bump the generation themselves (BumpReconcileGen).
-func (h *Hub) UnsubscribeUserFromChannel(userID, channelID uuid.UUID) {
-	h.unsubscribeUserFromChannel(userID, channelID)
+// sameUUIDSet reports whether two id slices contain the same set of ids (order-
+// insensitive). Used to detect that authorization membership is UNCHANGED across
+// two reads even though the reconcile generation moved. Its inputs come from
+// authorizedMemberIDs, which returns DISTINCT user ids (unique sm.user_id), so the
+// len-plus-one-direction check is exact here; it is not a general multiset compare.
+func sameUUIDSet(a, b []uuid.UUID) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[uuid.UUID]struct{}, len(a))
+	for _, id := range a {
+		set[id] = struct{}{}
+	}
+	for _, id := range b {
+		if _, ok := set[id]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // SubscribeAuthorizedStable installs a freshly-created channel's subscriptions
-// against a MOVING world. Revocations (UnsubscribeUser) and the channel's own
-// deletion (RemoveChannel) both bump the reconcile generation, so this samples
-// the generation, reads the authorized set, subscribes, and re-checks: if the
-// generation moved, a revocation or a delete raced the read, so it rolls back
-// its additions and retries. It returns the CONFIRMED recipient set only after a
-// stable pass; (nil, false, nil) if the channel no longer exists (caller must
-// broadcast nothing); or ErrConnectUnstable if it cannot converge. The
-// convergent path is self-healing (the successful pass re-subscribes). The rare
-// rollback CAN strip a subscription a concurrent connect/join legitimately
-// installed for this already-committed channel, so the ABORT paths must bump the
-// reconcile generation (the caller does, via RemoveChannel) to force those
-// clients to re-read and reinstall.
-func (h *Hub) SubscribeAuthorizedStable(channelID uuid.UUID, read func() (ids []uuid.UUID, exists bool, err error)) ([]uuid.UUID, bool, error) {
+// against a MOVING world. Revocations (UnsubscribeUser), the channel's own
+// deletion (RemoveChannel), and grants (BumpReconcileGen) all move the reconcile
+// generation. This reconciles the hub subscription to the authorized set,
+// re-reading until it is CONSISTENT with a committed snapshot:
+//
+//   - FAST PATH: the generation held across [read..subscribe] -- nothing raced,
+//     the hub matches the authorized set exactly (one read).
+//   - SET-STABLE PATH: the generation moved, but two consecutive authorized reads
+//     AGREE -- membership is stable, so the move was a grant/spurious bump or a
+//     revoke+regrant that netted out, not a membership change we missed.
+//   - EXHAUSTION: authorization never stabilized within connectMaxAttempts (a
+//     genuine revocation flood -- in practice unreachable). We KEEP the last
+//     reconciled subscription best-effort; the caller still delivers to the LIVE
+//     hub set. (Under set-stable/exhaustion the hub can briefly lag the internal
+//     bookkeeping in the SAFE direction -- offline/just-revoked ids stay in the
+//     map but not the hub -- so delivery, which reads only the hub, cannot leak.)
+//
+// The caller ALWAYS delivers via BroadcastToChannel (the live subscription set
+// under the hub lock), so a revocation landing after this returns is excluded by
+// its own synchronous UnsubscribeUser, and a member whose revocation is committed
+// but whose UnsubscribeUser is still pending is cleaned up by that revocation's
+// reconcile (which reads the now-committed channel list) and reconciled on the
+// client by CHANNELS_STALE -- never a persistent leak. Unlike the prior design it
+// never rolls back live subscriptions on churn (that dropped live delivery) and
+// never returns a non-convergence error (delivery is identical either way).
+//
+// It deliberately returns NO recipient set: delivery is the live hub set, never a
+// captured slice, so a caller CANNOT reintroduce the leak by fanning out to a
+// stale list. Returns (exists, err): exists=false (channel gone) -> caller
+// broadcasts nothing; the speculative subscriptions are rolled back first.
+func (h *Hub) SubscribeAuthorizedStable(channelID uuid.UUID, read func() (ids []uuid.UUID, exists bool, err error)) (bool, error) {
+	subscribed := make(map[uuid.UUID]struct{})
+	rollback := func() {
+		for uid := range subscribed {
+			h.unsubscribeUserFromChannel(uid, channelID)
+		}
+	}
+	var prev []uuid.UUID
+	havePrev := false
 	for i := 0; i < connectMaxAttempts; i++ {
 		gen := h.ReconcileGen()
 		ids, exists, err := read()
 		if err != nil {
-			return nil, false, err
+			rollback()
+			return false, err
 		}
 		if !exists {
-			return nil, false, nil
+			rollback()
+			return false, nil
 		}
+		// Targeted reconcile: add newly-authorized, drop no-longer-authorized, so
+		// the hub tracks the latest read without a full teardown between passes.
+		want := make(map[uuid.UUID]struct{}, len(ids))
 		for _, uid := range ids {
-			h.SubscribeUser(uid, channelID)
+			want[uid] = struct{}{}
 		}
+		for uid := range want {
+			if _, ok := subscribed[uid]; !ok {
+				h.SubscribeUser(uid, channelID)
+			}
+		}
+		for uid := range subscribed {
+			if _, ok := want[uid]; !ok {
+				h.unsubscribeUserFromChannel(uid, channelID)
+			}
+		}
+		subscribed = want
 		if h.ReconcileGen() == gen {
-			return ids, true, nil // stable: no revocation or delete raced
+			return true, nil // fast path: nothing raced
 		}
-		for _, uid := range ids {
-			h.unsubscribeUserFromChannel(uid, channelID)
+		if havePrev && sameUUIDSet(prev, ids) {
+			return true, nil // set-stable: membership unchanged across reads
 		}
+		prev = ids
+		havePrev = true
 	}
-	return nil, false, ErrConnectUnstable
+	// Exhausted (unreachable outside an adversarial revocation flood): the last
+	// reconcile stands; deliver best-effort to the live hub set.
+	return true, nil
 }
 
 // BumpReconcileGen advances the reconcile generation to signal an authorization

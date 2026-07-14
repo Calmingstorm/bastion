@@ -172,8 +172,16 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
       // authoritative count, win regardless of completion order.
       const apply = (list: ReadState[]) => {
         const existing = list.find((r) => r.channelId === channelId);
+        // >= (not >): on an EQUAL watermark the EXISTING state wins, so an ack
+        // carries no authority to REGRESS mention state at a watermark it did not
+        // advance. Two acks for the same last-read message can compute different
+        // counts (a mention landed above the watermark between the server reads);
+        // the stale lower-count response, settling last, must not overwrite the
+        // fresher count the client already holds (from the newer ack or the
+        // mention's own NOTIFICATION-driven +1). Only a strictly higher watermark
+        // -- genuine progress -- or an authoritative fetch may lower the count.
         const winner =
-          existing && (existing.lastReadSeq ?? -1) > (committed.lastReadSeq ?? -1)
+          existing && (existing.lastReadSeq ?? -1) >= (committed.lastReadSeq ?? -1)
             ? existing
             : committed;
         return [winner, ...list.filter((r) => r.channelId !== channelId)];
