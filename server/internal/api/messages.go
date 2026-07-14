@@ -353,7 +353,7 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 		// Get the created_at of the cursor message
 		var cursorTime time.Time
 		err = h.db.QueryRow(r.Context(),
-			`SELECT created_at FROM messages WHERE id = $1`, beforeID,
+			`SELECT created_at FROM messages WHERE id = $1 AND channel_id = $2`, beforeID, channelID,
 		).Scan(&cursorTime)
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "cursor message not found"))
@@ -364,9 +364,14 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Keyset pagination on (created_at, id): a plain created_at comparison
+		// SKIPS messages that share the cursor's exact timestamp (they are not
+		// strictly older, and were cut from the prior page by LIMIT), and ties
+		// make the order unstable across pages. The row comparison
+		// (a, b) < (c, d) is a < c OR (a = c AND b < d) -- an exact keyset.
 		rows, err = h.db.Query(r.Context(),
-			baseQuery+` AND m.created_at < $2 ORDER BY m.created_at DESC LIMIT $3`,
-			channelID, cursorTime, limit,
+			baseQuery+` AND (m.created_at, m.id) < ($2, $3) ORDER BY m.created_at DESC, m.id DESC LIMIT $4`,
+			channelID, cursorTime, beforeID, limit,
 		)
 		if err != nil {
 			log.Error().Err(err).Msg("failed to list messages")
@@ -375,7 +380,7 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		rows, err = h.db.Query(r.Context(),
-			baseQuery+` ORDER BY m.created_at DESC LIMIT $2`,
+			baseQuery+` ORDER BY m.created_at DESC, m.id DESC LIMIT $2`,
 			channelID, limit,
 		)
 		if err != nil {
@@ -470,6 +475,45 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 				if reactions, ok := reactionMap[messages[i].ID]; ok {
 					messages[i].Reactions = reactions
 				}
+			}
+		}
+
+		// Bulk-fetch attachments (mirrors the reactions fetch above). Without
+		// this, attachments were absent from every List/pagination response and
+		// only arrived via realtime MESSAGE_CREATE -- so any reload or history
+		// scroll showed attachment messages without their attachments.
+		attachmentRows, err := h.db.Query(r.Context(),
+			`SELECT id, message_id, filename, stored_name, content_type, size, url, created_at
+			 FROM attachments WHERE message_id = ANY($1)
+			 ORDER BY message_id ASC, position ASC, id ASC`,
+			messageIDs,
+		)
+		if err != nil {
+			log.Error().Err(err).Msg("failed to list attachments for messages")
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+			return
+		}
+		defer attachmentRows.Close()
+
+		attachmentMap := make(map[uuid.UUID][]models.Attachment)
+		for attachmentRows.Next() {
+			var att models.Attachment
+			if err := attachmentRows.Scan(&att.ID, &att.MessageID, &att.Filename, &att.StoredName,
+				&att.ContentType, &att.Size, &att.URL, &att.CreatedAt); err != nil {
+				log.Error().Err(err).Msg("failed to scan attachment for message list")
+				writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+				return
+			}
+			attachmentMap[att.MessageID] = append(attachmentMap[att.MessageID], att)
+		}
+		if err := attachmentRows.Err(); err != nil {
+			log.Error().Err(err).Msg("failed to read attachments for message list")
+			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+			return
+		}
+		for i := range messages {
+			if attachments, ok := attachmentMap[messages[i].ID]; ok {
+				messages[i].Attachments = attachments
 			}
 		}
 	}
