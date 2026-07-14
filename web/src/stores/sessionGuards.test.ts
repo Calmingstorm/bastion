@@ -176,6 +176,62 @@ describe('session-boundary guards', () => {
     await expect(p).rejects.toBeInstanceOf(SessionSupersededError);
   });
 
+  // F38 round 19: same-session request/resource ownership in the core stores.
+  it('concurrent selectServer calls leave the LAST selection with ITS channels', async () => {
+    useServerStore.setState({ servers: [], selectedServerId: null, channels: [] });
+    const dA = deferred<Channel[]>();
+    const dB = deferred<Channel[]>();
+    vi.mocked(client.apiGetChannels)
+      .mockReturnValueOnce(dA.promise)
+      .mockReturnValueOnce(dB.promise);
+    vi.mocked(client.apiGetMemberPermissions).mockResolvedValue({ permissions: 0 });
+
+    const pA = useServerStore.getState().selectServer('srv-a');
+    const pB = useServerStore.getState().selectServer('srv-b');
+    dB.resolve([{ id: 'chan-b', name: 'b', serverId: 'srv-b', position: 0 } as Channel]);
+    await pB;
+    dA.resolve([{ id: 'chan-a', name: 'a', serverId: 'srv-a', position: 0 } as Channel]); // older settles last
+    await pA;
+
+    expect(useServerStore.getState().selectedServerId).toBe('srv-b');
+    expect(useServerStore.getState().channels.map((c) => c.id)).toEqual(['chan-b']); // never A's
+    useServerStore.getState().reset();
+  });
+
+  it('a channel created for a previous server is not appended or selected after switching', async () => {
+    useServerStore.setState({ servers: [], selectedServerId: 'srv-a', channels: [], selectedChannelId: null });
+    const d = deferred<Channel>();
+    vi.mocked(client.apiCreateChannel).mockReturnValue(d.promise);
+
+    const p = useServerStore.getState().createChannel('srv-a', 'general');
+    useServerStore.setState({ selectedServerId: 'srv-b', channels: [], selectedChannelId: null }); // user switches
+    d.resolve({ id: 'chan-a', name: 'general', serverId: 'srv-a', position: 0 } as Channel);
+    await p; // resolves normally: the create succeeded, on server A
+
+    expect(useServerStore.getState().channels).toEqual([]); // not appended under B
+    expect(useServerStore.getState().selectedChannelId).toBeNull(); // not selected under B
+    useServerStore.getState().reset();
+  });
+
+  it('an older fetchDMs response cannot overwrite a newer snapshot', async () => {
+    useDMStore.setState({ dmChannels: [] });
+    const dOld = deferred<DMChannel[]>();
+    const dNew = deferred<DMChannel[]>();
+    vi.mocked(client.apiGetDMs)
+      .mockReturnValueOnce(dOld.promise)
+      .mockReturnValueOnce(dNew.promise);
+
+    const pOld = useDMStore.getState().fetchDMs();
+    const pNew = useDMStore.getState().fetchDMs();
+    dNew.resolve([{ id: 'dm-new' } as DMChannel]);
+    await pNew;
+    dOld.resolve([{ id: 'dm-old' } as DMChannel]); // older settles last
+    await pOld;
+
+    expect(useDMStore.getState().dmChannels.map((d2) => d2.id)).toEqual(['dm-new']);
+    useDMStore.getState().reset();
+  });
+
   // F38 round 11: overlapping startup validations share one generation (React
   // StrictMode double-effects), so recency must order them -- an OLDER validation
   // failing after a newer one succeeded must not log the validated session out.

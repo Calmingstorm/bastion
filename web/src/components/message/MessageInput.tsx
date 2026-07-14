@@ -69,6 +69,9 @@ export function MessageInput() {
   // Fetch members when server changes
   useEffect(() => {
     if (!selectedServerId) {
+      // Empty scope invalidates outstanding reads too: claim the lineage so a
+      // held old-server response cannot repopulate the cleared list.
+      membersSeqRef.current += 1;
       setMembers([]);
       return;
     }

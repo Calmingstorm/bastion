@@ -147,7 +147,14 @@ export function ChannelList() {
 
   const categoriesSeqRef = useRef(0);
   const fetchCategories = useCallback(() => {
-    if (!selectedServerId) return;
+    if (!selectedServerId) {
+      // Empty scope invalidates outstanding reads: a held old-server response
+      // must not repopulate the (cleared) categories. (Post-round-18 the zombie
+      // state is also invisible -- the clear-on-change wipes it at any re-scope --
+      // so this claim closes the latent state rather than a visible defect.)
+      categoriesSeqRef.current += 1;
+      return;
+    }
     // Owned by session AND recency: a fetch settling after an identity boundary
     // must not populate the new session's UI, and an OLDER fetch settling after a
     // newer one must not overwrite its categories.
@@ -240,16 +247,17 @@ export function ChannelList() {
     }
     const generation = captureSessionGeneration();
     const serverIdAtStart = selectedServerId;
+    const stillOurs = () => isSessionGenerationCurrent(generation)
+      && useServerStore.getState().selectedServerId === serverIdAtStart;
     try {
       await apiUpdateCategory(selectedServerId, catId, { name: trimmed });
-      if (isSessionGenerationCurrent(generation)
-        && useServerStore.getState().selectedServerId === serverIdAtStart) {
-        fetchCategories();
-      }
+      if (stillOurs()) fetchCategories();
     } catch {
       // silently fail
     }
-    setEditingCategoryId(null);
+    // Local editing state is scope-owned too: after a switch, this continuation
+    // must not dismiss editing state belonging to the NEW scope.
+    if (stillOurs()) setEditingCategoryId(null);
   };
 
   const handleDeleteCategory = async () => {
@@ -257,12 +265,13 @@ export function ChannelList() {
     setIsDeletingCategory(true); // locks the dialog so it can't be dismissed mid-request
     const generation = captureSessionGeneration();
     const serverIdAtStart = selectedServerId;
+    const stillOurs = () => isSessionGenerationCurrent(generation)
+      && useServerStore.getState().selectedServerId === serverIdAtStart;
     try {
       await apiDeleteCategory(selectedServerId, deletingCategoryId);
       // A stale delete completing must not refetch into -- or reselect within --
       // the NEW session or a DIFFERENT server scope.
-      if (isSessionGenerationCurrent(generation)
-        && useServerStore.getState().selectedServerId === serverIdAtStart) {
+      if (stillOurs()) {
         fetchCategories();
         // Channels in deleted category become uncategorized — refetch channels
         useServerStore.getState().selectServer(selectedServerId);
@@ -270,8 +279,12 @@ export function ChannelList() {
     } catch {
       // silently fail
     }
-    setIsDeletingCategory(false);
-    setDeletingCategoryId(null);
+    // Deletion/pending state is scope-owned: after a switch, this continuation
+    // must not dismiss a deletion dialog the user opened in the NEW scope.
+    if (stillOurs()) {
+      setIsDeletingCategory(false);
+      setDeletingCategoryId(null);
+    }
   };
 
   const handleEditCategoryKeyDown = (e: KeyboardEvent<HTMLInputElement>, catId: string) => {

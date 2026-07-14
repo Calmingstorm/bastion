@@ -10,12 +10,14 @@ let confirmProps: {
   returnFocusRef?: RefObject<HTMLElement | null>;
   isPending?: boolean;
   onConfirm?: () => void;
+  open?: boolean;
 } | null = null;
 vi.mock('../ui/ConfirmDialog', () => ({
   ConfirmDialog: (props: {
     returnFocusRef?: RefObject<HTMLElement | null>;
     isPending?: boolean;
     onConfirm?: () => void;
+    open?: boolean;
   }) => {
     confirmProps = props;
     return null;
@@ -185,5 +187,53 @@ describe('ChannelList category server scope', () => {
     expect(vi.mocked(api.apiGetCategories).mock.calls.length).toBe(callsAfterSwitch);
     expect(callsAfterSwitch).toBeGreaterThan(callsBefore); // sanity: B did fetch
     expect(useServerStore.getState().selectedServerId).toBe('s2');
+  });
+});
+
+// F38 round 19: empty scope invalidates outstanding reads, and old-scope mutation
+// continuations must not dismiss the NEW scope's local dialog state.
+describe('ChannelList empty-scope and continuation safety', () => {
+  it('an old-server delete continuation does not dismiss the new scope deletion dialog', async () => {
+    confirmProps = null;
+    useAuthStore.setState({ user: { id: 'owner-1' } as never });
+    useServerStore.setState({
+      servers: [
+        { id: 's1', name: 'S1', ownerId: 'owner-1' } as Server,
+        { id: 's2', name: 'S2', ownerId: 'owner-1' } as Server,
+      ],
+      selectedServerId: 's1',
+      channels: [],
+    });
+    const api = await import('../../api/client');
+    vi.mocked(api.apiGetCategories).mockResolvedValue([{ id: 'cat-x', name: 'ACat', position: 0 }] as never);
+    let resolveDelete!: () => void;
+    vi.mocked(api.apiDeleteCategory).mockImplementation(
+      () => new Promise<void>((res) => { resolveDelete = () => res(); }) as never
+    );
+    const user = userEvent.setup();
+    render(<ChannelList />);
+    // Open A's category delete and start it (held).
+    fireEvent.contextMenu(await screen.findByRole('button', { name: /ACat/ }));
+    await user.click(await screen.findByText('Delete Category'));
+    await waitFor(() => expect(confirmProps?.onConfirm).toBeTruthy());
+    await act(async () => {
+      confirmProps!.onConfirm!();
+    });
+
+    await act(async () => {
+      useServerStore.setState({ selectedServerId: 's2' }); // switch to B (categories reload)
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    // The user opens B's deletion dialog (same shared dialog, new scope).
+    fireEvent.contextMenu(await screen.findByRole('button', { name: /ACat/ }));
+    await user.click(await screen.findByText('Delete Category'));
+    await waitFor(() => expect(confirmProps!.open).toBe(true));
+
+    await act(async () => {
+      resolveDelete(); // A's delete settles under B
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(confirmProps!.open).toBe(true); // B's dialog was NOT dismissed
   });
 });

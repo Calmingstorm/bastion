@@ -16,6 +16,9 @@ interface DMState {
   reset: () => void;
 }
 
+// Recency for the DM list: an older fetch must not overwrite a newer snapshot.
+let fetchDMsSeq = 0;
+
 export const useDMStore = create<DMState>((set) => ({
   dmChannels: [],
   selectedDMId: null,
@@ -24,13 +27,15 @@ export const useDMStore = create<DMState>((set) => ({
 
   fetchDMs: async () => {
     const generation = captureSessionGeneration();
+    const seq = ++fetchDMsSeq;
+    const owns = () => seq === fetchDMsSeq && isSessionGenerationCurrent(generation);
     set({ isLoading: true, error: null });
     try {
       const channels = await apiGetDMs();
-      if (!isSessionGenerationCurrent(generation)) return;
+      if (!owns()) return;
       set({ dmChannels: Array.isArray(channels) ? channels : [], isLoading: false });
     } catch {
-      if (!isSessionGenerationCurrent(generation)) return;
+      if (!owns()) return;
       set({ isLoading: false, error: 'Failed to load DMs' });
     }
   },

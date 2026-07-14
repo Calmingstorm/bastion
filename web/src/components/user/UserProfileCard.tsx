@@ -193,8 +193,10 @@ function ModActions({ serverId, userId, onDone }: { serverId: string; userId: st
   const pickerRef = useRef<HTMLDivElement>(null);
   // Track the current target: the card is REUSED across (server, user) targets, so
   // a completion for a previous target must not close the current target's card.
+  // Updated DURING RENDER (latest-prop mirror) -- a passive effect leaves a
+  // post-render/pre-effect stale window.
   const targetRef = useRef({ serverId, userId });
-  useEffect(() => { targetRef.current = { serverId, userId }; }, [serverId, userId]);
+  targetRef.current = { serverId, userId };
   const sameTarget = () =>
     targetRef.current.serverId === serverId && targetRef.current.userId === userId;
 

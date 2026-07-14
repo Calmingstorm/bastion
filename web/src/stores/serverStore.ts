@@ -39,6 +39,11 @@ interface ServerState {
   reset: () => void;
 }
 
+// One recency lineage for the (selectedServerId, channels) resource: fetchServers'
+// auto-select branch and selectServer both write it, so they share the counter --
+// whichever starts LAST owns the resource, and an older continuation (e.g.
+// selectServer(A) settling after selectServer(B)) commits nothing.
+let serverScopeSeq = 0;
 export const useServerStore = create<ServerState>((set, get) => ({
   servers: [],
   selectedServerId: null,
@@ -51,11 +56,15 @@ export const useServerStore = create<ServerState>((set, get) => ({
   fetchServers: async () => {
     // Capture the session at entry; after every await, bail if an identity
     // boundary has passed so a late response never writes the old account's data.
+    // Claim the scope lineage too: this call's channel-writes are superseded by
+    // any later selectServer/fetchServers.
     const generation = captureSessionGeneration();
+    const seq = ++serverScopeSeq;
+    const owns = () => seq === serverScopeSeq && isSessionGenerationCurrent(generation);
     set({ isLoadingServers: true, error: null });
     try {
       const rawServers = await apiGetServers();
-      if (!isSessionGenerationCurrent(generation)) return;
+      if (!owns()) return;
       const servers = Array.isArray(rawServers) ? rawServers : [];
 
       // If no server is selected and we have servers, merge server list +
@@ -77,7 +86,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
         // Fetch channels for the auto-selected server
         try {
           const rawChannels = await apiGetChannels(servers[0].id);
-          if (!isSessionGenerationCurrent(generation)) return;
+          if (!owns()) return;
           const sorted = (Array.isArray(rawChannels) ? rawChannels : []).sort((a, b) => a.position - b.position);
           set({
             channels: sorted,
@@ -85,21 +94,25 @@ export const useServerStore = create<ServerState>((set, get) => ({
             selectedChannelId: sorted.length > 0 ? sorted[0].id : null,
           });
         } catch {
-          if (!isSessionGenerationCurrent(generation)) return;
+          if (!owns()) return;
           set({ isLoadingChannels: false });
         }
       } else {
         set({ servers, isLoadingServers: false });
       }
     } catch (err: unknown) {
-      if (!isSessionGenerationCurrent(generation)) return;
+      if (!owns()) return;
       const message = extractErrorMessage(err, 'Failed to load servers.');
       set({ isLoadingServers: false, error: message });
     }
   },
 
   selectServer: async (id: string) => {
+    // Owned by session AND scope recency: concurrent selectServer(A)/selectServer(B)
+    // must leave the LAST selection's channels, never B selected with A's channels.
     const generation = captureSessionGeneration();
+    const seq = ++serverScopeSeq;
+    const owns = () => seq === serverScopeSeq && isSessionGenerationCurrent(generation);
     set({
       selectedServerId: id,
       selectedChannelId: null,
@@ -111,7 +124,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
     usePermissionStore.getState().fetchPermissions(id);
     try {
       const rawChannels = await apiGetChannels(id);
-      if (!isSessionGenerationCurrent(generation)) return;
+      if (!owns()) return;
       const sorted = (Array.isArray(rawChannels) ? rawChannels : []).sort((a, b) => a.position - b.position);
       // Merge channels + auto-select into a single state update
       set({
@@ -120,7 +133,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
         selectedChannelId: sorted.length > 0 ? sorted[0].id : null,
       });
     } catch (err: unknown) {
-      if (!isSessionGenerationCurrent(generation)) return;
+      if (!owns()) return;
       const message = extractErrorMessage(err, 'Failed to load channels.');
       set({ isLoadingChannels: false, error: message });
     }
@@ -162,6 +175,10 @@ export const useServerStore = create<ServerState>((set, get) => ({
     try {
       const channel = await apiCreateChannel(serverId, name, topic, categoryId);
       if (!isSessionGenerationCurrent(generation)) throw new SessionSupersededError();
+      // Scope check: the channel was created on `serverId`. If the user has since
+      // switched servers, the create SUCCEEDED (resolve normally) but it must not
+      // be appended to -- or selected within -- the new server's state.
+      if (get().selectedServerId !== serverId) return;
       set((state) => ({
         channels: [...state.channels, channel].sort(
           (a, b) => a.position - b.position

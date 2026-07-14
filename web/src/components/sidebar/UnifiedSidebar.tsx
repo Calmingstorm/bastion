@@ -94,7 +94,11 @@ export function UnifiedSidebar() {
 
   const categoriesSeqRef = useRef(0);
   const fetchCategories = useCallback(() => {
-    if (!expandedServerId) return;
+    if (!expandedServerId) {
+      // Empty scope (collapsed) invalidates outstanding reads too.
+      categoriesSeqRef.current += 1;
+      return;
+    }
     // Owned by session AND recency: a fetch settling after an identity boundary
     // must not populate the new session's sidebar, and an OLDER fetch settling
     // after a newer one must not overwrite its categories.
@@ -108,8 +112,10 @@ export function UnifiedSidebar() {
   }, [expandedServerId]);
 
   // Track the current expanded server for scope checks in mutation continuations.
+  // Updated DURING RENDER (latest-prop mirror) -- a passive effect leaves a
+  // post-render/pre-effect stale window.
   const expandedServerIdRef = useRef(expandedServerId);
-  useEffect(() => { expandedServerIdRef.current = expandedServerId; }, [expandedServerId]);
+  expandedServerIdRef.current = expandedServerId;
 
   // Fetch categories when expanded server changes -- clearing FIRST, so server A's
   // categories are never displayed under server B (even if B's fetch fails).
@@ -163,13 +169,13 @@ export function UnifiedSidebar() {
     }
     const generation = captureSessionGeneration();
     const serverIdAtStart = expandedServerId;
+    const stillOurs = () => isSessionGenerationCurrent(generation)
+      && expandedServerIdRef.current === serverIdAtStart;
     try {
       await apiUpdateCategory(expandedServerId, catId, { name: trimmed });
-      if (isSessionGenerationCurrent(generation) && expandedServerIdRef.current === serverIdAtStart) {
-        fetchCategories();
-      }
+      if (stillOurs()) fetchCategories();
     } catch { /* silently fail */ }
-    setEditingCategoryId(null);
+    if (stillOurs()) setEditingCategoryId(null);
   };
 
   const handleDeleteCategory = async () => {
@@ -177,17 +183,21 @@ export function UnifiedSidebar() {
     setIsDeletingCategory(true); // locks the dialog so it can't be dismissed mid-request
     const generation = captureSessionGeneration();
     const serverIdAtStart = expandedServerId;
+    const stillOurs = () => isSessionGenerationCurrent(generation)
+      && expandedServerIdRef.current === serverIdAtStart;
     try {
       await apiDeleteCategory(expandedServerId, deletingCategoryId);
       // A stale delete completing must not refetch into -- or reselect within --
       // the NEW session or a DIFFERENT server scope.
-      if (isSessionGenerationCurrent(generation) && expandedServerIdRef.current === serverIdAtStart) {
+      if (stillOurs()) {
         fetchCategories();
         useServerStore.getState().selectServer(expandedServerId);
       }
     } catch { /* silently fail */ }
-    setIsDeletingCategory(false);
-    setDeletingCategoryId(null);
+    if (stillOurs()) {
+      setIsDeletingCategory(false);
+      setDeletingCategoryId(null);
+    }
   };
 
   const handleEditCategoryKeyDown = (e: KeyboardEvent<HTMLInputElement>, catId: string) => {

@@ -16,9 +16,12 @@ interface PinnedMessagesProps {
 export function PinnedMessages({ open, onOpenChange, channelId }: PinnedMessagesProps) {
   const [pins, setPins] = useState<PinnedMessage[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  // Track the current channel for scope checks in mutation continuations.
+  // Track the current channel for scope checks in mutation continuations. Updated
+  // DURING RENDER (the sanctioned latest-prop mirror), not in a passive effect --
+  // an effect leaves a post-render/pre-effect window where a continuation would
+  // compare against the stale value and wrongly commit.
   const channelIdRef = useRef(channelId);
-  useEffect(() => { channelIdRef.current = channelId; }, [channelId]);
+  channelIdRef.current = channelId;
   // Only the LATEST fetch owns the pins and loading flag -- across session
   // boundaries AND channel switches (the effect refetches on channelId change,
   // claiming a new sequence, which supersedes reads and mutation continuations
