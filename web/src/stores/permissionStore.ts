@@ -11,14 +11,23 @@ interface PermissionState {
   reset: () => void;
 }
 
+// Bumped by reset(): a fetch held across reset() must not repopulate the cleared
+// store when it settles, auth generation aside (the same contract the lineage
+// stores honor). Keyed single-value writes need no reconciling journal -- a
+// stale response only ever writes its own server's key -- so an epoch is the
+// whole requirement.
+let permissionEpoch = 0;
+
 export const usePermissionStore = create<PermissionState>((set, get) => ({
   permissions: {},
 
   fetchPermissions: async (serverId: string) => {
     const generation = captureSessionGeneration();
+    const epoch = permissionEpoch;
     try {
       const { permissions: perms } = await apiGetMemberPermissions(serverId);
       if (!isSessionGenerationCurrent(generation)) return;
+      if (epoch !== permissionEpoch) return; // reset() intervened
       set((state) => ({
         permissions: { ...state.permissions, [serverId]: perms },
       }));
@@ -35,6 +44,7 @@ export const usePermissionStore = create<PermissionState>((set, get) => ({
   },
 
   reset: () => {
+    permissionEpoch += 1;
     set({ permissions: {} });
   },
 }));

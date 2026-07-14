@@ -1013,6 +1013,18 @@ describe('session-boundary guards', () => {
     useUnreadStore.getState().reset();
   });
 
+  it('permissionStore reset invalidates a held permissions fetch', async () => {
+    usePermissionStore.setState({ permissions: {} });
+    const dPerm = deferred<{ permissions: number }>();
+    vi.mocked(client.apiGetMemberPermissions).mockReturnValue(dPerm.promise);
+    const pPerm = usePermissionStore.getState().fetchPermissions('srv-p');
+    usePermissionStore.getState().reset(); // same auth generation
+    dPerm.resolve({ permissions: 8 });
+    await pPerm;
+    expect(usePermissionStore.getState().permissions).toEqual({}); // not repopulated
+    usePermissionStore.getState().reset();
+  });
+
   it('reset invalidates lineage-owned requests: a held fetch cannot repopulate the cleared store', async () => {
     useServerStore.setState({ servers: [], selectedServerId: 'srv-keep', channels: [] });
     useDMStore.setState({ dmChannels: [] });
