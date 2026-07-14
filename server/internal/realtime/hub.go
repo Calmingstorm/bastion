@@ -328,11 +328,19 @@ func (h *Hub) SubscribeAuthorizedStable(channelID uuid.UUID, read func() (ids []
 		gen := h.ReconcileGen()
 		ids, exists, err := read()
 		if err != nil {
-			h.RemoveChannel(channelID) // fail closed on an indeterminate set
+			// Do NOT tear down the channel's subscriptions on a transient read
+			// error: the row is committed and any users a concurrent connect
+			// subscribed are authorized (connects only subscribe viewable
+			// channels), so dropping them would strand already-connected members
+			// until they reconnect. Return the error; the caller broadcasts nothing
+			// and the client self-heals on its next channel-list fetch. (Under the
+			// create fence this is a pass-0 error with nothing yet subscribed by us;
+			// the multi-pass fallback preserves the last authorized read's
+			// subscriptions, reconciled on the next authorization change.)
 			return false, err
 		}
 		if !exists {
-			h.RemoveChannel(channelID)
+			h.RemoveChannel(channelID) // channel is gone: drop its subscriptions
 			return false, nil
 		}
 		// Reconcile the ENTIRE live set, not merely users added by this call. A
