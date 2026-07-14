@@ -47,12 +47,30 @@ interface ServerState {
 // channel SELECTION are distinct resources. Mutations journal their functional
 // application, so a fetch that overlaps them commits the snapshot WITH the
 // mutations re-applied -- never discarding unaffected rows.
-const serverListLineage = createLineage<Server>();
-const channelLineage = createLineage<Channel>();
+const serverListLineage = createLineage<Server>((sv) => sv.id);
+const channelLineage = createLineage<Channel>((c) => c.id);
 
 const sortChannels = (list: Channel[]) => [...list].sort((a, b) => a.position - b.position);
-const upsertChannel = (channel: Channel) => (list: Channel[]) =>
-  sortChannels([...list.filter((c) => c.id !== channel.id), channel]);
+// Upserts MERGE rather than replace: a whole-object event (a CHANNEL_CREATE /
+// DM_CREATE broadcast, or its journal entry replayed onto a fresher snapshot)
+// may be SILENT on fields the current row carries -- receipt order is not data
+// freshness. Fields the payload carries win; fields it is silent on survive.
+const upsertChannel = (channel: Channel) => (list: Channel[]) => {
+  const existing = list.find((c) => c.id === channel.id);
+  const merged = existing ? { ...existing, ...channel } : channel;
+  return sortChannels([...list.filter((c) => c.id !== channel.id), merged]);
+};
+const upsertServer = (server: Server) => (list: Server[]) => {
+  const existing = list.find((sv) => sv.id === server.id);
+  const merged = existing ? { ...existing, ...server } : server;
+  return [...list.filter((sv) => sv.id !== server.id), merged];
+};
+// Selection is RECONCILED with the committed list, never blindly defaulted: a
+// selection made while a fetch was in flight (a create's auto-select, a user
+// click on a realtime row) wins over the fetch's first-channel default.
+const normalizeSelection = (list: Channel[], current: string | null) =>
+  current && list.some((c) => c.id === current) ? current : (list[0]?.id ?? null);
+
 export const useServerStore = create<ServerState>((set, get) => ({
   servers: [],
   selectedServerId: null,
@@ -67,20 +85,35 @@ export const useServerStore = create<ServerState>((set, get) => ({
     // additionally claims the channel-selection lineage when (and only when) it
     // takes over that resource.
     const generation = captureSessionGeneration();
-    const listToken = serverListLineage.startFetch();
+    let listToken = serverListLineage.startFetch();
     set({ isLoadingServers: true, error: null });
     try {
-      const rawServers = await apiGetServers();
-      if (!isSessionGenerationCurrent(generation)) return;
-      const snapshot = Array.isArray(rawServers) ? rawServers : [];
-      const outcome = serverListLineage.reconcile(listToken, snapshot);
-      if (outcome.kind === 'superseded') return;
-      const servers = outcome.kind === 'ok' ? outcome.list : get().servers;
+      let servers: Server[];
+      for (;;) {
+        const rawServers = await apiGetServers();
+        if (!isSessionGenerationCurrent(generation)) return;
+        const outcome = serverListLineage.reconcile(
+          listToken,
+          Array.isArray(rawServers) ? rawServers : []
+        );
+        if (outcome.kind === 'superseded') return;
+        if (outcome.kind === 'gap') {
+          // The journal outran this fetch mid-flight; its snapshot cannot be
+          // reconciled, so RETRY for a fresh one -- keeping partial state would
+          // silently discard the fetch's authoritative rows. Terminates: a newer
+          // fetch or barrier exits via `superseded`, and gapping again requires
+          // another JOURNAL_CAP claims during the retry's own flight.
+          listToken = serverListLineage.startFetch();
+          continue;
+        }
+        servers = outcome.list;
+        break;
+      }
 
       // If no server is selected and we have servers, merge server list +
       // initial selection into a single state update to avoid cascading renders.
       if (!get().selectedServerId && servers.length > 0) {
-        const chanToken = channelLineage.startFetch(); // taking over the channel resource
+        let chanToken = channelLineage.startFetch(); // taking over the channel resource
         set({
           servers,
           isLoadingServers: false,
@@ -96,24 +129,30 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
         // Fetch channels for the auto-selected server
         try {
-          const rawChannels = await apiGetChannels(servers[0].id);
-          if (!isSessionGenerationCurrent(generation)) return;
-          const chanOutcome = channelLineage.reconcile(
-            chanToken,
-            sortChannels(Array.isArray(rawChannels) ? rawChannels : [])
-          );
-          if (chanOutcome.kind === 'superseded') return;
-          if (chanOutcome.kind === 'gap') {
-            set({ isLoadingChannels: false });
+          for (;;) {
+            const rawChannels = await apiGetChannels(servers[0].id);
+            if (!isSessionGenerationCurrent(generation)) return;
+            const chanOutcome = channelLineage.reconcile(
+              chanToken,
+              sortChannels(Array.isArray(rawChannels) ? rawChannels : [])
+            );
+            if (chanOutcome.kind === 'superseded') return;
+            if (chanOutcome.kind === 'gap') {
+              chanToken = channelLineage.startFetch();
+              continue;
+            }
+            set((state) => ({
+              channels: chanOutcome.list,
+              isLoadingChannels: false,
+              selectedChannelId: normalizeSelection(chanOutcome.list, state.selectedChannelId),
+            }));
             return;
           }
-          set({
-            channels: chanOutcome.list,
-            isLoadingChannels: false,
-            selectedChannelId: chanOutcome.list.length > 0 ? chanOutcome.list[0].id : null,
-          });
         } catch {
           if (!isSessionGenerationCurrent(generation)) return;
+          // Only the OWNING fetch may settle the spinner: a superseded
+          // auto-selection failure belongs to a selection that no longer exists.
+          if (!channelLineage.owns(chanToken)) return;
           set({ isLoadingChannels: false });
         }
       } else {
@@ -121,6 +160,9 @@ export const useServerStore = create<ServerState>((set, get) => ({
       }
     } catch (err: unknown) {
       if (!isSessionGenerationCurrent(generation)) return;
+      // FAILURE commits are ownership-checked like success commits: an older
+      // fetch's rejection must not overwrite a newer fetch's state or spinner.
+      if (!serverListLineage.owns(listToken)) return;
       const message = extractErrorMessage(err, 'Failed to load servers.');
       set({ isLoadingServers: false, error: message });
     }
@@ -130,7 +172,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
     // A fetch of the channel resource: a newer selection/barrier supersedes it;
     // mutations that overlap it are journaled and reconciled onto its snapshot.
     const generation = captureSessionGeneration();
-    const token = channelLineage.startFetch();
+    let token = channelLineage.startFetch();
     set({
       selectedServerId: id,
       selectedChannelId: null,
@@ -141,26 +183,31 @@ export const useServerStore = create<ServerState>((set, get) => ({
     // Fetch permissions for the selected server
     usePermissionStore.getState().fetchPermissions(id);
     try {
-      const rawChannels = await apiGetChannels(id);
-      if (!isSessionGenerationCurrent(generation)) return;
-      const outcome = channelLineage.reconcile(
-        token,
-        sortChannels(Array.isArray(rawChannels) ? rawChannels : [])
-      );
-      if (outcome.kind === 'superseded') return;
-      if (outcome.kind === 'gap') {
-        set({ isLoadingChannels: false });
+      for (;;) {
+        const rawChannels = await apiGetChannels(id);
+        if (!isSessionGenerationCurrent(generation)) return;
+        const outcome = channelLineage.reconcile(
+          token,
+          sortChannels(Array.isArray(rawChannels) ? rawChannels : [])
+        );
+        if (outcome.kind === 'superseded') return;
+        if (outcome.kind === 'gap') {
+          token = channelLineage.startFetch(); // retry with a fresh snapshot
+          continue;
+        }
+        // Merge channels + selection into a single state update. The selection
+        // is normalized, not defaulted: a mid-flight creation's auto-select (or
+        // a user click on a realtime row) survives this commit.
+        set((state) => ({
+          channels: outcome.list,
+          isLoadingChannels: false,
+          selectedChannelId: normalizeSelection(outcome.list, state.selectedChannelId),
+        }));
         return;
       }
-      // Merge channels + auto-select into a single state update
-      set({
-        channels: outcome.list,
-        isLoadingChannels: false,
-        selectedChannelId: outcome.list.length > 0 ? outcome.list[0].id : null,
-      });
     } catch (err: unknown) {
       if (!isSessionGenerationCurrent(generation)) return;
-      if (channelLineage.reconcile(token, []).kind === 'superseded') return;
+      if (!channelLineage.owns(token)) return; // the newer owner settles the spinner
       const message = extractErrorMessage(err, 'Failed to load channels.');
       set({ isLoadingChannels: false, error: message });
     }
@@ -197,20 +244,39 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   // A read-after-write refresh of the channel list, with full ownership: it is a
-  // FETCH, so it claims the lineage at start and commits only while it still owns
-  // it and the server is still selected -- a realtime commit mid-refresh
-  // supersedes it (momentarily partial rather than wrong).
+  // FETCH, so it claims the lineage at start -- and because that claim may have
+  // SUPERSEDED a selection fetch, its settlement also settles the loading flag
+  // and normalizes the selection the superseded fetch never got to make.
   refreshChannels: async (serverId: string) => {
     const generation = captureSessionGeneration();
-    const token = channelLineage.startFetch();
+    let token = channelLineage.startFetch();
     try {
-      const raw = await apiGetChannels(serverId);
+      for (;;) {
+        const raw = await apiGetChannels(serverId);
+        if (!isSessionGenerationCurrent(generation)) return;
+        // Scope moved on (clear/removal barriered, or a newer selection owns the
+        // resource) -- whoever moved it settled or owns the loading flag.
+        if (get().selectedServerId !== serverId) return;
+        const outcome = channelLineage.reconcile(token, sortChannels(Array.isArray(raw) ? raw : []));
+        if (outcome.kind === 'superseded') return;
+        if (outcome.kind === 'gap') {
+          token = channelLineage.startFetch(); // retry with a fresh snapshot
+          continue;
+        }
+        set((state) => ({
+          channels: outcome.list,
+          isLoadingChannels: false,
+          selectedChannelId: normalizeSelection(outcome.list, state.selectedChannelId),
+        }));
+        return;
+      }
+    } catch {
       if (!isSessionGenerationCurrent(generation)) return;
-      if (get().selectedServerId !== serverId) return;
-      const outcome = channelLineage.reconcile(token, sortChannels(Array.isArray(raw) ? raw : []));
-      if (outcome.kind !== 'ok') return;
-      set({ channels: outcome.list });
-    } catch { /* leave current state */ }
+      if (!channelLineage.owns(token)) return;
+      // Never strand a superseded selection's spinner: this fetch owns the
+      // resource at failure, so it settles loading even though it never set it.
+      set({ isLoadingChannels: false });
+    }
   },
 
   // Superseded mutations REJECT (SessionSupersededError) rather than fulfilling: a
@@ -222,8 +288,10 @@ export const useServerStore = create<ServerState>((set, get) => ({
     try {
       const server = await apiCreateServer(name);
       if (!isSessionGenerationCurrent(generation)) throw new SessionSupersededError();
-      const applyServer = (list: Server[]) => [...list.filter((sv) => sv.id !== server.id), server];
-      serverListLineage.claim(applyServer); // journaled: reconciles onto overlapping fetches
+      const applyServer = upsertServer(server);
+      // Journaled + asserted: reconciles onto overlapping fetches and clears any
+      // tombstone for this id (the server has asserted its existence).
+      serverListLineage.claim(applyServer, { asserts: [server.id] });
       set((state) => ({
         servers: applyServer(state.servers),
       }));
@@ -255,7 +323,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
       // completes -- if the event appended first, this must not duplicate it),
       // journaled so an overlapping fetch reconciles it onto its snapshot.
       const apply = upsertChannel(channel);
-      channelLineage.claim(apply);
+      channelLineage.claim(apply, { asserts: [channel.id] });
       set((state) => ({ channels: apply(state.channels) }));
       // Select the newly created channel
       set({ selectedChannelId: channel.id });
@@ -271,7 +339,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
   updateServer: (server: Server) => {
     const apply = (list: Server[]) =>
       list.map((sv) => (sv.id === server.id ? { ...sv, ...server } : sv));
-    serverListLineage.claim(apply); // journaled: an older snapshot cannot revert it
+    serverListLineage.claim(apply, { asserts: [server.id] }); // an older snapshot cannot revert it
     set((state) => ({ servers: apply(state.servers) }));
   },
 
@@ -282,7 +350,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
     // state now, and re-applied onto any overlapping fetch's snapshot at commit.
     if (get().selectedServerId !== channel.serverId) return;
     const apply = upsertChannel(channel);
-    channelLineage.claim(apply);
+    channelLineage.claim(apply, { asserts: [channel.id] });
     set((state) => ({ channels: apply(state.channels) }));
   },
 
@@ -292,16 +360,19 @@ export const useServerStore = create<ServerState>((set, get) => ({
       list.some((c) => c.id === channel.id)
         ? sortChannels(list.map((c) => (c.id === channel.id ? { ...c, ...channel } : c)))
         : list;
-    channelLineage.claim(apply);
+    channelLineage.claim(apply, { asserts: [channel.id] });
     set((state) => ({ channels: apply(state.channels) }));
   },
 
   removeChannel: (channelId: string, serverId?: string) => {
-    // Scope check when the event carries its server; a removal is journaled so an
-    // overlapping fetch's snapshot (which may still contain the row) drops it too.
+    // Scope check when the event carries its server. The removal is journaled AND
+    // tombstoned: the backend broadcasts CHANNEL_DELETE before its database
+    // deletion executes, so a fetch STARTING after this event can still return a
+    // snapshot containing the row -- the tombstone stops that resurrection where
+    // the journal (which only covers post-start claims) cannot.
     if (serverId && get().selectedServerId !== serverId) return;
     const apply = (list: Channel[]) => list.filter((c) => c.id !== channelId);
-    channelLineage.claim(apply);
+    channelLineage.claim(apply, { removes: [channelId] });
     set((state) => {
       const remaining = apply(state.channels);
       const updates: Partial<ServerState> = { channels: remaining };
@@ -341,7 +412,9 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
   removeServer: (serverId: string) => {
     const apply = (list: Server[]) => list.filter((sv) => sv.id !== serverId);
-    serverListLineage.claim(apply); // journaled: an older snapshot cannot resurrect it
+    // Journaled + tombstoned: an older snapshot (even one whose fetch starts
+    // after this event) cannot resurrect the removed server.
+    serverListLineage.claim(apply, { removes: [serverId] });
     set((state) => {
       const remaining = apply(state.servers);
       if (state.selectedServerId === serverId) {
@@ -366,6 +439,11 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   reset: () => {
+    // Invalidate lineage-owned requests too: a fetch held across reset() must
+    // not repopulate the cleared store when it settles -- reset is a barrier on
+    // every resource this store owns, auth generation aside.
+    serverListLineage.barrier();
+    channelLineage.barrier();
     set({
       servers: [],
       selectedServerId: null,
@@ -377,4 +455,3 @@ export const useServerStore = create<ServerState>((set, get) => ({
     });
   },
 }));
-
