@@ -305,45 +305,36 @@ describe('IntegrationsTab (bots) session ownership', () => {
     expect(container.querySelector('.animate-spin')).not.toBeNull(); // not "loaded"
   });
 
-  // F38 round 12: rotations are recency-ordered within a session -- each rotation
-  // invalidates the previous token server-side, so when two settle out of order
-  // the OLDER (already-dead) token must not end up displayed.
-  it('an older rotation settling last does not overwrite the newer token', async () => {
+  // F38 round 13: rotations are SERIALIZED -- the client cannot know the server's
+  // commit order for concurrent rotations, so it never allows two at once. A second
+  // click while one is in flight starts nothing.
+  it('concurrent rotations are serialized: one request at a time, its token shown', async () => {
     vi.mocked(client.apiGetBots).mockResolvedValue([
       { id: 'b1', username: 'helper', tokenHint: 'oken1234', createdAt: '2026-01-01T00:00:00Z' } as never,
     ]);
-    let resolveFirst!: (v: { token: string }) => void;
-    let resolveSecond!: (v: { token: string }) => void;
-    vi.mocked(client.apiRegenerateBotToken)
-      .mockImplementationOnce(
-        () =>
-          new Promise((res) => {
-            resolveFirst = res as (v: { token: string }) => void;
-          })
-      )
-      .mockImplementationOnce(
-        () =>
-          new Promise((res) => {
-            resolveSecond = res as (v: { token: string }) => void;
-          })
-      );
+    let resolveRotate!: (v: { token: string }) => void;
+    vi.mocked(client.apiRegenerateBotToken).mockImplementation(
+      () =>
+        new Promise((res) => {
+          resolveRotate = res as (v: { token: string }) => void;
+        })
+    );
     render(<IntegrationsTab serverId="s1" />);
     await screen.findByText(/helper/);
 
-    await userEvent.click(screen.getByRole('button', { name: /Regenerate/ })); // rotation 1 (held)
-    await userEvent.click(screen.getByRole('button', { name: /Regenerate/ })); // rotation 2 (held)
+    await userEvent.click(screen.getByRole('button', { name: /Regenerate|Rotating/ })); // rotation (held)
+    // The in-flight rotation disables the control; a second attempt starts nothing.
+    expect(screen.getByRole('button', { name: /Rotating/ })).toBeDisabled();
+    await userEvent.click(screen.getByRole('button', { name: /Rotating/ }));
+    expect(client.apiRegenerateBotToken).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      resolveSecond({ token: 'bot_token_newest' }); // NEWER settles first
+      resolveRotate({ token: 'bot_token_only' });
       await new Promise((r) => setTimeout(r, 0));
     });
-    await act(async () => {
-      resolveFirst({ token: 'bot_token_older' }); // OLDER (already invalidated) settles last
-      await new Promise((r) => setTimeout(r, 0));
-    });
-
-    expect(screen.getByText(/bot_token_newest/)).toBeInTheDocument(); // latest shown
-    expect(screen.queryByText(/bot_token_older/)).toBeNull(); // dead token never shown
+    expect(screen.getByText(/bot_token_only/)).toBeInTheDocument(); // its token shown
+    // The control is re-enabled for the next (serialized) rotation.
+    expect(screen.getByRole('button', { name: /Regenerate/ })).toBeEnabled();
   });
 
   // F38 round 11: bot creation returns a one-time plaintext token shown in a modal

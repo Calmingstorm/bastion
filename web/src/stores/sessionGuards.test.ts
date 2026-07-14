@@ -230,26 +230,47 @@ describe('session-boundary guards', () => {
     useToastStore.getState().clear();
   });
 
-  // F38 round 12: EVERY loadFromStorage invocation claims recency at entry --
-  // including the no-token path. If it returned before claiming, an older HELD
-  // validation would still be "latest" and could commit (e.g. log out) afterward.
-  it('a no-token loadFromStorage supersedes an older held validation', async () => {
+  // F38 round 13: EVERY loadFromStorage invocation claims recency at entry -- and
+  // an OWNING no-token invocation must also clear the provisional IN-MEMORY
+  // identity an earlier overlapped validation optimistically published. "No
+  // session" must be true in memory, not just in persistent storage.
+  it('an owning no-token loadFromStorage clears the superseded provisional identity', async () => {
     storage.setItem('accessToken', 'valid-token-aaaa');
     storage.setItem('refreshToken', 'valid-token-bbbb');
+    storage.setItem('user', JSON.stringify({ id: 'u1', username: 'alice' }));
     const dOld = deferred<{ id: string; username: string }>();
     vi.mocked(client.apiGetMe).mockReturnValueOnce(dOld.promise as never);
 
-    const pOld = useAuthStore.getState().loadFromStorage(); // held validation
+    const pOld = useAuthStore.getState().loadFromStorage(); // publishes provisional A, then holds
+    expect(useAuthStore.getState().isAuthenticated).toBe(true); // provisional identity in memory
     storage.removeItem('accessToken');
     storage.removeItem('refreshToken');
     const ownedNoToken = await useAuthStore.getState().loadFromStorage(); // no-token path
-    expect(ownedNoToken).toBe(true); // it owned the (nothing-to-validate) outcome
+    expect(ownedNoToken).toBe(true); // it owned the (no-session) outcome
+    // The owner's outcome is "no session" -- in MEMORY too, not just storage.
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+    expect(useAuthStore.getState().user).toBeNull();
+    expect(useAuthStore.getState().accessToken).toBeNull();
 
+    const resetsBefore = vi.mocked(resetAllStores).mock.calls.length;
     dOld.reject(new Error('expired')); // the superseded validation then fails
-    const ownedOld = await pOld;
-    expect(ownedOld).toBe(false); // it did not own the outcome
-    expect(useAuthStore.getState().isAuthenticated).toBe(true); // and did NOT log out
+    expect(await pOld).toBe(false); // it did not own the outcome
+    // ...and it did not commit anything (no logout ran for it).
+    expect(vi.mocked(resetAllStores).mock.calls.length).toBe(resetsBefore);
+  });
+
+  // F38 round 13: loadFromStorage is TOTAL -- it never rejects, because startup
+  // ownership gates isInitialized and App deliberately has no catch-belt.
+  it('loadFromStorage resolves a boolean even when validation throws synchronously', async () => {
+    storage.setItem('accessToken', 'valid-token-aaaa');
+    storage.setItem('refreshToken', 'valid-token-bbbb');
+    vi.mocked(client.apiGetMe).mockImplementationOnce(() => {
+      throw new Error('sync explosion');
+    });
+    const owned = await useAuthStore.getState().loadFromStorage();
+    expect(typeof owned).toBe('boolean');
     useAuthStore.setState({ user: null, isAuthenticated: false });
+    storage.removeItem('accessToken'); storage.removeItem('refreshToken'); storage.removeItem('user');
   });
 
   // F38 round 12: startup gating consumes the owned-boolean -- a superseded call

@@ -154,59 +154,75 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const generation = captureSessionGeneration();
     const owns = () => seq === loadFromStorageSeq && isSessionGenerationCurrent(generation);
 
-    const accessToken = storage.getItem('accessToken');
-    const refreshToken = storage.getItem('refreshToken');
-    const userStr = storage.getItem('user');
-
-    // Reject obviously invalid tokens (e.g. literal "undefined", empty, HTML pages)
-    const isValidToken = (t: string | null): boolean => {
-      if (!t || t.length < 10) return false;
-      if (t === 'undefined' || t === 'null') return false;
-      if (t.startsWith('<') || t.startsWith('{')) return false;
-      return true;
-    };
-
-    if (!isValidToken(accessToken) || !isValidToken(refreshToken)) {
-      // Corrupted tokens — clear and bail (this invocation owned that outcome)
-      clearTokens();
-      return owns();
-    }
-
-    let user: User | null = null;
-    if (userStr) {
-      try {
-        const parsed = JSON.parse(userStr);
-        // Validate the parsed user has required fields
-        if (parsed && typeof parsed === 'object' && parsed.id && parsed.username) {
-          user = parsed as User;
-        }
-      } catch {
-        // Invalid JSON, will fetch from API
-      }
-    }
-
-    set({
-      accessToken,
-      refreshToken,
-      user,
-      isAuthenticated: true,
-    });
-
-    // Validate the token by fetching the current user. If an identity boundary
-    // passes during validation, neither repopulate the user nor log out -- and
-    // when two validations overlap (same generation), only the latest may commit,
-    // so an older failure cannot log out the session a newer success validated.
+    // loadFromStorage must be TOTAL -- startup ownership gates isInitialized, so
+    // an unexpected rejection must never bypass it (App has no catch-belt: a belt
+    // would let a superseded invocation's failure mount routing early).
     try {
-      const freshUser = await apiGetMe();
-      if (!owns()) return false;
-      storage.setItem('user', JSON.stringify(freshUser));
-      set({ user: freshUser });
-      return true;
+      const accessToken = storage.getItem('accessToken');
+      const refreshToken = storage.getItem('refreshToken');
+      const userStr = storage.getItem('user');
+
+      // Reject obviously invalid tokens (e.g. literal "undefined", empty, HTML pages)
+      const isValidToken = (t: string | null): boolean => {
+        if (!t || t.length < 10) return false;
+        if (t === 'undefined' || t === 'null') return false;
+        if (t.startsWith('<') || t.startsWith('{')) return false;
+        return true;
+      };
+
+      if (!isValidToken(accessToken) || !isValidToken(refreshToken)) {
+        // No session to restore. Clear persistent storage AND -- when this invocation
+        // owns startup -- any provisional in-memory identity an earlier overlapped
+        // validation optimistically published before its (now superseded) fetch.
+        // Without the in-memory clear, the owner reports "no session" while the store
+        // still says isAuthenticated: true with the stale user and tokens.
+        clearTokens();
+        if (owns()) {
+          set({ user: null, accessToken: null, refreshToken: null, isAuthenticated: false });
+          return true;
+        }
+        return false;
+      }
+
+      let user: User | null = null;
+      if (userStr) {
+        try {
+          const parsed = JSON.parse(userStr);
+          // Validate the parsed user has required fields
+          if (parsed && typeof parsed === 'object' && parsed.id && parsed.username) {
+            user = parsed as User;
+          }
+        } catch {
+          // Invalid JSON, will fetch from API
+        }
+      }
+
+      set({
+        accessToken,
+        refreshToken,
+        user,
+        isAuthenticated: true,
+      });
+
+      // Validate the token by fetching the current user. If an identity boundary
+      // passes during validation, neither repopulate the user nor log out -- and
+      // when two validations overlap (same generation), only the latest may commit,
+      // so an older failure cannot log out the session a newer success validated.
+      try {
+        const freshUser = await apiGetMe();
+        if (!owns()) return false;
+        storage.setItem('user', JSON.stringify(freshUser));
+        set({ user: freshUser });
+        return true;
+      } catch {
+        if (!owns()) return false; // do not log out a newer session/validation
+        // Token is invalid, clear everything
+        get().logout();
+        return true;
+      }
     } catch {
-      if (!owns()) return false; // do not log out a newer session/validation
-      // Token is invalid, clear everything
-      get().logout();
-      return true;
+      // Unexpected failure: the owner treats it as nothing-to-restore.
+      return owns();
     }
   },
 
