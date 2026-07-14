@@ -380,7 +380,7 @@ describe('session-boundary guards', () => {
     vi.mocked(client.apiGetChannels).mockReturnValue(dSnap.promise);
     vi.mocked(client.apiGetMemberPermissions).mockResolvedValue({ permissions: 0 });
     const pSel = useServerStore.getState().selectServer('srv-a'); // clears list; snapshot held
-    useServerStore.getState().removeChannel('c-dead'); // realtime delete; id not locally present
+    useServerStore.getState().removeChannel('c-dead', 'srv-a'); // realtime delete; id not locally present
     dSnap.resolve([{ id: 'c-dead', name: 'dead', serverId: 'srv-a', position: 0 } as Channel]); // stale snapshot with it
     await pSel;
     expect(useServerStore.getState().channels.map((c) => c.id)).not.toContain('c-dead'); // no stale return
@@ -1119,6 +1119,106 @@ describe('session-boundary guards', () => {
     expect(vi.mocked(client.apiGetReadStates)).toHaveBeenCalledTimes(2); // retried
     expect(useUnreadStore.getState().readStates['c9']?.mentionCount).toBe(2);
     useUnreadStore.getState().reset();
+  });
+
+  // F38 round 26: wrong-scope tombstones, convergent mention counting, relative
+  // acks, per-server permission recency, and close-vs-reopen ordering.
+  it('a delete settled under another server still tombstones its OWN server', async () => {
+    // The user starts a delete on A, switches to B, and the response settles
+    // there: the tombstone must be scoped to A (the channel's server), or B's
+    // next fetch would retire it vacuously and a stale A snapshot resurrects it.
+    useServerStore.setState({ servers: [], selectedServerId: 'srv-b', channels: [] });
+    useServerStore.getState().removeChannel('c-x', 'srv-a'); // settled while B selected
+    const dB = deferred<Channel[]>();
+    const dA = deferred<Channel[]>();
+    vi.mocked(client.apiGetChannels).mockReturnValueOnce(dB.promise).mockReturnValueOnce(dA.promise);
+    vi.mocked(client.apiGetMemberPermissions).mockResolvedValue({ permissions: 0 });
+    const pB = useServerStore.getState().refreshChannels('srv-b'); // B's fetch: omits c-x vacuously
+    dB.resolve([{ id: 'c-bb', name: 'bb', serverId: 'srv-b', position: 0 } as Channel]);
+    await pB;
+    const pA = useServerStore.getState().selectServer('srv-a');
+    dA.resolve([
+      { id: 'c-x', name: 'x', serverId: 'srv-a', position: 0 } as Channel, // stale read
+      { id: 'c-y', name: 'y', serverId: 'srv-a', position: 1 } as Channel,
+    ]);
+    await pA;
+    expect(useServerStore.getState().channels.map((c) => c.id)).toEqual(['c-y']); // no resurrection
+    useServerStore.getState().reset();
+  });
+
+  it('a mention already included in the snapshot is not double-counted', async () => {
+    useUnreadStore.setState({ readStates: {}, unreadChannels: new Set() });
+    const dFetch = deferred<unknown>();
+    vi.mocked(client.apiGetReadStates).mockReturnValue(dFetch.promise as never);
+    const pFetch = useUnreadStore.getState().fetchReadStates();
+    useUnreadStore.getState().incrementMention('c1'); // the event lands mid-flight
+    dFetch.resolve([{ channelId: 'c1', lastMessageId: 'm0', mentionCount: 1 }]); // snapshot ALREADY counted it
+    await pFetch;
+    expect(useUnreadStore.getState().getMentionCount('c1')).toBe(1); // one mention, count 1 -- not 2
+    useUnreadStore.getState().reset();
+  });
+
+  it('a late ack does not erase a mention that arrived during its flight', async () => {
+    useUnreadStore.setState({
+      readStates: { c1: { userId: '', channelId: 'c1', lastMessageId: 'm1', lastReadAt: '', mentionCount: 2 } },
+      unreadChannels: new Set(['c1']),
+    });
+    const dAck = deferred<void>();
+    vi.mocked(client.apiAckChannel).mockReturnValue(dAck.promise as never);
+    const pAck = useUnreadStore.getState().ackChannel('c1', 'm1'); // reading up to m1
+    useUnreadStore.getState().incrementMention('c1'); // a NEW ping lands mid-flight
+    useUnreadStore.getState().markUnread('c1');
+    dAck.resolve();
+    await pAck;
+    expect(useUnreadStore.getState().getMentionCount('c1')).toBe(1); // the newer mention survives
+    expect(useUnreadStore.getState().isUnread('c1')).toBe(true); // unread flag not erased
+    useUnreadStore.getState().reset();
+  });
+
+  it('an ack with no mid-flight activity clears cleanly', async () => {
+    useUnreadStore.setState({
+      readStates: { c2: { userId: '', channelId: 'c2', lastMessageId: 'm1', lastReadAt: '', mentionCount: 3 } },
+      unreadChannels: new Set(['c2']),
+    });
+    vi.mocked(client.apiAckChannel).mockResolvedValue(undefined as never);
+    await useUnreadStore.getState().ackChannel('c2', 'm9');
+    expect(useUnreadStore.getState().getMentionCount('c2')).toBe(0);
+    expect(useUnreadStore.getState().isUnread('c2')).toBe(false);
+    useUnreadStore.getState().reset();
+  });
+
+  it('an older same-server permission response cannot overwrite a newer one', async () => {
+    usePermissionStore.setState({ permissions: {} });
+    const d1 = deferred<{ permissions: number }>();
+    const d2 = deferred<{ permissions: number }>();
+    vi.mocked(client.apiGetMemberPermissions).mockReturnValueOnce(d1.promise).mockReturnValueOnce(d2.promise);
+    const p1 = usePermissionStore.getState().fetchPermissions('srv-p'); // older (stale elevated)
+    const p2 = usePermissionStore.getState().fetchPermissions('srv-p'); // newer (revoked)
+    d2.resolve({ permissions: 4 });
+    await p2;
+    d1.resolve({ permissions: 8 }); // stale elevated permissions resolve LAST
+    await p1;
+    expect(usePermissionStore.getState().permissions['srv-p']).toBe(4); // newer wins
+    usePermissionStore.getState().reset();
+  });
+
+  it('a late close response yields to mid-flight proof of reopening', async () => {
+    useDMStore.setState({ dmChannels: [{ id: 'dm-c' } as DMChannel] });
+    const dClose = deferred<void>();
+    vi.mocked(client.apiCloseDM).mockReturnValue(dClose.promise as never);
+    const pClose = useDMStore.getState().closeDM('dm-c'); // close in flight
+    useDMStore.getState().noteChannelAlive('dm-c'); // MESSAGE_CREATE: reopened mid-flight
+    dClose.resolve();
+    await pClose;
+    expect(useDMStore.getState().dmChannels.map((d2) => d2.id)).toEqual(['dm-c']); // not removed
+    // And no tombstone was installed: the authoritative reopened snapshot commits.
+    const dFetch = deferred<DMChannel[]>();
+    vi.mocked(client.apiGetDMs).mockReturnValue(dFetch.promise);
+    const pFetch = useDMStore.getState().fetchDMs();
+    dFetch.resolve([{ id: 'dm-c' } as DMChannel]);
+    await pFetch;
+    expect(useDMStore.getState().dmChannels.map((d2) => d2.id)).toEqual(['dm-c']);
+    useDMStore.getState().reset();
   });
 
   it('permissionStore reset invalidates a held permissions fetch', async () => {

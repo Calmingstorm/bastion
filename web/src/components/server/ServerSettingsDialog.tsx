@@ -398,7 +398,8 @@ export function ChannelsTab({ serverId }: { serverId: string }) {
       await apiDeleteChannel(serverId, channelId);
       if (!isSessionGenerationCurrent(generation)) return;
       setChannels((prev) => prev.filter((c) => c.id !== channelId));
-      useServerStore.getState().removeChannel(channelId);
+      // Scoped to the dialog's server, captured with the action.
+      useServerStore.getState().removeChannel(channelId, serverId);
     } catch { /* handled */ }
     setDeleteConfirm(null);
   };

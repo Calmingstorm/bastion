@@ -27,6 +27,16 @@ const dmLineage = createLineage<DMChannel>((d) => d.id);
 // entry replayed onto a fresher snapshot row) may be SILENT on enriched fields
 // like the lastMessage preview -- receipt order is not data freshness. Fields
 // the payload carries win; fields it is silent on survive.
+// Per-channel proof-of-life epochs: bumped whenever the server demonstrates a
+// DM is alive (a message arrives in it, a DM_CREATE lands, a create/reopen
+// response returns). A close captures the epoch at entry; a response settling
+// AFTER newer proof of life is superseded -- the server reopened the DM after
+// processing the close, and installing a fresh tombstone would filter the very
+// snapshot that truthfully shows it open.
+const aliveEpochs = new Map<string, number>();
+const bumpAlive = (channelId: string) =>
+  aliveEpochs.set(channelId, (aliveEpochs.get(channelId) ?? 0) + 1);
+
 const upsertDM = (dm: DMChannel) => (list: DMChannel[]) => {
   const existing = list.find((d) => d.id === dm.id);
   const merged = existing ? { ...existing, ...dm } : dm;
@@ -74,6 +84,7 @@ export const useDMStore = create<DMState>((set) => ({
     if (!isSessionGenerationCurrent(generation)) return undefined;
     // Journal an UPSERT unconditionally: a successful create (even a same-ID
     // reopen) is newer truth; an overlapping fetch reconciles it onto its snapshot.
+    bumpAlive(dm.id);
     const apply = upsertDM(dm);
     dmLineage.claim(apply, { asserts: [dm.id] });
     set((state) => ({ dmChannels: apply(state.dmChannels) }));
@@ -82,6 +93,7 @@ export const useDMStore = create<DMState>((set) => ({
 
   closeDM: async (channelId: string) => {
     const generation = captureSessionGeneration();
+    const epochAtEntry = aliveEpochs.get(channelId) ?? 0;
     try {
       await apiCloseDM(channelId);
     } catch {
@@ -97,6 +109,12 @@ export const useDMStore = create<DMState>((set) => ({
     // Deliberately a silent return (not a SessionSupersededError like the server
     // mutations): fire-and-forget callers have no success UI to mislead.
     if (!isSessionGenerationCurrent(generation)) return;
+    // Proof of life arrived during the flight: the server reopened this DM after
+    // processing the close. The close is superseded -- installing its tombstone
+    // now would filter the authoritative reopened snapshot. Skip entirely; if
+    // the reopen lost the server-side race instead, the next fetch omits the id
+    // and the row simply drops out (no tombstone needed for an honest close).
+    if ((aliveEpochs.get(channelId) ?? 0) !== epochAtEntry) return;
     const apply = (list: DMChannel[]) => list.filter((d) => d.id !== channelId);
     // Journaled + tombstoned: an older snapshot -- even one whose fetch starts
     // after this close -- cannot resurrect the closed conversation.
@@ -110,6 +128,7 @@ export const useDMStore = create<DMState>((set) => ({
   // Realtime DM_CREATE commits through here: the write claims the list lineage
   // (commit supersession) so an older fetch snapshot settling later cannot erase it.
   addDM: (dm: DMChannel) => {
+    bumpAlive(dm.id);
     // UPSERT unconditionally (merge semantics -- see upsertDM): fields the fresh
     // payload carries replace the stale object's, fields it is silent on survive;
     // the journaled application reconciles onto any overlapping fetch.
@@ -124,6 +143,7 @@ export const useDMStore = create<DMState>((set) => ({
   // conversation instead of filtering it. No journal write: there is no list
   // application to make, only evidence to record.
   noteChannelAlive: (channelId: string) => {
+    bumpAlive(channelId);
     dmLineage.assert([channelId]);
   },
 
@@ -136,6 +156,7 @@ export const useDMStore = create<DMState>((set) => ({
     // accumulated tombstones are dropped -- account A closing a shared DM must
     // not hide that same conversation from account B on this client.
     dmLineage.reset();
+    aliveEpochs.clear();
     set({
       dmChannels: [],
       selectedDMId: null,

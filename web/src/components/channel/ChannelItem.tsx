@@ -63,7 +63,9 @@ export function ChannelItem({ channel, isSelected, onClick, canManage, serverId,
     try {
       await apiDeleteChannel(serverId, channel.id);
       if (isSessionGenerationCurrent(generation)) {
-        useServerStore.getState().removeChannel(channel.id);
+        // The channel's OWN server, captured with the action -- not the current
+        // selection, which may have moved while the delete was in flight.
+        useServerStore.getState().removeChannel(channel.id, serverId);
       }
     } catch { /* handled */ }
     setIsDeleting(false);

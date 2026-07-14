@@ -38,7 +38,7 @@ interface ServerState {
   updateServer: (server: Server) => void;
   addChannel: (channel: Channel) => void;
   updateChannel: (channel: Channel) => void;
-  removeChannel: (channelId: string, serverId?: string) => void;
+  removeChannel: (channelId: string, serverId: string) => void;
   leaveServer: (serverId: string) => Promise<void>;
   deleteServer: (serverId: string) => Promise<void>;
   removeServer: (serverId: string) => void;
@@ -419,7 +419,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
     set((state) => ({ channels: apply(state.channels) }));
   },
 
-  removeChannel: (channelId: string, serverId?: string) => {
+  removeChannel: (channelId: string, serverId: string) => {
     // NOT scope-gated, unlike add/update: removals are subtractive (a foreign id
     // can never collide with the selected list, so the claim and the local filter
     // are harmless no-ops cross-scope), and the tombstone MUST outlive the current
@@ -430,13 +430,14 @@ export const useServerStore = create<ServerState>((set, get) => ({
     // a fetch STARTING after this event can still return a snapshot containing
     // the row -- the tombstone stops that resurrection where the journal (which
     // only covers post-start claims) cannot.
-    // The tombstone is SCOPED to the channel's server: only a fetch enumerating
-    // that server's channels can retire it by omission -- a fetch for another
-    // server omits the id vacuously and must not testify. Callers inside the
-    // selected server may omit serverId; the selection supplies the scope.
-    const scope = serverId ?? get().selectedServerId ?? undefined;
+    // The tombstone is SCOPED to the channel's OWN server -- required, never
+    // inferred from the current selection: a delete started under server A but
+    // settling under server B would otherwise be scoped to B, where B's next
+    // fetch omits the id vacuously and retires it, letting a stale A snapshot
+    // resurrect the channel. Every caller knows the channel's server (the event
+    // payload carries it; the delete handlers captured it for their API call).
     const apply = (list: Channel[]) => list.filter((c) => c.id !== channelId);
-    channelLineage.claim(apply, { removes: [channelId], scope });
+    channelLineage.claim(apply, { removes: [channelId], scope: serverId });
     set((state) => {
       const remaining = apply(state.channels);
       const updates: Partial<ServerState> = { channels: remaining };

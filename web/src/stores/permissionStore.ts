@@ -18,16 +18,24 @@ interface PermissionState {
 // whole requirement.
 let permissionEpoch = 0;
 
+// Per-server request recency: two same-server fetches can race, and permissions
+// are security-relevant -- an OLDER response resolving last must not overwrite
+// the newer one (it may carry stale elevated permissions).
+const requestSeqs = new Map<string, number>();
+
 export const usePermissionStore = create<PermissionState>((set, get) => ({
   permissions: {},
 
   fetchPermissions: async (serverId: string) => {
     const generation = captureSessionGeneration();
     const epoch = permissionEpoch;
+    const seq = (requestSeqs.get(serverId) ?? 0) + 1;
+    requestSeqs.set(serverId, seq);
     try {
       const { permissions: perms } = await apiGetMemberPermissions(serverId);
       if (!isSessionGenerationCurrent(generation)) return;
       if (epoch !== permissionEpoch) return; // reset() intervened
+      if (requestSeqs.get(serverId) !== seq) return; // a newer same-server request owns this key
       set((state) => ({
         permissions: { ...state.permissions, [serverId]: perms },
       }));
@@ -45,6 +53,7 @@ export const usePermissionStore = create<PermissionState>((set, get) => ({
 
   reset: () => {
     permissionEpoch += 1;
+    requestSeqs.clear();
     set({ permissions: {} });
   },
 }));
