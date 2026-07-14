@@ -555,7 +555,7 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 
 	// Process @mentions (only for server channels, not DMs)
 	if serverID != nil {
-		h.processMentions(r, *serverID, channelID, userID, req.Content)
+		h.processMentions(r, *serverID, channelID, userID, req.Content, msg.CreatedAt)
 	}
 
 	writeJSON(w, http.StatusCreated, msg)
@@ -729,7 +729,7 @@ func (h *MessageHandler) Delete(w http.ResponseWriter, r *http.Request) {
 }
 
 // processMentions parses @mentions from message content and sends notifications.
-func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, authorID uuid.UUID, content string) {
+func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, authorID uuid.UUID, content string, createdAt time.Time) {
 	matches := mentionRegex.FindAllStringSubmatch(content, -1)
 	if len(matches) == 0 {
 		return
@@ -829,6 +829,10 @@ func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, a
 				"senderName":   senderName,
 				"channelName":  channelName,
 				"content":      snippet,
+				// Server-minted message time: clients drop a DELAYED notification
+				// whose message an acknowledgment already covered (client and
+				// server clocks are never compared).
+				"createdAt": createdAt,
 			},
 		})
 	}

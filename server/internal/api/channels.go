@@ -38,20 +38,25 @@ type updateChannelRequest struct {
 	CategoryID *string `json:"categoryId,omitempty"`
 }
 
-// broadcastToServer sends an event to all channels in a server so all connected users see it.
+// broadcastToServer delivers a server-scoped event exactly once per member.
+// It fans out per USER, not per channel: channel fanout delivered duplicates to
+// anyone subscribed to several of the server's channels, and -- once deletes
+// broadcast after commit -- a CHANNEL_DELETE fanned out through the SURVIVING
+// channels missed clients subscribed only to the deleted one. Membership is the
+// stable recipient set regardless of which rows the event is about.
 func (h *ChannelHandler) broadcastToServer(r *http.Request, serverID uuid.UUID, event realtime.Event) {
-	rows, err := h.db.Query(r.Context(), `SELECT id FROM channels WHERE server_id = $1`, serverID)
+	rows, err := h.db.Query(r.Context(), `SELECT user_id FROM server_members WHERE server_id = $1`, serverID)
 	if err != nil {
-		log.Error().Err(err).Msg("failed to query server channels for broadcast")
+		log.Error().Err(err).Msg("failed to query server members for broadcast")
 		return
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var chID uuid.UUID
-		if err := rows.Scan(&chID); err != nil {
+		var uid uuid.UUID
+		if err := rows.Scan(&uid); err != nil {
 			continue
 		}
-		h.hub.BroadcastToChannel(chID, event)
+		h.hub.BroadcastToUser(uid, event)
 	}
 }
 

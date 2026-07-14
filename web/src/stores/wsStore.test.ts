@@ -153,4 +153,30 @@ describe('wsStore MESSAGE_CREATE production wiring', () => {
     });
     expect(useUnreadStore.getState().isUnread('ch-a')).toBe(false);
   });
+
+  it('NOTIFICATION passes the server-minted createdAt through to markUnread', () => {
+    // A delayed notification whose message predates the committed lastReadAt
+    // must not permanently restore isUnread -- same contract as MESSAGE_CREATE.
+    useUnreadStore.setState({
+      readStates: {
+        'ch-n': { userId: '', channelId: 'ch-n', lastMessageId: 'm9', lastReadAt: '2026-07-14T12:00:10Z', mentionCount: 0 },
+      },
+      unreadChannels: new Set(),
+    });
+    vi.mocked(client.apiGetReadStates).mockResolvedValue([] as never); // mention-triggered follow-up
+    handlers['NOTIFICATION']({
+      channelId: 'ch-n',
+      mentionCount: 1,
+      createdAt: '2026-07-14T12:00:05Z', // predates the ack that covered it
+      senderName: '', channelName: '', content: '',
+    });
+    expect(useUnreadStore.getState().isUnread('ch-n')).toBe(false); // dropped by the clock guard
+    handlers['NOTIFICATION']({
+      channelId: 'ch-n',
+      mentionCount: 1,
+      createdAt: '2026-07-14T12:00:15Z', // genuinely newer
+      senderName: '', channelName: '', content: '',
+    });
+    expect(useUnreadStore.getState().isUnread('ch-n')).toBe(true);
+  });
 });

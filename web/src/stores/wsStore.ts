@@ -150,11 +150,13 @@ export const useWSStore = create<WSState>((set) => ({
 
     wsClient.on('NOTIFICATION', (data: unknown) => {
       const payload = data as {
-        channelId: string; mentionCount?: number;
+        channelId: string; mentionCount?: number; createdAt?: string;
         senderName?: string; channelName?: string; content?: string;
       };
       if (payload.channelId) {
-        useUnreadStore.getState().markUnread(payload.channelId);
+        // Server-minted message time (same contract as MESSAGE_CREATE): a
+        // delayed notification whose message an ack already covered is dropped.
+        useUnreadStore.getState().markUnread(payload.channelId, payload.createdAt);
         if (payload.mentionCount) {
           useUnreadStore.getState().incrementMention(payload.channelId);
         }
