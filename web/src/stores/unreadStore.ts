@@ -21,18 +21,20 @@ interface UnreadState {
 // different clocks, and every arithmetic bridge between them (additive bumps,
 // convergent max, entry-relative deltas) had a losing interleaving. Instead:
 //
-//   - A local write (mention event, ack response) applies an OPTIMISTIC direct
-//     update for instant UI, then TRIGGERS an authoritative fetch. The trigger
-//     claims the lineage, so every older in-flight snapshot is superseded, and
-//     the triggered snapshot is server truth minted after the write reached the
-//     server (a mention is committed before it is broadcast; an ack is
-//     committed before its response returns).
-//   - Nothing journals claims on this lineage: with every write followed by an
-//     owned fetch, supersession alone orders the world. The committed count is
-//     always a server-produced number, never a client-computed one.
+//   - The ack RETURNS the committed read state (watermark + server-computed
+//     mention count). On a quiet flight the client commits that authoritative
+//     state and CLAIMS the lineage, so a held pre-ack fetch reconciles it IN
+//     (seq-ordered) instead of clobbering it -- the claim is load-bearing. On a
+//     flight during which new activity arrived, the response is stale, so the
+//     client commits nothing and settles via a fresh fetch.
+//   - A mention event applies an OPTIMISTIC +1 for instant UI, then triggers an
+//     authoritative fetch that supersedes older snapshots and carries the true
+//     server count.
+//   - Every committed count is a server-produced number, never client-computed.
 //
-// The unread FLAG (unreadChannels) stays local -- fetches never write it; an
-// ack clears it only when no newer activity arrived during its flight.
+// The unread FLAG (unreadChannels) is reconciled by the fetch: a channel stays
+// flagged while it has unread mentions (committed count > 0) OR a local raise
+// not yet covered by the watermark; otherwise the fetch clears it.
 const readStateLineage = createLineage<ReadState>((rs) => rs.channelId);
 
 // Per-channel activity epochs, bumped by every locally-observed unread signal.
@@ -95,16 +97,22 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
         set((state) => {
           const newUnread = new Set(state.unreadChannels);
           for (const rs of outcome.list) {
+            if (!newUnread.has(rs.channelId)) continue;
             const raised = flagRaised.get(rs.channelId);
-            if (!raised) continue;
             const seqCovered =
-              raised.seq != null && rs.lastReadSeq !== undefined && rs.lastReadSeq >= raised.seq;
+              !!raised && raised.seq != null && rs.lastReadSeq !== undefined && rs.lastReadSeq >= raised.seq;
             const atCovered =
+              !!raised &&
               raised.seq == null &&
               raised.at != null &&
               !!rs.lastReadAt &&
               Date.parse(rs.lastReadAt) >= raised.at;
-            if (seqCovered || atCovered) {
+            // A flag with NO local raise (e.g. raised by an ack's nonzero
+            // committed count) counts as covered -- only the server mention
+            // count keeps it up. Clear the flag only when the local raise is
+            // covered AND the server shows no unread mentions here.
+            const raiseCovered = !raised || seqCovered || atCovered;
+            if (raiseCovered && rs.mentionCount === 0) {
               newUnread.delete(rs.channelId);
               flagRaised.delete(rs.channelId);
             }
@@ -135,52 +143,50 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
     const generation = captureSessionGeneration();
     const epochAtReset = resetEpoch;
     const epochAtEntry = activityEpochs.get(channelId) ?? 0;
-    const countAtEntry = get().readStates[channelId]?.mentionCount || 0;
     try {
-      await apiAckChannel(channelId, messageId);
+      // The ack returns the COMMITTED read state -- the true watermark and the
+      // server-computed mention count. The client commits THAT, never an
+      // optimistic guess: no pending/failed follow-up fetch can leave the badge
+      // wrong, and a stale/duplicate ack returns the (possibly newer) truth
+      // already on disk rather than erasing a mention it did not cover.
+      const committed = await apiAckChannel(channelId, messageId);
       if (!isSessionGenerationCurrent(generation)) return;
       if (epochAtReset !== resetEpoch) return; // reset() intervened: nothing to write
+      // If new activity arrived DURING the flight, the committed response
+      // predates it (its watermark/count reflect server state at ack-commit
+      // time, before that activity): it is stale. Do NOT commit or claim it.
+      // A mention-event during the flight settles itself via its own triggered
+      // fetch, but a plain markUnread (a non-mention message) triggers nothing,
+      // so settle the channel authoritatively here rather than leave the count
+      // stale forever (the pre-response state is otherwise never reconciled).
+      if ((activityEpochs.get(channelId) ?? 0) !== epochAtEntry) {
+        void get().fetchReadStates();
+        return;
+      }
+      // Quiet flight: the response is current server truth. Claim it so a held
+      // pre-ack fetch reconciles it IN rather than clobbering it with a pre-ack
+      // snapshot, then commit.
+      const apply = (list: ReadState[]) => [committed, ...list.filter((r) => r.channelId !== channelId)];
+      readStateLineage.claim(apply);
       set((state) => {
         const newUnread = new Set(state.unreadChannels);
-        // Clear the unread flag only if nothing new arrived during the flight.
-        if ((activityEpochs.get(channelId) ?? 0) === epochAtEntry) {
+        // The flag clears exactly when the server says nothing unread remains
+        // (no mentions above the committed watermark); a nonzero committed count
+        // means cross-device mentions the ack did not cover -- keep it flagged.
+        if (committed.mentionCount === 0) {
           newUnread.delete(channelId);
           flagRaised.delete(channelId);
+        } else {
+          // Cross-device mentions above the committed watermark keep the channel
+          // flagged; the fetch reconciliation retires it once the server shows
+          // no unread mentions here (they were read elsewhere).
+          newUnread.add(channelId);
         }
-        // OPTIMISTIC zero, gated on nothing having moved since entry (no new
-        // activity, no authoritative rebase): if anything moved, leave the count
-        // alone -- the follow-up fetch settles it with server truth either way.
-        const untouched =
-          (activityEpochs.get(channelId) ?? 0) === epochAtEntry &&
-          (state.readStates[channelId]?.mentionCount || 0) === countAtEntry;
-        if (!untouched) return { unreadChannels: newUnread };
         return {
           unreadChannels: newUnread,
-          readStates: {
-            ...state.readStates,
-            [channelId]: {
-              userId: '',
-              channelId,
-              lastMessageId: messageId,
-              // Keep the previous SERVER-minted lastReadAt rather than fabricate
-              // one from the client clock -- markUnread compares message
-              // createdAt against this field, and mixing clocks would corrupt
-              // that comparison. The follow-up fetch supplies the fresh value.
-              lastReadAt: state.readStates[channelId]?.lastReadAt ?? '',
-              // PRESERVE the known read watermark: dropping it would let a
-              // delayed event already covered by it re-flag the channel while
-              // the follow-up fetch is pending -- or forever, if that fetch
-              // fails. The follow-up advances it.
-              lastReadSeq: state.readStates[channelId]?.lastReadSeq,
-              mentionCount: 0,
-            },
-          },
+          readStates: toMap(apply(Object.values(state.readStates))),
         };
       });
-      // AUTHORITATIVE follow-up: the server committed this ack before replying,
-      // so a fetch started now returns the post-ack truth (including mentions
-      // the ack did NOT cover) and supersedes every older in-flight snapshot.
-      void get().fetchReadStates();
     } catch {
       // Silent fail
     }

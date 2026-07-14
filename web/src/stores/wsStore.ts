@@ -83,6 +83,14 @@ export const useWSStore = create<WSState>((set) => ({
           dmChannels.some((d) => d.id === message.channelId);
         if (!isKnownChannel) {
           useDMStore.getState().fetchDMs();
+          // Also refetch the selected server's channels: a member granted
+          // access to a new channel is subscribed (receives its messages) but
+          // may have missed CHANNEL_CREATE in the sub-tick grant/create race, so
+          // the channel is absent from their list. This heals it authoritatively.
+          const { selectedServerId } = useServerStore.getState();
+          if (selectedServerId) {
+            void useServerStore.getState().refreshChannels(selectedServerId);
+          }
         }
 
         // Clear typing indicator for this user

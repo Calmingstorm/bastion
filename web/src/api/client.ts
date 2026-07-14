@@ -574,8 +574,12 @@ export async function apiGetDM(channelId: string): Promise<DMChannel> {
 export async function apiAckChannel(
   channelId: string,
   messageId: string
-): Promise<void> {
-  await apiClient.post(`/channels/${channelId}/ack`, { messageId });
+): Promise<ReadState> {
+  // The ack returns the COMMITTED read state (watermark + server-computed
+  // mention count), so the client commits server truth instead of guessing
+  // what the ack cleared.
+  const response = await apiClient.post<ReadState>(`/channels/${channelId}/ack`, { messageId });
+  return response.data;
 }
 
 export async function apiGetReadStates(): Promise<ReadState[]> {

@@ -310,24 +310,39 @@ func (h *Hub) SubscribeAuthorizedStable(channelID uuid.UUID, read func() (ids []
 	return nil, false, ErrConnectUnstable
 }
 
+// BumpReconcileGen advances the reconcile generation to signal an authorization
+// change that does NOT unsubscribe anyone -- a GRANT. Revocations bump it via
+// UnsubscribeUser; grants must bump it too, or a channel-create's stability loop
+// (which re-reads authorization on a generation change) would miss a member who
+// gained access mid-create and omit them from CHANNEL_CREATE while their socket
+// still receives later messages.
+func (h *Hub) BumpReconcileGen() {
+	h.revGen.Add(1)
+}
+
 // SubscribeUser subscribes all of a user's connected clients to a channel
 // synchronously (under the hub lock), so the subscription is in effect the
 // instant the call returns.
-func (h *Hub) SubscribeUser(userID, channelID uuid.UUID) {
+func (h *Hub) SubscribeUser(userID, channelID uuid.UUID) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	clients, ok := h.users[userID]
 	if !ok {
-		return
+		return false
 	}
 	set, ok := h.channels[channelID]
 	if !ok {
 		set = make(map[*Client]struct{})
 		h.channels[channelID] = set
 	}
+	added := false
 	for c := range clients {
-		set[c] = struct{}{}
+		if _, already := set[c]; !already {
+			set[c] = struct{}{}
+			added = true
+		}
 	}
+	return added
 }
 
 // UnsubscribeUser unsubscribes all of a user's connected clients from a channel

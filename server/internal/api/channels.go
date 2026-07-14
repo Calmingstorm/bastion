@@ -29,6 +29,12 @@ type ChannelHandler struct {
 // reachable with a locked-row race.
 var AfterChannelDeleteExecForTest func()
 
+// AfterChannelCreateStableForTest runs after the create's subscription pass has
+// stabilized but before CHANNEL_CREATE is delivered (nil in production). Tests
+// use it to revoke access in that window and prove BroadcastToChannel still
+// excludes the just-unsubscribed member.
+var AfterChannelCreateStableForTest func()
+
 // AfterChannelCreateSubscribeForTest runs between the create's subscription
 // loop and its authorization post-check (nil in production). Tests use it to
 // revoke access inside that window and prove the post-check unsubscribes a
@@ -254,7 +260,7 @@ func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// -- the same primitive the connect path uses. It returns the CONFIRMED,
 	// still-authorized recipient set; the broadcast goes only to that set, and
 	// only if the channel still exists.
-	confirmed, exists, subErr := h.hub.SubscribeAuthorizedStable(ch.ID, func() ([]uuid.UUID, bool, error) {
+	_, exists, subErr := h.hub.SubscribeAuthorizedStable(ch.ID, func() ([]uuid.UUID, bool, error) {
 		var stillExists bool
 		if err := h.db.QueryRow(r.Context(),
 			`SELECT EXISTS(SELECT 1 FROM channels WHERE id = $1)`, ch.ID).Scan(&stillExists); err != nil {
@@ -277,23 +283,39 @@ func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return ids, true, nil
 	})
 	if subErr != nil {
-		// Could not converge (or a read failed): drop any partial subscriptions
-		// AND bump the reconcile generation (RemoveChannel does both), so a
-		// client that legitimately subscribed to this committed channel via its
-		// own connect/join during the aborted passes re-reads and reinstalls
-		// rather than being left silently unsubscribed. The row is committed, so
-		// clients pick the channel up on their next fetch; no CHANNEL_CREATE is
-		// emitted for a subscription state we could not confirm.
+		// Fail-closed after N racing revocations could not converge: drop any
+		// partial subscriptions (RemoveChannel) and emit no CHANNEL_CREATE for a
+		// subscription state we could not confirm. This does leave already-
+		// connected authorized members unsubscribed (only in-flight connect/
+		// create loops resample the generation, so the bump does not re-subscribe
+		// them here) -- but the row is committed, so it self-heals: their client
+		// picks the channel up on the next channel-list fetch, and the
+		// MESSAGE_CREATE unknown-channel path (web) refetches on the first message
+		// delivered there. An 8-consecutive-revocation race, degraded not broken.
 		h.hub.RemoveChannel(ch.ID)
 		log.Error().Err(subErr).Msg("channel create: subscription did not stabilize")
 		writeJSON(w, http.StatusCreated, ch)
 		return
 	}
 	if exists {
-		h.broadcastToServer(r, serverID, realtime.Event{
+		// Test seam: fires after the stable pass but before delivery, so a
+		// revocation here lands in the window BroadcastToChannel must still
+		// exclude (the revoke synchronously unsubscribes the member).
+		if AfterChannelCreateStableForTest != nil {
+			AfterChannelCreateStableForTest()
+		}
+		// Deliver to the LIVE channel subscription set under the hub lock, NOT a
+		// captured recipient list: SubscribeAuthorizedStable subscribed exactly
+		// the authorized members, so a revocation landing between the stable
+		// pass and this broadcast has ALREADY unsubscribed them (UnsubscribeUser
+		// is synchronous under the same lock) and they are excluded here. This is
+		// the intersection of authorization and live subscription Odin's review
+		// requires -- a stale confirmed slice would leak CHANNEL_CREATE to a
+		// just-revoked member.
+		h.hub.BroadcastToChannel(ch.ID, realtime.Event{
 			Type: realtime.EventChannelCreate,
 			Data: ch,
-		}, confirmed)
+		})
 	} else {
 		// Deleted mid-create: leave no subscriptions or phantom event behind.
 		h.hub.RemoveChannel(ch.ID)
@@ -397,8 +419,12 @@ func (h *ChannelHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Broadcast to all server channels
-	h.broadcastToServer(r, serverID, realtime.Event{
+	// Deliver to the LIVE channel subscription set (same atomicity as create):
+	// the payload carries channel metadata, so a member whose ViewChannel was
+	// revoked concurrently -- and thereby synchronously unsubscribed -- must not
+	// receive it. BroadcastToChannel intersects with live subscriptions under
+	// the hub lock; a captured recipient slice would leak the metadata.
+	h.hub.BroadcastToChannel(channelID, realtime.Event{
 		Type: realtime.EventChannelUpdate,
 		Data: ch,
 	})

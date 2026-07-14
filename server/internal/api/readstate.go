@@ -75,7 +75,19 @@ func (h *ReadStateHandler) Ack(w http.ResponseWriter, r *http.Request) {
 	// It records ONLY the watermark; the mention badge is computed from the
 	// mentions table (COUNT above last_read_seq), so advancing the watermark
 	// clears exactly the mentions it now covers and no others.
-	_, err = h.db.Exec(r.Context(),
+	// The gated upsert and the read-back of the committed state run in ONE
+	// transaction: a concurrent cascade (channel or user delete) cannot remove
+	// the read_states row between them, so the re-read always finds it and the
+	// response is a consistent snapshot rather than a spurious 500.
+	tx, err := h.db.Begin(r.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("failed to begin ack")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+
+	if _, err = tx.Exec(r.Context(),
 		`INSERT INTO read_states (user_id, channel_id, last_message_id, last_read_at, last_read_seq)
 		 VALUES ($1, $2, $3, NOW(), $4)
 		 ON CONFLICT (user_id, channel_id)
@@ -83,14 +95,38 @@ func (h *ReadStateHandler) Ack(w http.ResponseWriter, r *http.Request) {
 		   last_read_seq = $4
 		 WHERE COALESCE(read_states.last_read_seq, -1) < $4`,
 		userID, channelID, messageID, msgSeq,
-	)
-	if err != nil {
+	); err != nil {
 		log.Error().Err(err).Msg("failed to ack channel")
 		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	// Return the COMMITTED read state, not a bare status: the update may have
+	// no-op'd (a stale/duplicate ack the watermark gate rejected), in which case
+	// the response carries the truth already on disk -- a watermark possibly
+	// AHEAD of what this ack asked for, and the mention badge computed from the
+	// mentions table above that watermark. The client commits this authoritative
+	// state instead of optimistically guessing what the ack cleared.
+	var rs models.ReadState
+	if err := tx.QueryRow(r.Context(),
+		`SELECT rs.user_id, rs.channel_id, rs.last_message_id, rs.last_read_at, rs.last_read_seq,
+		        (SELECT COUNT(*) FROM mentions m
+		         WHERE m.user_id = rs.user_id AND m.channel_id = rs.channel_id
+		           AND m.seq > COALESCE(rs.last_read_seq, 0)) AS mention_count
+		 FROM read_states rs WHERE rs.user_id = $1 AND rs.channel_id = $2`,
+		userID, channelID,
+	).Scan(&rs.UserID, &rs.ChannelID, &rs.LastMessageID, &rs.LastReadAt, &rs.LastReadSeq, &rs.MentionCount); err != nil {
+		log.Error().Err(err).Msg("failed to read committed read state after ack")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		log.Error().Err(err).Msg("failed to commit ack")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, rs)
 }
 
 func (h *ReadStateHandler) ListReadStates(w http.ResponseWriter, r *http.Request) {

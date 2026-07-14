@@ -753,3 +753,195 @@ func TestDeleteBumpsGenerationBeforeBroadcast(t *testing.T) {
 		t.Fatalf("no CHANNEL_CREATE should follow a delete, got %d", n)
 	}
 }
+
+// TestAckReturnsCommittedReadState: the ack response IS the committed read state
+// (watermark + server-computed mention count), so the client commits truth
+// rather than guessing. A mention above the acked watermark is reflected in the
+// returned count.
+func TestAckReturnsCommittedReadState(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	member := h.Register("member")
+	serverID := h.CreateServer(owner, "S")
+	channelID := h.CreateChannel(owner, serverID, "general")
+	joinServer(h, owner, member, serverID)
+
+	m1 := sendMessage(h, owner, channelID, "one")
+	if code := postTextMessage(h, owner, channelID, "@member two"); code != http.StatusCreated {
+		t.Fatalf("mention: got %d", code) // seq 2, mentions member
+	}
+	var rs struct {
+		ChannelID    string `json:"channelId"`
+		LastReadSeq  *int64 `json:"lastReadSeq"`
+		MentionCount int    `json:"mentionCount"`
+	}
+	// Ack the OLDER message: the response must show the watermark it committed
+	// AND the mention above it still counted.
+	if code := h.Request(http.MethodPost, "/api/v1/channels/"+channelID+"/ack",
+		member.AccessToken, map[string]string{"messageId": m1}, &rs); code != http.StatusOK {
+		t.Fatalf("ack: got %d", code)
+	}
+	if rs.ChannelID != channelID {
+		t.Fatalf("ack response must be the committed read state, got channel %q", rs.ChannelID)
+	}
+	if rs.LastReadSeq == nil || *rs.LastReadSeq != 1 {
+		t.Fatalf("committed watermark should be seq 1, got %v", rs.LastReadSeq)
+	}
+	if rs.MentionCount != 1 {
+		t.Fatalf("the mention above the acked watermark must still count, got %d", rs.MentionCount)
+	}
+}
+
+// TestMentionPersistenceFailureDoesNotNotify: if the mention row (or its
+// read_states anchor) fails to persist, no NOTIFICATION is emitted -- the
+// authoritative computed badge would not include it, so a notification would be
+// a phantom. The seam deletes the target user so the mention FK insert fails.
+func TestMentionPersistenceFailureDoesNotNotify(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	member := h.Register("member")
+	serverID := h.CreateServer(owner, "S")
+	channelID := h.CreateChannel(owner, serverID, "general")
+	joinServer(h, owner, member, serverID)
+
+	ws := h.DialWS(member)
+	ws.Drain(400 * time.Millisecond)
+
+	api.BeforeMentionIncrementForTest = func() {
+		// Force the mention insert to fail by deleting the MESSAGE it references
+		// (message_id FK) right before the insert -- the member's WS stays
+		// connected, so a phantom NOTIFICATION would actually be observed.
+		_, _ = h.Pool.Exec(context.Background(),
+			`DELETE FROM messages WHERE channel_id = $1`, channelID)
+		api.BeforeMentionIncrementForTest = nil
+	}
+	t.Cleanup(func() { api.BeforeMentionIncrementForTest = nil })
+
+	if code := postTextMessage(h, owner, channelID, "@member phantom"); code != http.StatusCreated {
+		t.Fatalf("message: got %d", code)
+	}
+	if n := ws.CountEvents("NOTIFICATION", 700*time.Millisecond); n != 0 {
+		t.Fatalf("a failed mention persistence must not notify, got %d", n)
+	}
+	// The WS must still be alive (control): a normal mention on a fresh message
+	// does notify.
+	ch2 := h.CreateChannel(owner, serverID, "second")
+	ws.Drain(300 * time.Millisecond)
+	if code := postTextMessage(h, owner, ch2, "@member real"); code != http.StatusCreated {
+		t.Fatalf("control message: got %d", code)
+	}
+	if n := ws.CountEvents("NOTIFICATION", 700*time.Millisecond); n != 1 {
+		t.Fatalf("control: a committed mention must notify (proves the WS is live), got %d", n)
+	}
+}
+
+// TestGrantBumpsReconcileGen: a PURE grant (gaining ViewChannel, no unsubscribe)
+// advances the reconcile generation, so a concurrent channel-create's stability
+// loop re-reads and includes the newly-authorized member. Revocations bump it
+// via UnsubscribeUser; grants must bump it explicitly. Verified directly (the
+// delivery-level effect is masked by BroadcastToChannel also picking up the
+// grant's own subscription).
+func TestGrantBumpsReconcileGen(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	member := h.Register("member")
+	serverID := h.CreateServer(owner, "S")
+	h.CreateChannel(owner, serverID, "general")
+	joinServer(h, owner, member, serverID)
+
+	// Revoke so the member holds no ViewChannel, and connect (reconcile only
+	// acts on online users).
+	def := defaultRoleID(h, owner, serverID)
+	if code := patchRolePerms(h, owner, serverID, def, permissions.SendMessages); code != http.StatusOK {
+		t.Fatalf("revoke: got %d", code)
+	}
+	ws := h.DialWS(member)
+	ws.Drain(300 * time.Millisecond)
+
+	before := h.Hub.ReconcileGen()
+	// Pure grant: gain ViewChannel. The member subscribes to the server's
+	// channels (no unsubscribe), so only the explicit grant bump advances gen.
+	if code := patchRolePerms(h, owner, serverID, def, permissions.ViewChannel|permissions.SendMessages); code != http.StatusOK {
+		t.Fatalf("grant: got %d", code)
+	}
+	if h.Hub.ReconcileGen() <= before {
+		t.Fatalf("a grant must advance the reconcile generation: before=%d after=%d", before, h.Hub.ReconcileGen())
+	}
+}
+
+// TestRevokeAfterStablePassExcludedFromCreate: a ViewChannel revocation landing
+// AFTER the stability pass but BEFORE delivery must not receive CHANNEL_CREATE.
+// Delivery is via BroadcastToChannel (the live subscription set under the hub
+// lock), and the revocation synchronously unsubscribes the member -- a captured
+// recipient slice would have leaked the event.
+func TestRevokeAfterStablePassExcludedFromCreate(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	member := h.Register("member")
+	serverID := h.CreateServer(owner, "S")
+	joinServer(h, owner, member, serverID)
+
+	ws := h.DialWS(member)
+	ws.Drain(400 * time.Millisecond)
+
+	def := defaultRoleID(h, owner, serverID)
+	api.AfterChannelCreateStableForTest = func() {
+		if code := patchRolePerms(h, owner, serverID, def, permissions.SendMessages); code != http.StatusOK {
+			t.Errorf("revoke: got %d", code)
+		}
+	}
+	t.Cleanup(func() { api.AfterChannelCreateStableForTest = nil })
+
+	if code := h.Request(http.MethodPost, "/api/v1/servers/"+serverID+"/channels",
+		owner.AccessToken, map[string]string{"name": "contested"}, nil); code != http.StatusCreated {
+		t.Fatalf("create: got %d", code)
+	}
+	if n := ws.CountEvents("CHANNEL_CREATE", 600*time.Millisecond); n != 0 {
+		t.Fatalf("a member revoked after the stable pass must not receive CHANNEL_CREATE, got %d", n)
+	}
+}
+
+// TestGrantDuringCreateReceivesCreate: a ViewChannel grant landing during
+// creation advances the reconcile generation (grants bump it, not only
+// revokes), so the stability loop re-reads authorization, includes the
+// newly-authorized member, subscribes them, and BroadcastToChannel delivers
+// CHANNEL_CREATE -- they are not left with a live subscription but no announce.
+func TestGrantDuringCreateReceivesCreate(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	member := h.Register("member")
+	serverID := h.CreateServer(owner, "S")
+	joinServer(h, owner, member, serverID)
+
+	// Revoke first so the member starts UNauthorized; the grant during create
+	// re-authorizes them.
+	def := defaultRoleID(h, owner, serverID)
+	if code := patchRolePerms(h, owner, serverID, def, permissions.SendMessages); code != http.StatusOK {
+		t.Fatalf("initial revoke: got %d", code)
+	}
+
+	ws := h.DialWS(member)
+	ws.Drain(400 * time.Millisecond)
+
+	granted := false
+	api.AfterChannelCreateSubscribeForTest = func() {
+		if granted {
+			return
+		}
+		granted = true
+		// Grant ViewChannel back inside the create's authz window.
+		if code := patchRolePerms(h, owner, serverID, def,
+			permissions.ViewChannel|permissions.SendMessages); code != http.StatusOK {
+			t.Errorf("grant: got %d", code)
+		}
+	}
+	t.Cleanup(func() { api.AfterChannelCreateSubscribeForTest = nil })
+
+	if code := h.Request(http.MethodPost, "/api/v1/servers/"+serverID+"/channels",
+		owner.AccessToken, map[string]string{"name": "fresh"}, nil); code != http.StatusCreated {
+		t.Fatalf("create: got %d", code)
+	}
+	if n := ws.CountEvents("CHANNEL_CREATE", 800*time.Millisecond); n != 1 {
+		t.Fatalf("a member granted access during create must receive CHANNEL_CREATE exactly once, got %d", n)
+	}
+}

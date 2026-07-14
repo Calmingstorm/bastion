@@ -247,12 +247,25 @@ func reconcileServerSubscriptions(ctx context.Context, db *pgxpool.Pool, hub *re
 	// Every hub mutation is synchronous, so when this returns a revoked member is
 	// already off the channel and no later broadcast can reach them — and no
 	// pending queued subscribe can drain afterward to resurrect access.
+	granted := false
 	for _, chID := range channelIDs {
 		if view[chID] {
-			hub.SubscribeUser(userID, chID)
+			// SubscribeUser reports whether it actually ADDED a subscription; a
+			// no-op re-subscribe of an already-subscribed channel does not count,
+			// so an unrelated role change does not spuriously churn create loops.
+			if hub.SubscribeUser(userID, chID) {
+				granted = true
+			}
 		} else {
 			hub.UnsubscribeUser(userID, chID)
 		}
+	}
+	// A real grant (a newly-added subscription) does not bump the reconcile
+	// generation via UnsubscribeUser, so bump it explicitly: a concurrent
+	// channel-create must observe that this member gained access and include
+	// them in CHANNEL_CREATE.
+	if granted {
+		hub.BumpReconcileGen()
 	}
 }
 
@@ -860,14 +873,21 @@ func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, a
 		if BeforeMentionIncrementForTest != nil {
 			BeforeMentionIncrementForTest()
 		}
-		_, err := h.db.Exec(r.Context(),
+		// The NOTIFICATION is contingent on the mention actually COMMITTING. If
+		// the mention row fails, the computed badge cannot count it, so a
+		// notification would be a pure phantom -- skip it. If the read_states
+		// anchor fails (an existing-row member), the badge WILL still count the
+		// mention on the next fetch, but a live notification with no committed
+		// anchor is inconsistent, so skip it too and let the fetch surface the
+		// badge.
+		if _, err := h.db.Exec(r.Context(),
 			`INSERT INTO mentions (user_id, channel_id, message_id, seq)
 			 VALUES ($1, $2, $3, $4)
 			 ON CONFLICT (user_id, message_id) DO NOTHING`,
 			uid, channelID, msgID, msgSeq,
-		)
-		if err != nil {
-			log.Error().Err(err).Msg("failed to record mention")
+		); err != nil {
+			log.Error().Err(err).Msg("failed to record mention; skipping notification")
+			continue
 		}
 		// Ensure a read_states row exists (watermark NULL = nothing read yet) so
 		// the computed badge surfaces for a channel the member has never acked --
@@ -877,10 +897,11 @@ func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, a
 			 ON CONFLICT (user_id, channel_id) DO NOTHING`,
 			uid, channelID,
 		); err != nil {
-			log.Error().Err(err).Msg("failed to ensure read_states row for mention")
+			log.Error().Err(err).Msg("failed to ensure read_states row for mention; skipping notification")
+			continue
 		}
 
-		// Notify via WebSocket
+		// Notify via WebSocket (only reached once the mention is committed)
 		h.hub.BroadcastToUser(uid, realtime.Event{
 			Type: realtime.EventNotification,
 			Data: map[string]any{

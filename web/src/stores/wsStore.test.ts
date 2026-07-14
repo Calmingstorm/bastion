@@ -146,6 +146,22 @@ describe('wsStore MESSAGE_CREATE production wiring', () => {
     expect(useUnreadStore.getState().isUnread('ch-r')).toBe(true);
   });
 
+  it('a message for an unknown server channel refetches the selected server channels', () => {
+    // Grant/create race safety net: a member subscribed to a channel they never
+    // got CHANNEL_CREATE for gets its messages; the unknown-channel path must
+    // refetch the selected server's channels to heal the missing entry.
+    useServerStore.setState({ selectedServerId: 'srv-x', channels: [], selectedChannelId: null });
+    useDMStore.setState({ dmChannels: [], selectedDMId: null });
+    vi.mocked(client.apiGetChannels).mockReturnValue(new Promise(() => {}) as never);
+    vi.mocked(client.apiGetMemberPermissions).mockResolvedValue({ permissions: 0 } as never);
+    vi.mocked(client.apiGetDMs).mockReturnValue(new Promise(() => {}) as never);
+    handlers['MESSAGE_CREATE']({
+      message: { id: 'm1', channelId: 'ch-unknown', content: 'hi', createdAt: '2026-07-14T12:00:00Z' },
+    });
+    expect(vi.mocked(client.apiGetChannels)).toHaveBeenCalledWith('srv-x');
+    useServerStore.getState().reset();
+  });
+
   it('does not mark the ACTIVE channel unread', () => {
     useServerStore.setState({ selectedChannelId: 'ch-a' });
     handlers['MESSAGE_CREATE']({

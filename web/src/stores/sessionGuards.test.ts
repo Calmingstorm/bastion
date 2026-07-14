@@ -1066,30 +1066,24 @@ describe('session-boundary guards', () => {
   // F38 rounds 24.5-27: unread counts are SERVER-OWNED. Local writes apply an
   // optimistic update then TRIGGER an authoritative fetch through the lineage;
   // supersession orders the world, and no committed count is client-computed.
-  it('a held read-state fetch does not erase an overlapping ack', async () => {
+  // F38 round 34: the ack RETURNS the committed read state; the client commits
+  // that (claiming the lineage) instead of guessing then chasing a follow-up.
+  it('a held read-state fetch reconciles an overlapping ack, not erases it', async () => {
     useUnreadStore.setState({ readStates: {}, unreadChannels: new Set(['c1']) });
     const dHeld = deferred<unknown>();
-    const dTriggered = deferred<unknown>();
-    vi.mocked(client.apiGetReadStates)
-      .mockReturnValueOnce(dHeld.promise as never)
-      .mockReturnValueOnce(dTriggered.promise as never);
-    vi.mocked(client.apiAckChannel).mockResolvedValue(undefined as never);
-    const pFetch = useUnreadStore.getState().fetchReadStates(); // snapshot held
-    await useUnreadStore.getState().ackChannel('c1', 'm9'); // user reads c1 mid-flight
+    vi.mocked(client.apiGetReadStates).mockReturnValue(dHeld.promise as never);
+    vi.mocked(client.apiAckChannel).mockResolvedValue({
+      userId: '', channelId: 'c1', lastMessageId: 'm9', lastReadAt: '2026-07-14T12:00:00Z', lastReadSeq: 9, mentionCount: 0,
+    } as never);
+    const pFetch = useUnreadStore.getState().fetchReadStates(); // pre-ack snapshot held
+    await useUnreadStore.getState().ackChannel('c1', 'm9'); // claims the committed state
     dHeld.resolve([
-      { channelId: 'c1', lastMessageId: 'm1', mentionCount: 3 }, // pre-ack read: SUPERSEDED
+      { channelId: 'c1', lastMessageId: 'm1', lastReadSeq: 1, mentionCount: 3 }, // pre-ack read
       { channelId: 'c2', lastMessageId: 'm2', mentionCount: 1 },
     ]);
     await pFetch;
-    expect(useUnreadStore.getState().readStates['c1']?.mentionCount).toBe(0); // ack survived
-    dTriggered.resolve([
-      { channelId: 'c1', lastMessageId: 'm9', mentionCount: 0 }, // post-ack truth
-      { channelId: 'c2', lastMessageId: 'm2', mentionCount: 1 },
-    ]);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(useUnreadStore.getState().readStates['c1']?.mentionCount).toBe(0);
-    expect(useUnreadStore.getState().readStates['c2']?.mentionCount).toBe(1); // snapshot row survived
+    expect(useUnreadStore.getState().readStates['c1']?.mentionCount).toBe(0); // ack reconciled IN, not erased
+    expect(useUnreadStore.getState().readStates['c2']?.mentionCount).toBe(1); // snapshot's other row survived
     useUnreadStore.getState().reset();
   });
 
@@ -1129,16 +1123,16 @@ describe('session-boundary guards', () => {
       readStates: { c5: { userId: '', channelId: 'c5', lastMessageId: 'm1', lastReadAt: '', mentionCount: 2 } },
       unreadChannels: new Set(['c5']),
     });
-    const dAck = deferred<void>();
+    const dAck = deferred<ReadState>();
     vi.mocked(client.apiAckChannel).mockReturnValue(dAck.promise as never);
     vi.mocked(client.apiGetReadStates).mockClear();
     const pAck = useUnreadStore.getState().ackChannel('c5', 'm9');
     useUnreadStore.getState().reset(); // same auth generation
-    dAck.resolve();
+    dAck.resolve({ userId: '', channelId: 'c5', lastMessageId: 'm9', lastReadAt: '', lastReadSeq: 9, mentionCount: 0 });
     await pAck;
     expect(useUnreadStore.getState().readStates).toEqual({}); // no write into the reset store
     expect(useUnreadStore.getState().unreadChannels.size).toBe(0);
-    expect(vi.mocked(client.apiGetReadStates)).not.toHaveBeenCalled(); // no orphan follow-up
+    expect(vi.mocked(client.apiGetReadStates)).not.toHaveBeenCalled(); // the ack never fetches
     useUnreadStore.getState().reset();
   });
 
@@ -1188,79 +1182,100 @@ describe('session-boundary guards', () => {
     useUnreadStore.getState().reset();
   });
 
-  it('a late ack does not erase a mention that arrived during its flight', async () => {
+  it('a late ack whose response predates a mid-flight mention is not committed', async () => {
+    // A mention arrives during the ack flight -> the ack response (from before
+    // it) is stale, so it is neither committed nor claimed; the mention's own
+    // triggered fetch settles truth.
     useUnreadStore.setState({
-      readStates: { c1: { userId: '', channelId: 'c1', lastMessageId: 'm1', lastReadAt: '', mentionCount: 2 } },
+      readStates: { c1: { userId: '', channelId: 'c1', lastMessageId: 'm1', lastReadAt: '', lastReadSeq: 1, mentionCount: 2 } },
       unreadChannels: new Set(['c1']),
     });
-    const dAck = deferred<void>();
+    const dAck = deferred<ReadState>();
     vi.mocked(client.apiAckChannel).mockReturnValue(dAck.promise as never);
-    const dMention = deferred<unknown>();
-    const dAckFollow = deferred<unknown>();
-    vi.mocked(client.apiGetReadStates)
-      .mockReturnValueOnce(dMention.promise as never)
-      .mockReturnValueOnce(dAckFollow.promise as never);
+    const dMentionFetch = deferred<unknown>();
+    vi.mocked(client.apiGetReadStates).mockReturnValue(dMentionFetch.promise as never);
     const pAck = useUnreadStore.getState().ackChannel('c1', 'm1'); // reading up to m1
-    useUnreadStore.getState().incrementMention('c1'); // a NEW ping lands mid-flight
-    useUnreadStore.getState().markUnread('c1');
-    dAck.resolve();
+    useUnreadStore.getState().incrementMention('c1'); // a NEW ping lands mid-flight (bumps activity)
+    dAck.resolve({ userId: '', channelId: 'c1', lastMessageId: 'm1', lastReadAt: '', lastReadSeq: 1, mentionCount: 0 }); // stale
     await pAck;
-    expect(useUnreadStore.getState().getMentionCount('c1')).toBe(3); // optimistic state untouched by the ack
-    expect(useUnreadStore.getState().isUnread('c1')).toBe(true); // unread flag not erased
-    dMention.resolve([{ channelId: 'c1', lastMessageId: 'm1', mentionCount: 1 }]); // superseded
-    dAckFollow.resolve([{ channelId: 'c1', lastMessageId: 'm1', mentionCount: 1 }]); // post-ack truth: the new ping
+    expect(useUnreadStore.getState().getMentionCount('c1')).toBe(3); // optimistic bump untouched by the stale ack
+    expect(useUnreadStore.getState().isUnread('c1')).toBe(true); // flag not erased
+    dMentionFetch.resolve([{ channelId: 'c1', lastMessageId: 'm9', lastReadSeq: 1, mentionCount: 1 }]); // server truth
     await Promise.resolve();
     await Promise.resolve();
-    expect(useUnreadStore.getState().getMentionCount('c1')).toBe(1); // the newer mention survives
-    expect(useUnreadStore.getState().isUnread('c1')).toBe(true);
+    expect(useUnreadStore.getState().getMentionCount('c1')).toBe(1); // the mention's fetch settled it
     useUnreadStore.getState().reset();
   });
 
-  it('a delayed ack does not zero an authoritative rebase; the server settles it', async () => {
-    // Odin round 26 blocker 2: a post-ack fetch commits a newer count, then the
-    // delayed ack settles. The ack applies NO arithmetic -- its optimistic zero
-    // is gated on nothing having moved, and its follow-up fetch commits truth.
+  it('a mid-flight non-mention message triggers a settling fetch, not stale state', async () => {
+    // Web-review finding: a plain markUnread during the ack flight bumps the
+    // activity epoch but triggers no fetch of its own, so the stale ack response
+    // must be settled by a fetch here or the count stays wrong forever.
     useUnreadStore.setState({
-      readStates: { c4: { userId: '', channelId: 'c4', lastMessageId: 'm1', lastReadAt: '', mentionCount: 2 } },
+      readStates: { c6: { userId: '', channelId: 'c6', lastMessageId: 'm1', lastReadAt: '', lastReadSeq: 1, mentionCount: 4 } },
+      unreadChannels: new Set(['c6']),
+    });
+    const dAck = deferred<ReadState>();
+    vi.mocked(client.apiAckChannel).mockReturnValue(dAck.promise as never);
+    const dSettle = deferred<unknown>();
+    vi.mocked(client.apiGetReadStates).mockReturnValue(dSettle.promise as never);
+    const pAck = useUnreadStore.getState().ackChannel('c6', 'm1');
+    useUnreadStore.getState().markUnread('c6', { seq: 9 }); // non-mention new message mid-flight
+    dAck.resolve({ userId: '', channelId: 'c6', lastMessageId: 'm1', lastReadAt: '', lastReadSeq: 1, mentionCount: 0 }); // stale
+    await pAck;
+    expect(vi.mocked(client.apiGetReadStates)).toHaveBeenCalled(); // settled via fetch, not left stale
+    dSettle.resolve([{ channelId: 'c6', lastMessageId: 'm9', lastReadSeq: 9, mentionCount: 2 }]); // truth
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(useUnreadStore.getState().getMentionCount('c6')).toBe(2); // authoritative, not the stale 4 or 0
+    useUnreadStore.getState().reset();
+  });
+
+  it('a fetch retires an ack-raised flag once the server shows no mentions', async () => {
+    // Web-review finding: an ack that raises the flag for a nonzero committed
+    // count records no flagRaised; a later fetch must still retire it when the
+    // mentions are read elsewhere (committed count -> 0).
+    useUnreadStore.setState({
+      // Flag present, but NO flagRaised entry (as if raised by an ack's count).
+      readStates: { c7: { userId: '', channelId: 'c7', lastMessageId: 'm1', lastReadAt: '', lastReadSeq: 5, mentionCount: 2 } },
+      unreadChannels: new Set(['c7']),
+    });
+    const dFetch = deferred<unknown>();
+    vi.mocked(client.apiGetReadStates).mockReturnValue(dFetch.promise as never);
+    const pFetch = useUnreadStore.getState().fetchReadStates();
+    dFetch.resolve([{ channelId: 'c7', lastMessageId: 'm9', lastReadSeq: 9, mentionCount: 0 }]); // read elsewhere
+    await pFetch;
+    expect(useUnreadStore.getState().isUnread('c7')).toBe(false); // flag retired, not stuck
+    useUnreadStore.getState().reset();
+  });
+
+  it('an ack commits the server-returned count, not a local guess', async () => {
+    // The response carries cross-device mentions the ack did NOT cover (count 2):
+    // the client commits that, keeping the channel flagged, instead of zeroing.
+    useUnreadStore.setState({
+      readStates: { c4: { userId: '', channelId: 'c4', lastMessageId: 'm1', lastReadAt: '', lastReadSeq: 1, mentionCount: 5 } },
       unreadChannels: new Set(['c4']),
     });
-    const dAck = deferred<void>();
-    vi.mocked(client.apiAckChannel).mockReturnValue(dAck.promise as never);
-    const dRebase = deferred<unknown>();
-    const dFollow = deferred<unknown>();
-    vi.mocked(client.apiGetReadStates)
-      .mockReturnValueOnce(dRebase.promise as never)
-      .mockReturnValueOnce(dFollow.promise as never);
-    const pAck = useUnreadStore.getState().ackChannel('c4', 'm1');
-    const pRebase = useUnreadStore.getState().fetchReadStates();
-    dRebase.resolve([{ channelId: 'c4', lastMessageId: 'm1', mentionCount: 5 }]); // authoritative rebase
-    await pRebase;
-    expect(useUnreadStore.getState().getMentionCount('c4')).toBe(5);
-    dAck.resolve(); // the delayed ack settles AFTER the rebase
-    await pAck;
-    expect(useUnreadStore.getState().getMentionCount('c4')).toBe(5); // NOT zeroed by arithmetic
-    dFollow.resolve([{ channelId: 'c4', lastMessageId: 'm1', mentionCount: 3 }]); // post-ack server truth
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(useUnreadStore.getState().getMentionCount('c4')).toBe(3); // the server settled it
+    vi.mocked(client.apiAckChannel).mockResolvedValue({
+      userId: '', channelId: 'c4', lastMessageId: 'm3', lastReadAt: '', lastReadSeq: 3, mentionCount: 2,
+    } as never);
+    await useUnreadStore.getState().ackChannel('c4', 'm3');
+    expect(useUnreadStore.getState().getMentionCount('c4')).toBe(2); // server truth, not 0 and not 5
+    expect(useUnreadStore.getState().isUnread('c4')).toBe(true); // nonzero committed count keeps it flagged
     useUnreadStore.getState().reset();
   });
 
-  it('an ack with no mid-flight activity clears cleanly', async () => {
+  it('an ack with a zero committed count clears cleanly', async () => {
     useUnreadStore.setState({
-      readStates: { c2: { userId: '', channelId: 'c2', lastMessageId: 'm1', lastReadAt: '', mentionCount: 3 } },
+      readStates: { c2: { userId: '', channelId: 'c2', lastMessageId: 'm1', lastReadAt: '', lastReadSeq: 1, mentionCount: 3 } },
       unreadChannels: new Set(['c2']),
     });
-    vi.mocked(client.apiAckChannel).mockResolvedValue(undefined as never);
-    vi.mocked(client.apiGetReadStates).mockResolvedValue([
-      { channelId: 'c2', lastMessageId: 'm9', mentionCount: 0 },
-    ] as never);
+    vi.mocked(client.apiAckChannel).mockResolvedValue({
+      userId: '', channelId: 'c2', lastMessageId: 'm9', lastReadAt: '', lastReadSeq: 9, mentionCount: 0,
+    } as never);
     await useUnreadStore.getState().ackChannel('c2', 'm9');
     expect(useUnreadStore.getState().getMentionCount('c2')).toBe(0);
     expect(useUnreadStore.getState().isUnread('c2')).toBe(false);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(useUnreadStore.getState().getMentionCount('c2')).toBe(0); // follow-up agrees
     useUnreadStore.getState().reset();
   });
 
@@ -1411,22 +1426,23 @@ describe('session-boundary guards', () => {
     useUnreadStore.getState().reset();
   });
 
-  it('the optimistic ack preserves the known watermark: covered events stay covered mid-flight', async () => {
-    // Odin round 31 blocker 4: the optimistic write must not DROP lastReadSeq --
-    // while the follow-up fetch is pending (or forever, if it fails), a delayed
-    // event already covered by the previous watermark would re-flag the channel.
+  it('the ack commits the server watermark; a later covered event stays covered', async () => {
+    // The committed response carries the true watermark (seq 90). The client
+    // commits it directly -- no pending/failed follow-up window -- so a delayed
+    // event already below it does not re-flag the channel.
     useUnreadStore.setState({
       readStates: {
-        c9: { userId: '', channelId: 'c9', lastMessageId: 'm5', lastReadAt: '2026-07-14T12:00:00Z', lastReadSeq: 90, mentionCount: 0 },
+        c9: { userId: '', channelId: 'c9', lastMessageId: 'm5', lastReadAt: '2026-07-14T12:00:00Z', lastReadSeq: 5, mentionCount: 0 },
       },
       unreadChannels: new Set(['c9']),
     });
-    vi.mocked(client.apiAckChannel).mockResolvedValue(undefined as never);
-    vi.mocked(client.apiGetReadStates).mockReturnValue(new Promise(() => {}) as never); // follow-up never settles
+    vi.mocked(client.apiAckChannel).mockResolvedValue({
+      userId: '', channelId: 'c9', lastMessageId: 'm9', lastReadAt: '2026-07-14T12:00:10Z', lastReadSeq: 90, mentionCount: 0,
+    } as never);
     await useUnreadStore.getState().ackChannel('c9', 'm9');
-    expect(useUnreadStore.getState().readStates['c9']?.lastReadSeq).toBe(90); // watermark survived
+    expect(useUnreadStore.getState().readStates['c9']?.lastReadSeq).toBe(90); // committed from the response
     useUnreadStore.getState().markUnread('c9', { seq: 85, at: '2026-07-14T12:00:20Z' }); // delayed covered event
-    expect(useUnreadStore.getState().isUnread('c9')).toBe(false); // still covered
+    expect(useUnreadStore.getState().isUnread('c9')).toBe(false); // covered by the committed watermark
     useUnreadStore.getState().reset();
   });
 
@@ -1460,8 +1476,9 @@ describe('session-boundary guards', () => {
     expect(vi.mocked(client.apiGetReadStates)).not.toHaveBeenCalled();
     // But with an unread flag up, the same ack DOES go through.
     useUnreadStore.getState().markUnread('c12', { seq: 10 });
-    vi.mocked(client.apiAckChannel).mockResolvedValue(undefined as never);
-    vi.mocked(client.apiGetReadStates).mockResolvedValue([] as never);
+    vi.mocked(client.apiAckChannel).mockResolvedValue({
+      userId: '', channelId: 'c12', lastMessageId: 'm10', lastReadAt: '', lastReadSeq: 10, mentionCount: 0,
+    } as never);
     await useUnreadStore.getState().ackChannel('c12', 'm10');
     expect(vi.mocked(client.apiAckChannel)).toHaveBeenCalledTimes(1);
     useUnreadStore.getState().reset();
@@ -1507,12 +1524,11 @@ describe('session-boundary guards', () => {
     });
     useUnreadStore.getState().markUnread('c10'); // raised with NO watermark (legacy path)
     expect(useUnreadStore.getState().isUnread('c10')).toBe(true);
-    const dAck = deferred<void>();
+    const dAck = deferred<ReadState>();
     vi.mocked(client.apiAckChannel).mockReturnValue(dAck.promise as never);
-    vi.mocked(client.apiGetReadStates).mockResolvedValue([] as never);
     const pAck = useUnreadStore.getState().ackChannel('c10', 'm9');
     useUnreadStore.getState().markUnread('c10', { seq: 85 }); // covered: NOT activity
-    dAck.resolve();
+    dAck.resolve({ userId: '', channelId: 'c10', lastMessageId: 'm9', lastReadAt: '', lastReadSeq: 90, mentionCount: 0 });
     await pAck;
     expect(useUnreadStore.getState().isUnread('c10')).toBe(false); // the ack's clear was not suppressed
     useUnreadStore.getState().reset();
@@ -1787,11 +1803,11 @@ describe('session-boundary guards', () => {
 
   it('unreadStore.ackChannel: an ack that resolves after the session ends does not write', async () => {
     useUnreadStore.setState({ readStates: {}, unreadChannels: new Set(['c1']) });
-    const d = deferred<void>();
+    const d = deferred<ReadState>();
     vi.mocked(client.apiAckChannel).mockReturnValue(d.promise);
     const p = useUnreadStore.getState().ackChannel('c1', 'm1');
     invalidateSession();
-    d.resolve();
+    d.resolve({ userId: '', channelId: 'c1', lastMessageId: 'm1', lastReadAt: '', lastReadSeq: 1, mentionCount: 0 });
     await p;
     expect(useUnreadStore.getState().readStates).toEqual({}); // no read-state written
     expect(useUnreadStore.getState().unreadChannels.has('c1')).toBe(true); // not cleared
