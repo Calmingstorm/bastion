@@ -307,6 +307,17 @@ describe('session invalidation', () => {
     // (the adapter is async; microtask flushes are not enough) before A settles.
     await new Promise((r) => setTimeout(r, 0));
 
+    // r1 (account A's original request) rejects when A fails, but it is not awaited
+    // until the end of the test -- and the macrotask gaps below would otherwise leave
+    // it momentarily rejected-with-no-handler, which Node reports as an unhandled
+    // rejection (failing the run even though every assertion passes). Attach its
+    // handler synchronously here. In production the caller awaits the request in a
+    // guarded try/catch immediately, so this window never exists.
+    const r1Settled = r1.then(
+      () => 'resolved' as const,
+      () => 'rejected' as const
+    );
+
     // A settles late: with the guard it must NOT reject r3 (which waits on B).
     rejectA(new Error('A failed'));
     await new Promise((r) => setTimeout(r, 0));
@@ -316,7 +327,7 @@ describe('session invalidation', () => {
     const r3res = await r3;
     expect((r3res as { data: { url: string } }).data.url).toBe('/r3'); // not drained by A
 
-    await expect(r1).rejects.toBeTruthy(); // r1 (account A) genuinely failed
+    expect(await r1Settled).toBe('rejected'); // r1 (account A) genuinely failed
     await rb;
     postSpy.mockRestore();
   });
