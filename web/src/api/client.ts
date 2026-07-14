@@ -184,6 +184,16 @@ apiClient.interceptors.response.use(
       error.response?.status === 401 &&
       !(originalRequest as InternalAxiosRequestConfig & { _retry?: boolean })._retry
     ) {
+      // A 401 from an auth endpoint is a CREDENTIAL failure (bad login/register/
+      // reset), not an expired session -- it must never enter the refresh path.
+      // Login tears the old identity down first, so there is no refresh token;
+      // routing this 401 through the refresh machinery invoked the auth-failure
+      // cascade (another logout, another generation advance) and turned "invalid
+      // credentials" into a silent SessionSupersededError.
+      if ((originalRequest.url ?? '').startsWith('/auth/')) {
+        return Promise.reject(error);
+      }
+
       // A request issued under a session that has since ended must not refresh or
       // retry -- doing so would reuse the NEW account's credentials for the OLD
       // request. Reject it; its (session-guarded) caller ignores the result.

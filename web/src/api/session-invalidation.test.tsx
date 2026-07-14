@@ -515,4 +515,85 @@ describe('session invalidation', () => {
     expect(await r1Settled).toBe('resolved'); // the leader retried inside its own (pre-boundary) turn
     postSpy.mockRestore();
   });
+
+  // F38 round 10: a 401 from an auth endpoint is a CREDENTIAL failure, not an
+  // expired session. Routing it through the refresh path (which login's teardown
+  // left without a refresh token) fired the auth-failure cascade -- another logout,
+  // another generation advance -- and turned "invalid credentials" into a silent
+  // SessionSupersededError with no error shown to the user.
+  it('an invalid login surfaces the credential error, not a silent supersession', async () => {
+    storage.setItem('accessToken', 'a-access');
+    storage.setItem('refreshToken', 'a-refresh');
+    const onFail = vi.fn();
+    setAuthFailureHandler(onFail);
+    const postSpy = vi.spyOn(axios, 'post').mockRejectedValue(new Error('refresh must not run'));
+
+    apiClient.defaults.adapter = (async (config) => {
+      const err = new Error('Unauthorized') as Error & Record<string, unknown>;
+      err.config = config;
+      err.response = { status: 401, data: { error: 'invalid credentials' } };
+      err.isAxiosError = true;
+      throw err;
+    }) as AxiosAdapter;
+
+    await expect(useAuthStore.getState().login('a@x.com', 'wrong')).rejects.toThrow(/invalid|login failed/i);
+    expect(useAuthStore.getState().error).toBeTruthy(); // the user SEES the failure
+    expect(postSpy).not.toHaveBeenCalled(); // no refresh attempt for an auth 401
+    expect(onFail).not.toHaveBeenCalled(); // no auth-failure cascade
+
+    useAuthStore.setState({ user: null, isAuthenticated: false, error: null });
+    postSpy.mockRestore();
+  });
+
+  // F38 round 10: the teardown-before-request order is load-bearing and must hold
+  // through the REAL interceptor -- the synchronous request interceptor attaches
+  // the token at creation, so if teardown ran first the login request carries no
+  // stale header and storage is already clear when it goes out.
+  it('login creates its request only after the previous identity is torn down', async () => {
+    storage.setItem('accessToken', 'a-access');
+    storage.setItem('refreshToken', 'a-refresh');
+    let sawAuthHeader: unknown = 'unset';
+    let sawStoredToken: string | null = 'unset';
+    apiClient.defaults.adapter = (async (config) => {
+      sawAuthHeader = config.headers?.Authorization;
+      sawStoredToken = storage.getItem('accessToken');
+      return {
+        data: { user: { id: 'u-b', username: 'bob' }, accessToken: 'b-access', refreshToken: 'b-refresh' },
+        status: 200, statusText: 'OK', headers: {}, config,
+      } as AxiosResponse;
+    }) as AxiosAdapter;
+
+    await useAuthStore.getState().login('b@x.com', 'pw');
+
+    expect(sawAuthHeader).toBeUndefined(); // no stale token attached at creation
+    expect(sawStoredToken).toBeNull(); // storage already torn down at send time
+    expect(storage.getItem('accessToken')).toBe('b-access'); // new identity persisted
+
+    useAuthStore.setState({ user: null, isAuthenticated: false, error: null });
+    clearTokens();
+  });
+
+  it('register creates its request only after the previous identity is torn down', async () => {
+    storage.setItem('accessToken', 'a-access');
+    storage.setItem('refreshToken', 'a-refresh');
+    let sawAuthHeader: unknown = 'unset';
+    let sawStoredToken: string | null = 'unset';
+    apiClient.defaults.adapter = (async (config) => {
+      sawAuthHeader = config.headers?.Authorization;
+      sawStoredToken = storage.getItem('accessToken');
+      return {
+        data: { user: { id: 'u-b', username: 'bob' }, accessToken: 'b-access', refreshToken: 'b-refresh' },
+        status: 200, statusText: 'OK', headers: {}, config,
+      } as AxiosResponse;
+    }) as AxiosAdapter;
+
+    await useAuthStore.getState().register('bob', 'b@x.com', 'pw');
+
+    expect(sawAuthHeader).toBeUndefined();
+    expect(sawStoredToken).toBeNull();
+    expect(storage.getItem('accessToken')).toBe('b-access');
+
+    useAuthStore.setState({ user: null, isAuthenticated: false, error: null });
+    clearTokens();
+  });
 });

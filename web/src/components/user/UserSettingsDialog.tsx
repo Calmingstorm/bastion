@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useAuthStore } from '../../stores/authStore';
-import { apiUpdateProfile, apiUploadAvatar, apiChangePassword, apiChangeEmail, apiDeleteAccount, clearTokens } from '../../api/client';
+import { apiUpdateProfile, apiUploadAvatar, apiChangePassword, apiChangeEmail, apiDeleteAccount } from '../../api/client';
 import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { useLayoutStore } from '../../stores/layoutStore';
 import { useThemeStore } from '../../stores/themeStore';
@@ -498,7 +498,11 @@ function DeleteAccountForm() {
             try {
               await apiDeleteAccount(password);
               if (!isSessionGenerationCurrent(generation)) return;
-              clearTokens();
+              // The account no longer exists: perform the FULL identity transition
+              // (invalidate, abort in-flight requests, clear tokens + auth state,
+              // disconnect the socket, reset every per-user store) -- not just a
+              // token clear. The redirect is a final belt on top, not the teardown.
+              useAuthStore.getState().logout();
               window.location.href = '/login'; // Delete account — hard redirect is intentional
             } catch {
               if (!isSessionGenerationCurrent(generation)) return;

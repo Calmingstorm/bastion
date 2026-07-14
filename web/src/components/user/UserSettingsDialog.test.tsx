@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import * as client from '../../api/client';
 import { UserSettingsDialog } from './UserSettingsDialog';
 import { useAuthStore } from '../../stores/authStore';
+import { useServerStore } from '../../stores/serverStore';
 import { invalidateSession } from '../../api/session';
 import { storage } from '../../utils/storage';
 import type { User } from '../../types';
@@ -140,6 +141,30 @@ describe('UserSettingsDialog session ownership', () => {
 
     expect(clearSpy).not.toHaveBeenCalled(); // B's credentials untouched
     expect(storage.getItem('user')).toBe(JSON.stringify(userB));
+  });
+
+  // F38 round 10: a SUCCESSFUL deletion must perform the full identity transition
+  // (the account no longer exists) -- not just clear tokens and hope the redirect
+  // reloads. The deleted user must not remain authenticated with cached data.
+  it('a current-session account deletion performs the full identity transition', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(client, 'apiDeleteAccount').mockResolvedValue(undefined);
+    useAuthStore.setState({ isAuthenticated: true });
+    useServerStore.setState({ servers: [{ id: 's1', name: 'S', ownerId: 'u-a' }] as never });
+
+    render(<UserSettingsDialog open onOpenChange={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: 'account' }));
+    await user.click(screen.getByRole('button', { name: 'Delete Account' }));
+    await user.type(screen.getByPlaceholderText('DELETE'), 'DELETE');
+    await user.type(screen.getByPlaceholderText('Your password'), 'password1');
+    await user.click(screen.getByRole('button', { name: 'Permanently Delete Account' }));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(useAuthStore.getState().isAuthenticated).toBe(false); // identity ended
+    expect(useAuthStore.getState().user).toBeNull();
+    expect(useServerStore.getState().servers).toEqual([]); // per-user stores reset
   });
 
   // F38 round 9: the password change owns its whole workflow, including the delayed
