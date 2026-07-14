@@ -1,8 +1,9 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useServerStore } from '../../stores/serverStore';
 import { usePresenceStore } from '../../stores/presenceStore';
 import { useAuthStore } from '../../stores/authStore';
 import { apiGetMembers } from '../../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { eventBus } from '../../utils/eventBus';
 import { usePermissionStore } from '../../stores/permissionStore';
 import { PERMISSIONS } from '../../utils/permissions';
@@ -20,17 +21,31 @@ export function MemberList() {
   const currentUser = useAuthStore((s) => s.user);
   const serverPerms = usePermissionStore((s) => selectedServerId ? s.permissions[selectedServerId] ?? 0 : 0);
 
+  // Monotonic fetch sequence: only the LATEST fetch owns the list, the presence
+  // writes, and the loading flag -- an old request settling while a newer one is
+  // still in flight must not clear the spinner (or write anything).
+  const fetchSeqRef = useRef(0);
+
   const fetchMemberList = useCallback(() => {
     if (!selectedServerId) return;
     setIsLoading(true);
+    // A members response settling after an identity boundary must not repopulate
+    // the NEW session's global presence store (or this list) with the old
+    // account's members.
+    const generation = captureSessionGeneration();
+    const seq = ++fetchSeqRef.current;
+    const owns = () => seq === fetchSeqRef.current && isSessionGenerationCurrent(generation);
     apiGetMembers(selectedServerId)
       .then((m) => {
+        if (!owns()) return;
         setMembers(m);
         const { setPresence } = usePresenceStore.getState();
         m.forEach((member) => setPresence(member.userId, member.status));
       })
       .catch(() => {})
-      .finally(() => setIsLoading(false));
+      .finally(() => {
+        if (owns()) setIsLoading(false);
+      });
   }, [selectedServerId]);
 
   useEffect(() => {

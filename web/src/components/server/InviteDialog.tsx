@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { apiCreateInvite, apiGetInvites, apiDeleteInvite } from '../../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { getPlatform } from '../../platform';
 import type { ServerInvite } from '../../types';
 
@@ -14,28 +15,45 @@ export function InviteDialog({ open, onOpenChange, serverId }: InviteDialogProps
   const [invites, setInvites] = useState<ServerInvite[]>([]);
   const [isCreating, setIsCreating] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
+  // Only the LATEST list fetch owns the list (session + recency): a held
+  // old-session response must not populate this still-mounted dialog late.
+  const listFetchSeqRef = useRef(0);
 
   useEffect(() => {
     if (open && serverId) {
-      apiGetInvites(serverId).then(setInvites).catch(() => {});
+      const generation = captureSessionGeneration();
+      const seq = ++listFetchSeqRef.current;
+      apiGetInvites(serverId)
+        .then((fetched) => {
+          if (seq === listFetchSeqRef.current && isSessionGenerationCurrent(generation)) {
+            setInvites(fetched);
+          }
+        })
+        .catch(() => {});
     }
   }, [open, serverId]);
 
   const handleCreate = async () => {
     setIsCreating(true);
+    // A create resolving after an identity boundary belongs to the previous
+    // session -- do not surface its invite link in the new session's UI.
+    const generation = captureSessionGeneration();
     try {
       const invite = await apiCreateInvite(serverId, { expiresIn: 86400 * 7 }); // 7 days
+      if (!isSessionGenerationCurrent(generation)) return;
       setInvites((prev) => [invite, ...prev]);
     } catch {
       // Error handling
     } finally {
-      setIsCreating(false);
+      if (isSessionGenerationCurrent(generation)) setIsCreating(false);
     }
   };
 
   const handleDelete = async (inviteId: string) => {
+    const generation = captureSessionGeneration();
     try {
       await apiDeleteInvite(inviteId);
+      if (!isSessionGenerationCurrent(generation)) return;
       setInvites((prev) => prev.filter((i) => i.id !== inviteId));
     } catch {
       // Error handling

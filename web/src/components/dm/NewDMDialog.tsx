@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
-import { apiSearchUsers, apiCreateDM } from '../../api/client';
+import { apiSearchUsers } from '../../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { useDMStore } from '../../stores/dmStore';
+import { useServerStore } from '../../stores/serverStore';
 import { resolveMediaUrl } from '../../platform';
 import type { MessageAuthor } from '../../types';
 
@@ -19,8 +21,13 @@ export function NewDMDialog({ open, onOpenChange }: NewDMDialogProps) {
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // Only the LATEST fired search owns the results (session + query recency): a
+  // slower OLDER query must not overwrite newer results, and an old-account
+  // response must not render after an identity boundary.
+  const searchSeqRef = useRef(0);
   const selectDM = useDMStore((s) => s.selectDM);
   const fetchDMs = useDMStore((s) => s.fetchDMs);
+  const createDM = useDMStore((s) => s.createDM);
 
   useEffect(() => {
     if (open) {
@@ -33,22 +40,31 @@ export function NewDMDialog({ open, onOpenChange }: NewDMDialogProps) {
   }, [open]);
 
   useEffect(() => {
+    // EVERY query change claims the sequence immediately -- clearing the input or
+    // typing again must supersede an already-fired in-flight request, not just the
+    // pending debounce timer. Otherwise stale results land beneath an empty input.
+    const seq = ++searchSeqRef.current;
     if (debounceRef.current) clearTimeout(debounceRef.current);
     if (!query.trim()) {
       setResults([]);
+      setIsSearching(false); // a superseded in-flight search will not clear this
       return;
     }
     debounceRef.current = setTimeout(async () => {
+      const generation = captureSessionGeneration();
+      const owns = () => seq === searchSeqRef.current && isSessionGenerationCurrent(generation);
       setIsSearching(true);
       try {
         const users = await apiSearchUsers(query.trim());
+        if (!owns()) return;
         // Filter out already selected users
         const selectedIds = new Set(selected.map((u) => u.id));
         setResults(users.filter((u) => !selectedIds.has(u.id)));
       } catch {
+        if (!owns()) return;
         setResults([]);
       } finally {
-        setIsSearching(false);
+        if (owns()) setIsSearching(false);
       }
     }, 300);
 
@@ -71,12 +87,24 @@ export function NewDMDialog({ open, onOpenChange }: NewDMDialogProps) {
     if (selected.length === 0) return;
     setIsCreating(true);
     setError(null);
+    // The whole create -> refresh -> select workflow is owned by the session it
+    // started under: it spans several awaits, and an identity boundary during ANY of
+    // them (not just the create) must stop the remaining side effects -- otherwise a
+    // DM belonging to the previous account gets selected in the new session.
+    const generation = captureSessionGeneration();
     try {
-      const dm = await apiCreateDM(selected.map((u) => u.id));
+      const dm = await createDM(selected.map((u) => u.id));
+      if (!dm || !isSessionGenerationCurrent(generation)) return;
       await fetchDMs();
+      if (!isSessionGenerationCurrent(generation)) return;
+      // Enter DM scope: without clearing the server selection, layouts that render
+      // selectedChannelId || selectedDMId keep showing the server channel instead
+      // of the newly created DM (and a held selectServer could shadow it).
+      useServerStore.getState().clearServerSelection();
       selectDM(dm.id);
       onOpenChange(false);
     } catch {
+      if (!isSessionGenerationCurrent(generation)) return;
       setError('Failed to create conversation.');
     } finally {
       setIsCreating(false);

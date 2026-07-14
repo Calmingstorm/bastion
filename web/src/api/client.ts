@@ -1,6 +1,11 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios';
 import { wsClient } from './websocket';
 import { storage } from '../utils/storage';
+import {
+  captureSessionGeneration,
+  isSessionGenerationCurrent,
+  onSessionInvalidated,
+} from './session';
 import type {
   User,
   Server,
@@ -57,17 +62,13 @@ export function linkAbortToSession(controller: AbortController): () => void {
   return () => sig.removeEventListener('abort', onAbort);
 }
 
-// sessionEpoch bumps on every logout. The token-refresh call uses the bare
-// axios.post (not apiClient), so aborting apiClient requests cannot cancel it —
-// the refresh path compares the epoch captured when it started against the
-// current one and refuses to write tokens if a logout happened in between.
-let sessionEpoch = 0;
-
-// abortInFlightRequests cancels every request currently in flight, invalidates
-// any pending token refresh, and starts a fresh session signal for subsequent
-// requests. Called on logout.
+// abortInFlightRequests cancels every request currently in flight and starts a
+// fresh session signal for subsequent requests. It is transport-level teardown
+// only; the identity boundary itself is the session generation, which the caller
+// (logout) must advance via invalidateSession() BEFORE calling this. The
+// token-refresh path (a bare axios.post that apiClient's abort cannot cancel)
+// captures that generation when it begins and refuses to write tokens if it moved.
 export function abortInFlightRequests(): void {
-  sessionEpoch += 1;
   sessionAbort.abort();
   sessionAbort = new AbortController();
 }
@@ -107,6 +108,11 @@ apiClient.interceptors.request.use(
     if (token && config.headers) {
       config.headers.Authorization = `Bearer ${token}`;
     }
+    // Stamp the request with the session generation it was issued under, so the 401
+    // handler can refuse to refresh/retry a request from a session that has since
+    // ended (which would otherwise refresh + retry it with the NEW account's creds).
+    (config as InternalAxiosRequestConfig & { __sessionGeneration?: number }).__sessionGeneration =
+      captureSessionGeneration();
     // Tie a request that has no signal of its own to the current session so logout
     // can cancel it. A caller that supplies its own signal is expected to link it to
     // the session itself (see linkAbortToSession) so it can unlink on settlement.
@@ -115,26 +121,55 @@ apiClient.interceptors.request.use(
     }
     return config;
   },
-  (error) => Promise.reject(error)
+  (error) => Promise.reject(error),
+  // Run synchronously so the generation stamp + auth token are captured at the
+  // moment the request is CREATED, not a microtask later -- otherwise a request
+  // issued just before an identity boundary could be stamped as the new session's
+  // and refresh with its credentials.
+  { synchronous: true }
 );
 
 // Response interceptor: handle 401 with token refresh
 let isRefreshing = false;
+// The session generation the in-flight refresh belongs to. A refresh (and the
+// requests queued behind it) serves only its own generation; if the session changes
+// mid-refresh, current-session requests must not queue behind or inherit it.
+let refreshGeneration = -1;
 let failedQueue: Array<{
   resolve: (token: string) => void;
   reject: (error: unknown) => void;
+  generation: number;
 }> = [];
 
-function processQueue(error: unknown, token: string | null = null): void {
+// Settle only the queued requests belonging to `generation` -- the refresh they were
+// queued behind. failedQueue is shared across refreshes, so a superseded refresh
+// settling must drain ITS OWN waiters (so they never hang) without disturbing the
+// waiters of the replacement refresh that took over.
+function processQueue(error: unknown, token: string | null, generation: number): void {
+  const keep: typeof failedQueue = [];
   failedQueue.forEach((prom) => {
-    if (error) {
+    if (prom.generation !== generation) {
+      keep.push(prom);
+    } else if (error) {
       prom.reject(error);
     } else if (token) {
       prom.resolve(token);
     }
   });
-  failedQueue = [];
+  failedQueue = keep;
 }
+
+// An identity boundary must settle prior-session waiters AT the boundary. Generation
+// scoping alone only drains them when their refresh settles -- but the refresh is a
+// bare axios.post that abortInFlightRequests() cannot cancel, so if it hangs, its
+// queued requests would stay pending forever. Reject them here instead; their callers
+// are generation-guarded and ignore the rejection.
+onSessionInvalidated(() => {
+  const stale = failedQueue.filter((prom) => !isSessionGenerationCurrent(prom.generation));
+  if (stale.length === 0) return;
+  failedQueue = failedQueue.filter((prom) => isSessionGenerationCurrent(prom.generation));
+  stale.forEach((prom) => prom.reject(new Error('session changed')));
+});
 
 apiClient.interceptors.response.use(
   (response) => response,
@@ -149,10 +184,48 @@ apiClient.interceptors.response.use(
       error.response?.status === 401 &&
       !(originalRequest as InternalAxiosRequestConfig & { _retry?: boolean })._retry
     ) {
+      // A 401 from an auth endpoint is a CREDENTIAL failure (bad login/register/
+      // reset), not an expired session -- it must never enter the refresh path.
+      // Login tears the old identity down first, so there is no refresh token;
+      // routing this 401 through the refresh machinery invoked the auth-failure
+      // cascade (another logout, another generation advance) and turned "invalid
+      // credentials" into a silent SessionSupersededError.
+      if ((originalRequest.url ?? '').startsWith('/auth/')) {
+        return Promise.reject(error);
+      }
+
+      // A request issued under a session that has since ended must not refresh or
+      // retry -- doing so would reuse the NEW account's credentials for the OLD
+      // request. Reject it; its (session-guarded) caller ignores the result.
+      const requestGeneration = (originalRequest as InternalAxiosRequestConfig & {
+        __sessionGeneration?: number;
+      }).__sessionGeneration;
+      if (requestGeneration !== undefined && !isSessionGenerationCurrent(requestGeneration)) {
+        return Promise.reject(error);
+      }
+
+      // If a refresh is in flight but belongs to a session that has since ended, do
+      // not let current-session requests queue behind it and inherit its dead-session
+      // outcome. Drop it (rejecting its own stale waiters) and start a fresh refresh
+      // for the current session.
+      if (isRefreshing && !isSessionGenerationCurrent(refreshGeneration)) {
+        processQueue(new Error('session changed'), null, refreshGeneration);
+        isRefreshing = false;
+      }
+
       if (isRefreshing) {
+        const queuedGeneration = refreshGeneration;
         return new Promise<string>((resolve, reject) => {
-          failedQueue.push({ resolve, reject });
+          failedQueue.push({ resolve, reject, generation: queuedGeneration });
         }).then((token) => {
+          // The refresh resolved for the session this request was queued under, but
+          // an identity boundary can land between that resolution and this
+          // continuation. Retrying then would re-enter the interceptor, which would
+          // re-stamp the old request with the NEW session's generation and bearer
+          // token. Recheck before retrying; the caller is generation-guarded.
+          if (!isSessionGenerationCurrent(queuedGeneration)) {
+            return Promise.reject(error);
+          }
           if (originalRequest.headers) {
             originalRequest.headers.Authorization = `Bearer ${token}`;
           }
@@ -162,56 +235,89 @@ apiClient.interceptors.response.use(
 
       (originalRequest as InternalAxiosRequestConfig & { _retry?: boolean })._retry = true;
       isRefreshing = true;
-      // Capture the session at the moment refresh begins; if a logout bumps the
-      // epoch before the refresh resolves, the result must be discarded.
-      const epochAtRefresh = sessionEpoch;
+      // The refresh belongs to the current session; capture it so its result is
+      // discarded if an identity boundary passes before it resolves.
+      refreshGeneration = captureSessionGeneration();
+      const generationAtRefresh = refreshGeneration;
 
       const refreshToken = getRefreshToken();
       if (!refreshToken) {
         // Drain any queued requests and clear the refreshing flag, otherwise a
         // concurrent 401 that queued behind this one waits forever and every
         // later request skips refresh (isRefreshing stuck true).
-        processQueue(error, null);
+        processQueue(error, null, generationAtRefresh);
         isRefreshing = false;
         clearTokens();
         onAuthFailure();
         return Promise.reject(error);
       }
 
+      // The refresh is a bare axios.post that abortInFlightRequests() cannot cancel,
+      // and the leader awaits it directly -- so a hung refresh would leave the leader
+      // pending across an identity boundary even after its followers are drained.
+      // Race the refresh against the boundary itself: invalidation settles the await.
+      let boundaryReject!: (e: unknown) => void;
+      const boundary = new Promise<never>((_resolve, reject) => {
+        boundaryReject = reject;
+      });
+      const unsubscribeBoundary = onSessionInvalidated(() =>
+        boundaryReject(new Error('session changed'))
+      );
+
       try {
-        const response = await axios.post<{ accessToken: string }>(
-          `${apiBaseURL}/auth/refresh`,
-          { refreshToken }
-        );
-        // A logout during the in-flight refresh must remain authoritative: do
-        // not write the new tokens back, update the socket, or resume queued
-        // requests — that would resurrect the dead session.
-        if (epochAtRefresh !== sessionEpoch) {
-          processQueue(new Error('session ended'), null);
+        const response = await Promise.race([
+          axios.post<{ accessToken: string }>(`${apiBaseURL}/auth/refresh`, {
+            refreshToken,
+          }),
+          boundary,
+        ]);
+        // A logout during the in-flight refresh must remain authoritative: do not
+        // write the new tokens back or update the socket. Reject this refresh's own
+        // stale waiters (matched by generation) so they don't hang, but leave a
+        // replacement refresh's waiters -- which carry a newer generation -- untouched.
+        if (!isSessionGenerationCurrent(generationAtRefresh)) {
+          processQueue(new Error('session changed'), null, generationAtRefresh);
           return Promise.reject(error);
         }
         const { accessToken } = response.data;
         setTokens(accessToken, refreshToken);
         wsClient.updateToken(accessToken);
-        processQueue(null, accessToken);
+        processQueue(null, accessToken, generationAtRefresh);
 
         if (originalRequest.headers) {
           originalRequest.headers.Authorization = `Bearer ${accessToken}`;
         }
         return apiClient(originalRequest);
       } catch (refreshError) {
-        processQueue(refreshError, null);
+        // Reject this refresh's own queued waiters (matched by generation) so they
+        // never hang -- whether or not the session has since moved on. A replacement
+        // refresh's waiters carry a different generation and are left untouched.
+        processQueue(refreshError, null, generationAtRefresh);
         // Only end the session when the refresh token itself is rejected. A
         // transient failure (network drop, 5xx) must not force a logout — leave
-        // the tokens in place so the next request can retry.
+        // the tokens in place so the next request can retry. And only if this
+        // refresh still belongs to the current session: a stale refresh (a newer
+        // account logged in while it was in flight) rejecting must not clear the
+        // new account's tokens or trigger its auth failure.
         const status = (refreshError as AxiosError)?.response?.status;
-        if (status === 401 || status === 403) {
+        if (
+          (status === 401 || status === 403) &&
+          isSessionGenerationCurrent(generationAtRefresh)
+        ) {
           clearTokens();
           onAuthFailure();
         }
         return Promise.reject(refreshError);
       } finally {
-        isRefreshing = false;
+        unsubscribeBoundary();
+        // Clear the flag only if this refresh still owns it -- i.e. no replacement
+        // took over. A replacement always starts under a newer generation and
+        // reassigns refreshGeneration, so an unchanged refreshGeneration means we
+        // still own isRefreshing, even if the session ended with no replacement
+        // starting (in which case we DO clear it, rather than leaving it stuck true).
+        if (refreshGeneration === generationAtRefresh) {
+          isRefreshing = false;
+        }
       }
     }
 
@@ -468,8 +574,12 @@ export async function apiGetDM(channelId: string): Promise<DMChannel> {
 export async function apiAckChannel(
   channelId: string,
   messageId: string
-): Promise<void> {
-  await apiClient.post(`/channels/${channelId}/ack`, { messageId });
+): Promise<ReadState> {
+  // The ack returns the COMMITTED read state (watermark + server-computed
+  // mention count), so the client commits server truth instead of guessing
+  // what the ack cleared.
+  const response = await apiClient.post<ReadState>(`/channels/${channelId}/ack`, { messageId });
+  return response.data;
 }
 
 export async function apiGetReadStates(): Promise<ReadState[]> {

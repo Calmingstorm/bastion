@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { apiSearchGifs, apiTrendingGifs } from '../../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import type { GifResult } from '../../api/client';
 import { useFeatureStore } from '../../stores/featureStore';
 
@@ -30,27 +31,44 @@ export function GifPicker({ onSelect }: GifPickerProps) {
     return () => document.removeEventListener('mousedown', handleClick);
   }, [open]);
 
+  // Only the LATEST query lineage owns the grid (session + query recency). The
+  // lineage is claimed on EVERY query change -- not when the debounced request
+  // fires -- so an already-fired older request cannot publish beneath a newly
+  // typed query during the debounce gap.
+  const gifSeqRef = useRef(0);
+  const fireOwned = useCallback((seq: number, fetcher: () => Promise<GifResult[]>) => {
+    const generation = captureSessionGeneration();
+    const owns = () => seq === gifSeqRef.current && isSessionGenerationCurrent(generation);
+    setLoading(true);
+    fetcher()
+      .then((g) => {
+        if (owns()) setGifs(g);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (owns()) setLoading(false);
+      });
+  }, []);
+
   // Load trending when opened
   useEffect(() => {
     if (!open) return;
-    setLoading(true);
-    apiTrendingGifs(20).then(setGifs).catch(() => {}).finally(() => setLoading(false));
-  }, [open]);
+    fireOwned(++gifSeqRef.current, () => apiTrendingGifs(20));
+  }, [open, fireOwned]);
 
   // Debounced search
   const handleSearch = useCallback((q: string) => {
     setQuery(q);
+    const seq = ++gifSeqRef.current; // every keystroke supersedes in-flight work
     if (debounceRef.current) clearTimeout(debounceRef.current);
     if (!q.trim()) {
-      setLoading(true);
-      apiTrendingGifs(20).then(setGifs).catch(() => {}).finally(() => setLoading(false));
+      fireOwned(seq, () => apiTrendingGifs(20));
       return;
     }
     debounceRef.current = setTimeout(() => {
-      setLoading(true);
-      apiSearchGifs(q.trim(), 20).then(setGifs).catch(() => {}).finally(() => setLoading(false));
+      fireOwned(seq, () => apiSearchGifs(q.trim(), 20));
     }, 300);
-  }, []);
+  }, [fireOwned]);
 
   return (
     <div ref={containerRef} className="relative">

@@ -1,12 +1,17 @@
 package realtime
 
 const (
-	EventMessageCreate        = "MESSAGE_CREATE"
-	EventMessageUpdate        = "MESSAGE_UPDATE"
-	EventMessageDelete        = "MESSAGE_DELETE"
-	EventChannelCreate        = "CHANNEL_CREATE"
-	EventChannelUpdate        = "CHANNEL_UPDATE"
-	EventChannelDelete        = "CHANNEL_DELETE"
+	EventMessageCreate = "MESSAGE_CREATE"
+	EventMessageUpdate = "MESSAGE_UPDATE"
+	EventMessageDelete = "MESSAGE_DELETE"
+	EventChannelCreate = "CHANNEL_CREATE"
+	EventChannelUpdate = "CHANNEL_UPDATE"
+	EventChannelDelete = "CHANNEL_DELETE"
+	// EventChannelsStale tells a user's client that its cached channel list for a
+	// server may be out of date (its channel visibility just changed) and should
+	// be refetched. Delivered per-USER so it reaches a member the same reconcile
+	// just unsubscribed from the affected channels.
+	EventChannelsStale        = "CHANNELS_STALE"
 	EventTypingStart          = "TYPING_START"
 	EventPresenceUpdate       = "PRESENCE_UPDATE"
 	EventServerMemberJoin     = "SERVER_MEMBER_JOIN"

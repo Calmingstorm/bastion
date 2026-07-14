@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
 
@@ -123,6 +124,12 @@ func (h *ServerHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
+
+	// The creating owner may already be connected: subscribe their live sockets
+	// to the new server's channels, or messages there never reach them until
+	// reconnect (the same class of gap as an unsubscribed channel create).
+	channelIDs, _ := getServerChannelIDs(r.Context(), h.db, server.ID)
+	subscribeViewable(r.Context(), h.db, h.hub, userID, channelIDs)
 
 	writeJSON(w, http.StatusCreated, server)
 }
@@ -532,10 +539,64 @@ func (h *ServerHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Broadcast SERVER_DELETE to all server channels before deletion
-	channelIDs, _ := getServerChannelIDs(r.Context(), h.db, serverID)
+	// Capture the recipient set and channel ids ATOMICALLY with the delete: a
+	// member joining between an early snapshot and the commit would be
+	// cascade-removed without ever receiving SERVER_DELETE. The transaction locks
+	// the server row FOR UPDATE first -- a concurrent join's INSERT INTO
+	// server_members takes an FK KEY-SHARE lock on that same row, so it blocks
+	// until this transaction commits (then the server is gone and the join
+	// fails). Members and channels are therefore read as the true final set. The
+	// broadcast still happens only AFTER commit (broadcasting first desyncs every
+	// client on a failed delete and lets a racing fetch resurrect state).
+	tx, err := h.db.Begin(r.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("failed to begin server delete")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+
+	var locked uuid.UUID
+	if err := tx.QueryRow(r.Context(),
+		`SELECT id FROM servers WHERE id = $1 FOR UPDATE`, serverID).Scan(&locked); err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "server not found"))
+		return
+	}
+
+	memberIDs := scanUUIDColumn(tx.Query(r.Context(),
+		`SELECT user_id FROM server_members WHERE server_id = $1`, serverID))
+	channelIDs := scanUUIDColumn(tx.Query(r.Context(),
+		`SELECT id FROM channels WHERE server_id = $1`, serverID))
+
+	// Seam: fires with the FOR UPDATE lock held and the recipient set captured,
+	// before the delete commits. A join attempted here must be blocked out by the
+	// lock (proving the capture is atomic with the delete); without FOR UPDATE it
+	// would slip in and be cascade-removed without a notification.
+	if DuringServerDeleteForTest != nil {
+		DuringServerDeleteForTest()
+	}
+
+	// Delete server — cascade deletes handle channels, messages, members, roles, bans, invites, categories, audit log
+	if _, err := tx.Exec(r.Context(), `DELETE FROM servers WHERE id = $1`, serverID); err != nil {
+		log.Error().Err(err).Msg("failed to delete server")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		log.Error().Err(err).Msg("failed to commit server delete")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+
+	// Forget the cascaded channels FIRST (each RemoveChannel bumps the reconcile
+	// generation), so a channel-create racing this server delete observes the
+	// change and cannot confirm a subscription to a channel whose server is gone.
+	// Then broadcast SERVER_DELETE once per captured member.
 	for _, chID := range channelIDs {
-		h.hub.BroadcastToChannel(chID, realtime.Event{
+		h.hub.RemoveChannel(chID)
+	}
+	for _, uid := range memberIDs {
+		h.hub.BroadcastToUser(uid, realtime.Event{
 			Type: realtime.EventServerDelete,
 			Data: map[string]string{
 				"serverId": serverID.String(),
@@ -543,16 +604,33 @@ func (h *ServerHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Delete server — cascade deletes handle channels, messages, members, roles, bans, invites, categories, audit log
-	_, err = h.db.Exec(r.Context(), `DELETE FROM servers WHERE id = $1`, serverID)
-	if err != nil {
-		log.Error().Err(err).Msg("failed to delete server")
-		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
-		return
-	}
-
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
+
+// scanUUIDColumn collects a single-UUID-column result (rows, err) into a slice,
+// tolerant of a nil error path from the inline Query call.
+func scanUUIDColumn(rows pgx.Rows, err error) []uuid.UUID {
+	if err != nil {
+		log.Error().Err(err).Msg("query for uuid column failed")
+		return nil
+	}
+	defer rows.Close()
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// DuringServerDeleteForTest runs while the server-delete transaction holds the
+// FOR UPDATE lock and has captured its recipient set, before the delete commits
+// (nil in production). Tests use it to attempt a join in that window and prove
+// the lock blocks it.
+var DuringServerDeleteForTest func()
 
 func (h *ServerHandler) UpdateNickname(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())

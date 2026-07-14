@@ -28,6 +28,9 @@ vi.mock('../../api/client', () => ({
 }));
 
 import { ChannelItem } from './ChannelItem';
+import { apiDeleteChannel } from '../../api/client';
+import { useServerStore } from '../../stores/serverStore';
+import { invalidateSession } from '../../api/session';
 
 const channel = { id: 'c1', name: 'general', type: 'text', position: 0 } as Channel;
 
@@ -51,5 +54,34 @@ describe('ChannelItem focus-return wiring', () => {
       confirmProps!.onConfirm!(); // start the (hanging) delete
     });
     expect(confirmProps!.isPending).toBe(true); // dialog is now locked
+  });
+
+  // F38 round 7: channel ids are stable across sessions. A delete that settles after
+  // an identity boundary must not remove a same-ID channel the NEW session loaded.
+  it('a delete settling after a session change does not remove a same-ID channel from the new session', async () => {
+    confirmProps = null;
+    let resolveDelete!: () => void;
+    vi.mocked(apiDeleteChannel).mockImplementationOnce(
+      () =>
+        new Promise<void>((res) => {
+          resolveDelete = () => res();
+        })
+    );
+    // The new session has a channel with the SAME id loaded.
+    useServerStore.setState({ channels: [channel], selectedChannelId: null });
+
+    render(<ChannelItem channel={channel} isSelected={false} onClick={() => {}} canManage serverId="s1" />);
+    await act(async () => {
+      confirmProps!.onConfirm!(); // delete in flight (held)
+    });
+
+    await act(async () => {
+      invalidateSession(); // a new account logs in
+      resolveDelete(); // the old delete then completes
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(useServerStore.getState().channels).toEqual([channel]); // not removed
+    useServerStore.setState({ channels: [], selectedChannelId: null });
   });
 });

@@ -21,6 +21,7 @@ import { InviteDialog } from '../server/InviteDialog';
 import { ServerSettingsDialog } from '../server/ServerSettingsDialog';
 import { UserPanel } from '../user/UserPanel';
 import { apiGetCategories, apiCreateCategory, apiUpdateCategory, apiDeleteCategory, apiReorderChannels } from '../../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { usePermissionStore } from '../../stores/permissionStore';
 import { PERMISSIONS } from '../../utils/permissions';
 import { eventBus } from '../../utils/eventBus';
@@ -123,31 +124,53 @@ export function ChannelList() {
     const newIndex = channels.findIndex((c) => c.id === over.id);
     if (oldIndex === -1 || newIndex === -1) return;
 
-    // Optimistic reorder in store
+    // Optimistic reorder as a FUNCTIONAL position apply (scoped + lineage
+    // claiming): applying positions to the CURRENT list preserves channels
+    // created/removed by realtime events after this reorder was computed.
     const reordered = [...channels];
     const [moved] = reordered.splice(oldIndex, 1);
     reordered.splice(newIndex, 0, moved);
-    useServerStore.setState({ channels: reordered });
-
-    // Persist to backend
     const positions = reordered.map((c, i) => ({ id: c.id, position: i }));
+    useServerStore.getState().setChannelPositions(selectedServerId, positions);
+
+    const revertPositions = channels.map((c) => ({ id: c.id, position: c.position }));
+    const generation = captureSessionGeneration();
     try {
       await apiReorderChannels(selectedServerId, positions);
     } catch {
-      // Revert on failure
-      useServerStore.setState({ channels });
+      // Revert on failure -- functionally, and never into a different session or
+      // server scope (setChannelPositions enforces the scope check).
+      if (isSessionGenerationCurrent(generation)) {
+        useServerStore.getState().setChannelPositions(selectedServerId, revertPositions);
+      }
     }
   }, [channels, selectedServerId]);
 
+  const categoriesSeqRef = useRef(0);
   const fetchCategories = useCallback(() => {
-    if (!selectedServerId) return;
+    if (!selectedServerId) {
+      // Empty scope invalidates outstanding reads: a held old-server response
+      // must not repopulate the (cleared) categories. (Post-round-18 the zombie
+      // state is also invisible -- the clear-on-change wipes it at any re-scope --
+      // so this claim closes the latent state rather than a visible defect.)
+      categoriesSeqRef.current += 1;
+      return;
+    }
+    // Owned by session AND recency: a fetch settling after an identity boundary
+    // must not populate the new session's UI, and an OLDER fetch settling after a
+    // newer one must not overwrite its categories.
+    const generation = captureSessionGeneration();
+    const seq = ++categoriesSeqRef.current;
     apiGetCategories(selectedServerId).then((cats) => {
+      if (seq !== categoriesSeqRef.current || !isSessionGenerationCurrent(generation)) return;
       setCategories(cats.sort((a, b) => a.position - b.position));
     }).catch(() => {});
   }, [selectedServerId]);
 
-  // Fetch categories when server changes
+  // Fetch categories when server changes -- clearing FIRST, so server A's
+  // categories are never displayed under server B (even if B's fetch fails).
   useEffect(() => {
+    setCategories([]);
     fetchCategories();
   }, [fetchCategories]);
 
@@ -173,13 +196,19 @@ export function ChannelList() {
     if (!trimmed || !selectedServerId) return;
 
     setIsCreating(true);
+    // Workflow-owned: a create settling after an identity boundary must not run the
+    // success UI (the store action rejects with SessionSupersededError on stale, and
+    // this covers the window between its settlement and this continuation).
+    const generation = captureSessionGeneration();
     try {
       await createChannel(selectedServerId, trimmed, undefined, createInCategoryId || undefined);
+      if (!isSessionGenerationCurrent(generation)) return;
       setNewChannelName('');
       setShowCreate(false);
       setCreateInCategoryId(null);
     } catch {
-      // Error is handled in the store
+      // Real errors are surfaced by the store; SessionSupersededError is neither a
+      // success nor an error of this session's concern.
     } finally {
       setIsCreating(false);
     }
@@ -190,8 +219,14 @@ export function ChannelList() {
     const trimmed = newCategoryName.trim();
     if (!trimmed || !selectedServerId) return;
 
+    // Owned by session AND server scope: a continuation settling after a server
+    // switch must not refetch (or reselect) the OLD server under the new one.
+    const generation = captureSessionGeneration();
+    const serverIdAtStart = selectedServerId;
     try {
       await apiCreateCategory(selectedServerId, trimmed);
+      if (!isSessionGenerationCurrent(generation)) return;
+      if (useServerStore.getState().selectedServerId !== serverIdAtStart) return;
       setNewCategoryName('');
       setShowCreateCategory(false);
       fetchCategories();
@@ -211,28 +246,46 @@ export function ChannelList() {
       setEditingCategoryId(null);
       return;
     }
+    const generation = captureSessionGeneration();
+    const serverIdAtStart = selectedServerId;
+    const stillOurs = () => isSessionGenerationCurrent(generation)
+      && useServerStore.getState().selectedServerId === serverIdAtStart;
     try {
       await apiUpdateCategory(selectedServerId, catId, { name: trimmed });
-      fetchCategories();
+      if (stillOurs()) fetchCategories();
     } catch {
       // silently fail
     }
-    setEditingCategoryId(null);
+    // Local editing state is scope-owned too: after a switch, this continuation
+    // must not dismiss editing state belonging to the NEW scope.
+    if (stillOurs()) setEditingCategoryId(null);
   };
 
   const handleDeleteCategory = async () => {
     if (!deletingCategoryId || !selectedServerId) return;
     setIsDeletingCategory(true); // locks the dialog so it can't be dismissed mid-request
+    const generation = captureSessionGeneration();
+    const serverIdAtStart = selectedServerId;
+    const stillOurs = () => isSessionGenerationCurrent(generation)
+      && useServerStore.getState().selectedServerId === serverIdAtStart;
     try {
       await apiDeleteCategory(selectedServerId, deletingCategoryId);
-      fetchCategories();
-      // Channels in deleted category become uncategorized — refetch channels
-      useServerStore.getState().selectServer(selectedServerId);
+      // A stale delete completing must not refetch into -- or reselect within --
+      // the NEW session or a DIFFERENT server scope.
+      if (stillOurs()) {
+        fetchCategories();
+        // Channels in deleted category become uncategorized — refetch channels
+        useServerStore.getState().selectServer(selectedServerId);
+      }
     } catch {
       // silently fail
     }
-    setIsDeletingCategory(false);
-    setDeletingCategoryId(null);
+    // Deletion/pending state is scope-owned: after a switch, this continuation
+    // must not dismiss a deletion dialog the user opened in the NEW scope.
+    if (stillOurs()) {
+      setIsDeletingCategory(false);
+      setDeletingCategoryId(null);
+    }
   };
 
   const handleEditCategoryKeyDown = (e: KeyboardEvent<HTMLInputElement>, catId: string) => {

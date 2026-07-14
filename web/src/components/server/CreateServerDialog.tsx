@@ -2,6 +2,11 @@ import { useState, type FormEvent } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useServerStore } from '../../stores/serverStore';
 import { apiJoinViaInvite } from '../../api/client';
+import {
+  captureSessionGeneration,
+  isSessionGenerationCurrent,
+  SessionSupersededError,
+} from '../../api/session';
 
 interface CreateServerDialogProps {
   open: boolean;
@@ -17,7 +22,7 @@ export function CreateServerDialog({
   const [inviteCode, setInviteCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const { createServer, selectServer, fetchServers } = useServerStore();
+  const { createServer, selectServer, fetchServers, addServer } = useServerStore();
 
   const handleCreate = async (e: FormEvent) => {
     e.preventDefault();
@@ -35,11 +40,18 @@ export function CreateServerDialog({
     }
 
     setIsSubmitting(true);
+    // The workflow is owned by the session it started under: a create settling
+    // after an identity boundary must not close/clear this dialog as a success.
+    const generation = captureSessionGeneration();
     try {
       await createServer(trimmedName);
+      if (!isSessionGenerationCurrent(generation)) return;
       setName('');
       onOpenChange(false);
     } catch (err: unknown) {
+      // Superseded: neither a success (do not close) nor an error to show.
+      if (err instanceof SessionSupersededError) return;
+      if (!isSessionGenerationCurrent(generation)) return;
       if (err instanceof Error) {
         setError(err.message);
       } else {
@@ -67,13 +79,25 @@ export function CreateServerDialog({
     }
 
     setIsSubmitting(true);
+    // Workflow-owned join: the joined server's id is only meaningful in the session
+    // that initiated the join. A boundary during any await must stop the rest --
+    // otherwise the new session's fetch/selection runs with the old workflow's id.
+    const generation = captureSessionGeneration();
     try {
       const server = await apiJoinViaInvite(code);
+      if (!isSessionGenerationCurrent(generation)) return;
+      // The join response asserts the server's existence: commit it BEFORE the
+      // list fetch so a tombstone from an earlier leave/kick/ban is cleared and
+      // the rejoined server is visible immediately (same as InvitePage).
+      addServer(server);
       await fetchServers();
+      if (!isSessionGenerationCurrent(generation)) return;
       await selectServer(server.id);
+      if (!isSessionGenerationCurrent(generation)) return;
       setInviteCode('');
       onOpenChange(false);
     } catch (err: unknown) {
+      if (!isSessionGenerationCurrent(generation)) return;
       if (err && typeof err === 'object' && 'response' in err) {
         const axiosErr = err as { response?: { data?: { error?: string } } };
         setError(axiosErr.response?.data?.error || 'Failed to join server.');

@@ -43,8 +43,12 @@ export const useWSStore = create<WSState>((set) => ({
 
     // Register handlers before connecting
     wsClient.on('MESSAGE_CREATE', (data: unknown) => {
-      const payload = data as { message: Message } | Message;
+      const payload = data as { message: Message; eventAt?: string } | Message;
       const message = 'message' in payload ? payload.message : payload;
+      // The server's own emission time. Prefer it over message.createdAt for the
+      // unread clock: bots may backdate createdAt (a presentation timestamp),
+      // and a backdated mention is still a post-acknowledgment EVENT.
+      const eventAt = 'message' in payload && payload.eventAt ? payload.eventAt : message.createdAt;
       if (message && message.channelId) {
         useMessageStore.getState().addMessage(message.channelId, message);
 
@@ -53,8 +57,22 @@ export const useWSStore = create<WSState>((set) => ({
         const selectedDMId = useDMStore.getState().selectedDMId;
         const activeChannelId = selectedChannelId || selectedDMId;
         if (message.channelId !== activeChannelId) {
-          useUnreadStore.getState().markUnread(message.channelId);
+          // Server-owned watermark first (message.seq); server-minted time as
+          // the fallback tier for pre-seq servers.
+          useUnreadStore.getState().markUnread(message.channelId, { seq: message.seq, at: eventAt });
         }
+
+        // A message in a channel is proof a DM is ALIVE: clear any DM
+        // close-tombstone BEFORE the refetch below, or the authoritative
+        // response revealing a reopened DM gets filtered as a stale read.
+        // Deliberately NOT asserted on the channel lineage: a message inserted
+        // concurrently with a channel delete can be broadcast AFTER the delete
+        // broadcast (different request goroutines), so it is not proof the
+        // delete failed -- clearing that tombstone would let a stale snapshot
+        // resurrect the deleted channel. Recovery for a genuinely failed
+        // delete-after-broadcast belongs to the server-side ordering fix
+        // (broadcast after commit).
+        useDMStore.getState().noteChannelAlive(message.channelId);
 
         // If this message is for a channel not in our lists, refetch DMs
         // (handles reopened DMs where the user had closed the conversation)
@@ -65,6 +83,14 @@ export const useWSStore = create<WSState>((set) => ({
           dmChannels.some((d) => d.id === message.channelId);
         if (!isKnownChannel) {
           useDMStore.getState().fetchDMs();
+          // Also refetch the selected server's channels: a member granted
+          // access to a new channel is subscribed (receives its messages) but
+          // may have missed CHANNEL_CREATE in the sub-tick grant/create race, so
+          // the channel is absent from their list. This heals it authoritatively.
+          const { selectedServerId } = useServerStore.getState();
+          if (selectedServerId) {
+            void useServerStore.getState().refreshChannels(selectedServerId);
+          }
         }
 
         // Clear typing indicator for this user
@@ -105,7 +131,10 @@ export const useWSStore = create<WSState>((set) => ({
     wsClient.on('CHANNEL_UPDATE', (data: unknown) => {
       const payload = data as { channel: Channel } | Channel;
       const channel = 'channel' in payload ? payload.channel : payload;
-      if (channel) {
+      // Reorder broadcasts arrive as partial {serverId, type} payloads -- they are
+      // not complete channels and must not be treated as one (an id-less "update"
+      // would journal a claim without a target).
+      if (channel && channel.id) {
         useServerStore.getState().updateChannel(channel);
       }
     });
@@ -113,7 +142,18 @@ export const useWSStore = create<WSState>((set) => ({
     wsClient.on('CHANNEL_DELETE', (data: unknown) => {
       const payload = data as { channelId: string; serverId: string };
       if (payload.channelId) {
-        useServerStore.getState().removeChannel(payload.channelId);
+        useServerStore.getState().removeChannel(payload.channelId, payload.serverId);
+      }
+    });
+
+    wsClient.on('CHANNELS_STALE', (data: unknown) => {
+      // A revocation just changed this user's channel visibility for a server.
+      // Refetch that server's channels if it is selected: the authoritative list
+      // omits the now-hidden channels, so serverStore reconciles away any channel
+      // a create-vs-revoke race delivered before the unsubscribe landed.
+      const payload = data as { serverId: string };
+      if (payload.serverId && useServerStore.getState().selectedServerId === payload.serverId) {
+        void useServerStore.getState().refreshChannels(payload.serverId);
       }
     });
 
@@ -133,11 +173,20 @@ export const useWSStore = create<WSState>((set) => ({
 
     wsClient.on('NOTIFICATION', (data: unknown) => {
       const payload = data as {
-        channelId: string; mentionCount?: number;
+        channelId: string; mentionCount?: number; seq?: number; createdAt?: string;
         senderName?: string; channelName?: string; content?: string;
       };
       if (payload.channelId) {
-        useUnreadStore.getState().markUnread(payload.channelId);
+        // Server-owned watermark first (same contract as MESSAGE_CREATE): a
+        // delayed notification whose message an ack already covered is dropped.
+        // markUnread returns false when the event is already covered -- in that
+        // case the badge must NOT be bumped and NO browser notification shown,
+        // or a stale ping resurfaces for a message the user already read.
+        const raised = useUnreadStore.getState().markUnread(payload.channelId, {
+          seq: payload.seq,
+          at: payload.createdAt,
+        });
+        if (!raised) return;
         if (payload.mentionCount) {
           useUnreadStore.getState().incrementMention(payload.channelId);
         }
@@ -156,15 +205,11 @@ export const useWSStore = create<WSState>((set) => ({
       if (payload.serverId && payload.userId) {
         const { user } = useAuthStore.getState();
         if (user && payload.userId === user.id) {
-          // We were kicked — remove the server from our list
-          const { servers, selectedServerId } = useServerStore.getState();
-          const remaining = servers.filter((s) => s.id !== payload.serverId);
-          if (selectedServerId === payload.serverId) {
-            useServerStore.setState({ servers: remaining, selectedServerId: remaining[0]?.id || null, channels: [], selectedChannelId: null });
-            if (remaining[0]) useServerStore.getState().selectServer(remaining[0].id);
-          } else {
-            useServerStore.setState({ servers: remaining });
-          }
+          // We were kicked — remove the server through the store action, which
+          // journals the removal (a held server-list snapshot cannot resurrect
+          // it), barriers the channel resource when it was selected, and
+          // auto-reselects the next server.
+          useServerStore.getState().removeServer(payload.serverId);
         } else {
           // Someone else was kicked — refresh member list
           eventBus.emit('bastion:member-update', payload);
@@ -189,11 +234,10 @@ export const useWSStore = create<WSState>((set) => ({
     wsClient.on('DM_CREATE', (data: unknown) => {
       const dm = data as DMChannel;
       if (dm && dm.id) {
-        const { dmChannels } = useDMStore.getState();
-        const exists = dmChannels.some((d) => d.id === dm.id);
-        if (!exists) {
-          useDMStore.setState({ dmChannels: [dm, ...dmChannels] });
-        }
+        // Unconditional: addDM upserts (replacing any stale same-ID object) and
+        // claims the lineage -- gating on local novelty here would let an older
+        // fetch snapshot replace the list.
+        useDMStore.getState().addDM(dm);
       }
     });
 
@@ -256,15 +300,9 @@ export const useWSStore = create<WSState>((set) => ({
       if (payload.serverId && payload.userId) {
         const { user } = useAuthStore.getState();
         if (user && payload.userId === user.id) {
-          // We were banned — remove the server from our list
-          const { servers, selectedServerId } = useServerStore.getState();
-          const remaining = servers.filter((s) => s.id !== payload.serverId);
-          if (selectedServerId === payload.serverId) {
-            useServerStore.setState({ servers: remaining, selectedServerId: remaining[0]?.id || null, channels: [], selectedChannelId: null });
-            if (remaining[0]) useServerStore.getState().selectServer(remaining[0].id);
-          } else {
-            useServerStore.setState({ servers: remaining });
-          }
+          // We were banned — same store-action path as a kick (journaled removal,
+          // channel barrier when selected, auto-reselect).
+          useServerStore.getState().removeServer(payload.serverId);
         } else {
           // Someone else was banned — refresh member list
           eventBus.emit('bastion:member-update', payload);

@@ -168,6 +168,43 @@ func requireChannelPermission(db *pgxpool.Pool, w http.ResponseWriter, r *http.R
 	return true
 }
 
+// BeforeMentionIncrementForTest runs immediately before each mention row is
+// recorded (nil in production). Tests use it to acknowledge the very message
+// being processed, proving the COMPUTED badge (COUNT of mentions above the read
+// watermark) excludes a mention the member has already read -- the
+// ack-races-processMentions window is otherwise not deterministically reachable.
+var BeforeMentionIncrementForTest func()
+
+// insertMessageTx runs fn inside a transaction holding the channel's
+// message-insert advisory lock. The lock serializes message inserts per
+// channel, so a message's database-assigned seq order matches its
+// commit/visibility order WITHIN the channel -- without it, a transaction
+// could allocate a lower seq, stall uncommitted while a later message commits
+// and is acknowledged, and then surface as "already read". Every path that
+// persists a message MUST insert through this (or take the same lock in its
+// own transaction). The key domain is distinct from other per-channel advisory
+// locks (pins).
+func insertMessageTx(ctx context.Context, db *pgxpool.Pool, channelID uuid.UUID, fn func(tx pgx.Tx) error) error {
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockChannelForInsert(ctx, tx, channelID); err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func lockChannelForInsert(ctx context.Context, tx pgx.Tx, channelID uuid.UUID) error {
+	_, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext('msg-insert:' || $1))`, channelID.String())
+	return err
+}
+
 // subscribeViewable subscribes the user's WebSocket clients to the given
 // channels, but only those the user may currently view — so joining (even with
 // an already-connected socket) never subscribes to a hidden channel.
@@ -210,12 +247,39 @@ func reconcileServerSubscriptions(ctx context.Context, db *pgxpool.Pool, hub *re
 	// Every hub mutation is synchronous, so when this returns a revoked member is
 	// already off the channel and no later broadcast can reach them — and no
 	// pending queued subscribe can drain afterward to resurrect access.
+	granted := false
+	revoked := false
 	for _, chID := range channelIDs {
 		if view[chID] {
-			hub.SubscribeUser(userID, chID)
+			// SubscribeUser reports whether it actually ADDED a subscription; a
+			// no-op re-subscribe of an already-subscribed channel does not count,
+			// so an unrelated role change does not spuriously churn create loops.
+			if hub.SubscribeUser(userID, chID) {
+				granted = true
+			}
 		} else {
-			hub.UnsubscribeUser(userID, chID)
+			if hub.UnsubscribeUser(userID, chID) {
+				revoked = true
+			}
 		}
+	}
+	// A real grant (a newly-added subscription) does not bump the reconcile
+	// generation via UnsubscribeUser, so bump it explicitly: a concurrent
+	// channel-create must observe that this member gained access and include
+	// them in CHANNEL_CREATE.
+	if granted {
+		hub.BumpReconcileGen()
+	}
+	// A revocation closes the create-vs-revoke race authoritatively on the
+	// client: a CHANNEL_CREATE can be delivered in the window between this
+	// revocation's DB commit and the unsubscribe above, so tell the member's
+	// client to refetch this server's channels -- the authoritative list omits
+	// the now-hidden channel and the client reconciles away the spurious entry.
+	if revoked {
+		hub.BroadcastToUser(userID, realtime.Event{
+			Type: realtime.EventChannelsStale,
+			Data: map[string]string{"serverId": serverID.String()},
+		})
 	}
 }
 
@@ -499,19 +563,21 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 
 	var msg models.Message
 	var author models.Author
-	err = h.db.QueryRow(r.Context(),
-		`WITH new_msg AS (
-			INSERT INTO messages (channel_id, author_id, content, reply_to_id, embeds, created_at)
-			VALUES ($1, $2, $3, $4, $5, COALESCE($6, NOW()))
-			RETURNING id, channel_id, author_id, content, edited_at, reply_to_id, embeds, created_at
-		)
-		SELECT m.id, m.channel_id, m.content, m.edited_at, m.reply_to_id, m.created_at,
-			   u.id, u.username, u.display_name, u.avatar_url, u.is_bot, m.embeds
-		FROM new_msg m
-		INNER JOIN users u ON u.id = m.author_id`,
-		channelID, userID, req.Content, req.ReplyToID, embedsJSON, req.CreatedAt,
-	).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.ReplyToID, &msg.CreatedAt,
-		&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL, &author.IsBot, &embedsJSON)
+	err = insertMessageTx(r.Context(), h.db, channelID, func(tx pgx.Tx) error {
+		return tx.QueryRow(r.Context(),
+			`WITH new_msg AS (
+				INSERT INTO messages (channel_id, author_id, content, reply_to_id, embeds, created_at)
+				VALUES ($1, $2, $3, $4, $5, COALESCE($6, NOW()))
+				RETURNING id, channel_id, author_id, content, edited_at, reply_to_id, embeds, created_at, seq
+			)
+			SELECT m.id, m.channel_id, m.content, m.edited_at, m.reply_to_id, m.created_at, m.seq,
+				   u.id, u.username, u.display_name, u.avatar_url, u.is_bot, m.embeds
+			FROM new_msg m
+			INNER JOIN users u ON u.id = m.author_id`,
+			channelID, userID, req.Content, req.ReplyToID, embedsJSON, req.CreatedAt,
+		).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.ReplyToID, &msg.CreatedAt, &msg.Seq,
+			&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL, &author.IsBot, &embedsJSON)
+	})
 	if err != nil {
 		log.Error().Err(err).Msg("failed to insert message")
 		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
@@ -547,15 +613,19 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 		)
 	}
 
-	// Broadcast to WebSocket subscribers
+	// Broadcast to WebSocket subscribers. eventAt is the server's own emission
+	// time and is NOT overridable: bots may backdate msg.createdAt (a
+	// presentation timestamp), and unread reconciliation must compare
+	// server-minted times only -- a backdated mention must still read as a
+	// post-acknowledgment event.
 	h.hub.BroadcastToChannel(channelID, realtime.Event{
 		Type: realtime.EventMessageCreate,
-		Data: msg,
+		Data: map[string]any{"message": msg, "eventAt": time.Now().UTC()},
 	})
 
 	// Process @mentions (only for server channels, not DMs)
 	if serverID != nil {
-		h.processMentions(r, *serverID, channelID, userID, req.Content)
+		h.processMentions(r, *serverID, channelID, userID, req.Content, msg.ID, msg.Seq)
 	}
 
 	writeJSON(w, http.StatusCreated, msg)
@@ -729,7 +799,7 @@ func (h *MessageHandler) Delete(w http.ResponseWriter, r *http.Request) {
 }
 
 // processMentions parses @mentions from message content and sends notifications.
-func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, authorID uuid.UUID, content string) {
+func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, authorID uuid.UUID, content string, msgID uuid.UUID, msgSeq int64) {
 	matches := mentionRegex.FindAllStringSubmatch(content, -1)
 	if len(matches) == 0 {
 		return
@@ -809,18 +879,70 @@ func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, a
 			continue
 		}
 
-		// Increment mention count in read_states
-		_, err := h.db.Exec(r.Context(),
-			`INSERT INTO read_states (user_id, channel_id, mention_count)
-			 VALUES ($1, $2, 1)
-			 ON CONFLICT (user_id, channel_id) DO UPDATE SET mention_count = read_states.mention_count + 1`,
-			uid, channelID,
-		)
-		if err != nil {
-			log.Error().Err(err).Msg("failed to increment mention count")
+		// Record the mention as a row carrying the message's seq. The badge is
+		// COUNT(mentions with seq > last_read_seq), so this needs no watermark
+		// gate: a mention for an already-read message simply falls below the
+		// watermark and is not counted, and a mention for a newer message counts
+		// even if processMentions lags an ack of an older one.
+		if BeforeMentionIncrementForTest != nil {
+			BeforeMentionIncrementForTest()
+		}
+		// The mention row AND its read_states anchor commit in ONE transaction:
+		// the badge is COUNT(mentions above the watermark) sourced FROM read_states
+		// rows, so a mention with no anchor is committed-but-invisible. Rolling
+		// both together keeps the projection consistent, and the NOTIFICATION is
+		// contingent on that committed, visible state -- a partial failure emits
+		// nothing (a phantom badge/popup for state that does not exist).
+		//
+		// INVARIANT (load-bearing for correctness): processMentions runs EXACTLY
+		// ONCE per message, and msgID is a fresh server-minted UUID, so the mention
+		// INSERT is never a duplicate in practice. mentionCommitted therefore means
+		// "a NEW mention was persisted." If a future replay/retry/bulk path ever
+		// calls this more than once for the same (user_id, message_id), the ON
+		// CONFLICT DO NOTHING would no-op yet still return true, re-notifying with
+		// no new mention -- gate on the mention INSERT's RowsAffected there.
+		mentionCommitted := func() bool {
+			tx, err := h.db.Begin(r.Context())
+			if err != nil {
+				log.Error().Err(err).Msg("failed to begin mention tx; skipping notification")
+				return false
+			}
+			defer func() { _ = tx.Rollback(r.Context()) }()
+			// Ensure the projection anchor exists before inserting the mention. The
+			// mentions INSERT/DELETE trigger advances projection_revision under this
+			// row's lock, ordering every change to the computed badge with acks.
+			if _, err := tx.Exec(r.Context(),
+				`INSERT INTO read_states (user_id, channel_id) VALUES ($1, $2)
+				 ON CONFLICT (user_id, channel_id) DO NOTHING`,
+				uid, channelID,
+			); err != nil {
+				log.Error().Err(err).Msg("failed to ensure read_states anchor; skipping notification")
+				return false
+			}
+			result, err := tx.Exec(r.Context(),
+				`INSERT INTO mentions (user_id, channel_id, message_id, seq)
+				 VALUES ($1, $2, $3, $4)
+				 ON CONFLICT (user_id, message_id) DO NOTHING`,
+				uid, channelID, msgID, msgSeq,
+			)
+			if err != nil {
+				log.Error().Err(err).Msg("failed to record mention; skipping notification")
+				return false
+			}
+			if result.RowsAffected() == 0 {
+				return false // replay: no new projection and no duplicate notification
+			}
+			if err := tx.Commit(r.Context()); err != nil {
+				log.Error().Err(err).Msg("failed to commit mention; skipping notification")
+				return false
+			}
+			return true
+		}()
+		if !mentionCommitted {
+			continue
 		}
 
-		// Notify via WebSocket
+		// Notify via WebSocket (only reached once the mention is committed)
 		h.hub.BroadcastToUser(uid, realtime.Event{
 			Type: realtime.EventNotification,
 			Data: map[string]any{
@@ -829,6 +951,13 @@ func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, a
 				"senderName":   senderName,
 				"channelName":  channelName,
 				"content":      snippet,
+				// The triggering message's database-assigned seq IS the causal
+				// watermark: comparable against the read watermark (also a seq),
+				// no wall clock involved, not part of any request surface.
+				"seq": msgSeq,
+				// Emission time, display/fallback only -- deliberately not the
+				// message's createdAt, which bots may backdate.
+				"createdAt": time.Now().UTC(),
 			},
 		})
 	}
@@ -908,6 +1037,14 @@ func (h *MessageHandler) BulkImport(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 
+	// Seq order must match commit order (see insertMessageTx): the whole import
+	// holds the channel's insert lock, so its block of seqs commits atomically.
+	if err := lockChannelForInsert(r.Context(), tx, channelID); err != nil {
+		log.Error().Err(err).Msg("failed to lock channel for bulk import")
+		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
+		return
+	}
+
 	// Fetch author info once
 	var author models.Author
 	err = tx.QueryRow(r.Context(),
@@ -934,9 +1071,9 @@ func (h *MessageHandler) BulkImport(w http.ResponseWriter, r *http.Request) {
 		err = tx.QueryRow(r.Context(),
 			`INSERT INTO messages (channel_id, author_id, content, embeds, author_override, created_at)
 			 VALUES ($1, $2, $3, $4, $5, COALESCE($6, NOW()))
-			 RETURNING id, channel_id, content, edited_at, embeds, author_override, created_at`,
+			 RETURNING id, channel_id, content, edited_at, embeds, author_override, created_at, seq`,
 			channelID, userID, m.Content, embedsJSON, authorOverrideJSON, m.CreatedAt,
-		).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &returnedEmbeds, &returnedOverride, &msg.CreatedAt)
+		).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &returnedEmbeds, &returnedOverride, &msg.CreatedAt, &msg.Seq)
 		if err != nil {
 			log.Error().Err(err).Msg("failed to insert imported message")
 			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
@@ -959,11 +1096,12 @@ func (h *MessageHandler) BulkImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Broadcast all imported messages
+	// Broadcast all imported messages (same envelope as live creates: eventAt is
+	// the emission time -- imported history is NEW to the channel now)
 	for _, msg := range result {
 		h.hub.BroadcastToChannel(channelID, realtime.Event{
 			Type: realtime.EventMessageCreate,
-			Data: msg,
+			Data: map[string]any{"message": msg, "eventAt": time.Now().UTC()},
 		})
 	}
 

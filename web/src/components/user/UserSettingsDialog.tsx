@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useAuthStore } from '../../stores/authStore';
-import { apiUpdateProfile, apiUploadAvatar, apiChangePassword, apiChangeEmail, apiDeleteAccount, clearTokens } from '../../api/client';
+import { apiUpdateProfile, apiUploadAvatar, apiChangePassword, apiChangeEmail, apiDeleteAccount } from '../../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { useLayoutStore } from '../../stores/layoutStore';
 import { useThemeStore } from '../../stores/themeStore';
 import { useBreakpoints } from '../../hooks/useMediaQuery';
@@ -131,32 +132,50 @@ function ProfileTab({ onClose }: { onClose: () => void }) {
     e.preventDefault();
     setError(null);
     setIsSaving(true);
+    // A profile save resolving after an identity boundary belongs to the PREVIOUS
+    // account: it must not overwrite the new session's user (store + persistent
+    // storage) or close the dialog as a success.
+    const generation = captureSessionGeneration();
     try {
       const updated = await apiUpdateProfile({
         displayName: displayName.trim() || undefined,
         aboutMe: aboutMe.trim() || undefined,
       });
+      if (!isSessionGenerationCurrent(generation)) return;
       useAuthStore.setState({ user: updated });
       storage.setItem('user', JSON.stringify(updated));
       onClose();
     } catch {
+      if (!isSessionGenerationCurrent(generation)) return;
       setError('Failed to save profile.');
     } finally {
-      setIsSaving(false);
+      // The saving flag belongs to this workflow's session too: a stale settlement
+      // must not flip this (previous account's) form back to ready.
+      if (isSessionGenerationCurrent(generation)) setIsSaving(false);
     }
   };
 
   const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    // Same ownership as the profile save: a stale upload must not overwrite the
+    // new session's user -- and the FileReader callback is an async boundary too,
+    // so a preview read under the previous account must not publish into the new
+    // session's UI.
+    const generation = captureSessionGeneration();
     const reader = new FileReader();
-    reader.onload = (ev) => setAvatarPreview(ev.target?.result as string);
+    reader.onload = (ev) => {
+      if (!isSessionGenerationCurrent(generation)) return;
+      setAvatarPreview(ev.target?.result as string);
+    };
     reader.readAsDataURL(file);
     try {
       const updated = await apiUploadAvatar(file);
+      if (!isSessionGenerationCurrent(generation)) return;
       useAuthStore.setState({ user: updated });
       storage.setItem('user', JSON.stringify(updated));
     } catch {
+      if (!isSessionGenerationCurrent(generation)) return;
       setError('Failed to upload avatar.');
     }
   };
@@ -278,14 +297,20 @@ function ChangeEmailForm() {
         <button disabled={isSaving || !newEmail || !password}
           onClick={async () => {
             setIsSaving(true); setError(null);
+            // A stale email change must not overwrite the new session's user.
+            const generation = captureSessionGeneration();
             try {
               const updated = await apiChangeEmail(newEmail, password);
+              if (!isSessionGenerationCurrent(generation)) return;
               useAuthStore.setState({ user: updated });
               storage.setItem('user', JSON.stringify(updated));
               setShow(false); setNewEmail(''); setPassword('');
             } catch {
+              if (!isSessionGenerationCurrent(generation)) return;
               setError('Failed to change email. Check your password.');
-            } finally { setIsSaving(false); }
+            } finally {
+              if (isSessionGenerationCurrent(generation)) setIsSaving(false);
+            }
           }}
           className="rounded-[3px] bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white hover:bg-[var(--accent-hover)] disabled:opacity-50">
           {isSaving ? 'Saving...' : 'Update Email'}
@@ -331,14 +356,24 @@ function ChangePasswordForm() {
             if (newPassword !== confirmPassword) { setError('Passwords do not match.'); return; }
             if (newPassword.length < 8) { setError('New password must be at least 8 characters.'); return; }
             setIsSaving(true); setError(null);
+            // Same session ownership as the other account operations: a change held
+            // under the previous account must not surface success/failure UI -- or
+            // its delayed success-dismiss timer -- in the new session.
+            const generation = captureSessionGeneration();
             try {
               await apiChangePassword(currentPassword, newPassword);
+              if (!isSessionGenerationCurrent(generation)) return;
               setSuccess(true); setShow(false);
               setCurrentPassword(''); setNewPassword(''); setConfirmPassword('');
-              setTimeout(() => setSuccess(false), 3000);
+              setTimeout(() => {
+                if (isSessionGenerationCurrent(generation)) setSuccess(false);
+              }, 3000);
             } catch {
+              if (!isSessionGenerationCurrent(generation)) return;
               setError('Failed to change password. Check your current password.');
-            } finally { setIsSaving(false); }
+            } finally {
+              if (isSessionGenerationCurrent(generation)) setIsSaving(false);
+            }
           }}
           className="rounded-[3px] bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white hover:bg-[var(--accent-hover)] disabled:opacity-50">
           {isSaving ? 'Saving...' : 'Update Password'}
@@ -455,13 +490,26 @@ function DeleteAccountForm() {
         <button disabled={isDeleting || confirmText !== 'DELETE' || !password}
           onClick={async () => {
             setIsDeleting(true); setError(null);
+            // A deletion held under account A and resolving after account B logged
+            // in must not end B's session: it deleted A's account, not B's. Only a
+            // deletion still owned by the current session clears credentials and
+            // redirects.
+            const generation = captureSessionGeneration();
             try {
               await apiDeleteAccount(password);
-              clearTokens();
+              if (!isSessionGenerationCurrent(generation)) return;
+              // The account no longer exists: perform the FULL identity transition
+              // (invalidate, abort in-flight requests, clear tokens + auth state,
+              // disconnect the socket, reset every per-user store) -- not just a
+              // token clear. The redirect is a final belt on top, not the teardown.
+              useAuthStore.getState().logout();
               window.location.href = '/login'; // Delete account — hard redirect is intentional
             } catch {
+              if (!isSessionGenerationCurrent(generation)) return;
               setError('Failed to delete account. Check your password or ensure you don\'t own any servers.');
-            } finally { setIsDeleting(false); }
+            } finally {
+              if (isSessionGenerationCurrent(generation)) setIsDeleting(false);
+            }
           }}
           className="rounded-[3px] bg-[var(--danger)] px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50">
           {isDeleting ? 'Deleting...' : 'Permanently Delete Account'}

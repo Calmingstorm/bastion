@@ -1,0 +1,3 @@
+ALTER TABLE read_states DROP COLUMN IF EXISTS last_read_seq;
+ALTER TABLE messages DROP COLUMN IF EXISTS seq;
+DROP SEQUENCE IF EXISTS messages_seq;

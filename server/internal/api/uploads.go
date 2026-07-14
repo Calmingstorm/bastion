@@ -3,8 +3,10 @@ package api
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
 
@@ -78,40 +80,20 @@ func (h *UploadHandler) SendWithAttachments(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Begin transaction
-	tx, err := h.db.Begin(r.Context())
-	if err != nil {
-		log.Error().Err(err).Msg("failed to begin transaction")
-		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
-		return
+	// Persist the files FIRST, outside any transaction: the channel's
+	// message-insert lock must never be held across file I/O (a slow upload
+	// would block every message send to the channel), and the DB rows
+	// (message + attachments) still commit atomically in the short locked
+	// transaction below. A failure after some files are stored leaves orphan
+	// FILES only, never orphan rows.
+	type savedFile struct {
+		filename    string
+		storedName  string
+		contentType string
+		size        int64
+		url         string
 	}
-	defer tx.Rollback(r.Context())
-
-	// Insert message
-	var msg models.Message
-	var author models.Author
-	err = tx.QueryRow(r.Context(),
-		`WITH new_msg AS (
-			INSERT INTO messages (channel_id, author_id, content)
-			VALUES ($1, $2, $3)
-			RETURNING id, channel_id, author_id, content, edited_at, created_at
-		)
-		SELECT m.id, m.channel_id, m.content, m.edited_at, m.created_at,
-			   u.id, u.username, u.display_name, u.avatar_url, u.is_bot
-		FROM new_msg m
-		INNER JOIN users u ON u.id = m.author_id`,
-		channelID, userID, content,
-	).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.CreatedAt,
-		&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL, &author.IsBot)
-	if err != nil {
-		log.Error().Err(err).Msg("failed to insert message")
-		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
-		return
-	}
-	msg.Author = &author
-
-	// Process file uploads
-	attachments := make([]models.Attachment, 0, len(files))
+	saved := make([]savedFile, 0, len(files))
 	for _, fh := range files {
 		if fh.Size > h.cfg.Upload.MaxFileSize {
 			writeJSON(w, http.StatusBadRequest, errorResponse("VALIDATION_ERROR", "file too large"))
@@ -139,38 +121,61 @@ func (h *UploadHandler) SendWithAttachments(w http.ResponseWriter, r *http.Reque
 			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return
 		}
-
 		// Store the detected content type, never the spoofable client header.
-		contentType := detected
-
-		var att models.Attachment
-		err = tx.QueryRow(r.Context(),
-			`INSERT INTO attachments (message_id, filename, stored_name, content_type, size, url)
-			 VALUES ($1, $2, $3, $4, $5, $6)
-			 RETURNING id, message_id, filename, stored_name, content_type, size, url, created_at`,
-			msg.ID, fh.Filename, storedName, contentType, fh.Size, url,
-		).Scan(&att.ID, &att.MessageID, &att.Filename, &att.StoredName,
-			&att.ContentType, &att.Size, &att.URL, &att.CreatedAt)
-		if err != nil {
-			log.Error().Err(err).Msg("failed to insert attachment")
-			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
-			return
-		}
-		attachments = append(attachments, att)
+		saved = append(saved, savedFile{
+			filename: fh.Filename, storedName: storedName,
+			contentType: detected, size: fh.Size, url: url,
+		})
 	}
 
-	if err := tx.Commit(r.Context()); err != nil {
-		log.Error().Err(err).Msg("failed to commit transaction")
+	// Short locked transaction: message + attachment rows only.
+	var msg models.Message
+	var author models.Author
+	attachments := make([]models.Attachment, 0, len(saved))
+	err = insertMessageTx(r.Context(), h.db, channelID, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(r.Context(),
+			`WITH new_msg AS (
+				INSERT INTO messages (channel_id, author_id, content)
+				VALUES ($1, $2, $3)
+				RETURNING id, channel_id, author_id, content, edited_at, created_at, seq
+			)
+			SELECT m.id, m.channel_id, m.content, m.edited_at, m.created_at, m.seq,
+				   u.id, u.username, u.display_name, u.avatar_url, u.is_bot
+			FROM new_msg m
+			INNER JOIN users u ON u.id = m.author_id`,
+			channelID, userID, content,
+		).Scan(&msg.ID, &msg.ChannelID, &msg.Content, &msg.EditedAt, &msg.CreatedAt, &msg.Seq,
+			&author.ID, &author.Username, &author.DisplayName, &author.AvatarURL, &author.IsBot); err != nil {
+			return err
+		}
+		for _, sf := range saved {
+			var att models.Attachment
+			if err := tx.QueryRow(r.Context(),
+				`INSERT INTO attachments (message_id, filename, stored_name, content_type, size, url)
+				 VALUES ($1, $2, $3, $4, $5, $6)
+				 RETURNING id, message_id, filename, stored_name, content_type, size, url, created_at`,
+				msg.ID, sf.filename, sf.storedName, sf.contentType, sf.size, sf.url,
+			).Scan(&att.ID, &att.MessageID, &att.Filename, &att.StoredName,
+				&att.ContentType, &att.Size, &att.URL, &att.CreatedAt); err != nil {
+				return err
+			}
+			attachments = append(attachments, att)
+		}
+		return nil
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("failed to insert upload message")
 		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
 	}
+	msg.Author = &author
 
 	msg.Attachments = attachments
 
 	// Broadcast
 	h.hub.BroadcastToChannel(channelID, realtime.Event{
 		Type: realtime.EventMessageCreate,
-		Data: msg,
+		Data: map[string]any{"message": msg, "eventAt": time.Now().UTC()},
 	})
 
 	writeJSON(w, http.StatusCreated, msg)
