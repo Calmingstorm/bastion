@@ -51,10 +51,20 @@ export const useDMStore = create<DMState>((set) => ({
 
   closeDM: async (channelId: string) => {
     const generation = captureSessionGeneration();
-    await apiCloseDM(channelId);
+    try {
+      await apiCloseDM(channelId);
+    } catch {
+      // Every caller is fire-and-forget, so this action must be TOTAL -- it never
+      // rejects. Logout aborts the in-flight request (a rejection that would
+      // otherwise surface as an unhandled rejection mid-teardown); swallow it when
+      // the session has ended, and record a same-session failure as store error
+      // state instead of throwing at nobody.
+      if (!isSessionGenerationCurrent(generation)) return;
+      set({ error: 'Failed to close conversation' });
+      return;
+    }
     // Deliberately a silent return (not a SessionSupersededError like the server
-    // mutations): every caller is fire-and-forget with no success UI, so a stale
-    // rejection would only surface as an unhandled promise rejection.
+    // mutations): fire-and-forget callers have no success UI to mislead.
     if (!isSessionGenerationCurrent(generation)) return;
     set((state) => ({
       dmChannels: state.dmChannels.filter((d) => d.id !== channelId),

@@ -37,6 +37,13 @@ interface AuthState {
   clearError: () => void;
 }
 
+// Monotonic loadFromStorage sequence: overlapping startup validations (React
+// StrictMode double-effects make this operationally real) share one session
+// generation, so generation checks alone cannot order them -- an OLDER validation
+// failing after a newer one succeeded would log the freshly-validated session out.
+// Only the LATEST invocation may commit its outcome.
+let loadFromStorageSeq = 0;
+
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   accessToken: null,
@@ -173,17 +180,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       isAuthenticated: true,
     });
 
-    // Validate token by fetching current user. Capture the generation: if an
-    // identity boundary passes during validation, neither repopulate the user nor
-    // log out -- both would clobber whatever session is current now.
+    // Validate token by fetching current user. Capture the generation AND a
+    // recency sequence: if an identity boundary passes during validation, neither
+    // repopulate the user nor log out -- and when two validations overlap (same
+    // generation), only the latest may commit, so an older failure cannot log out
+    // the session a newer success just validated.
     const generation = captureSessionGeneration();
+    const seq = ++loadFromStorageSeq;
+    const owns = () => seq === loadFromStorageSeq && isSessionGenerationCurrent(generation);
     try {
       const freshUser = await apiGetMe();
-      if (!isSessionGenerationCurrent(generation)) return;
+      if (!owns()) return;
       storage.setItem('user', JSON.stringify(freshUser));
       set({ user: freshUser });
     } catch {
-      if (!isSessionGenerationCurrent(generation)) return; // do not log out a newer session
+      if (!owns()) return; // do not log out a newer session/validation
       // Token is invalid, clear everything
       get().logout();
     }

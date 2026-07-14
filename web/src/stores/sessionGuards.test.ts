@@ -175,6 +175,57 @@ describe('session-boundary guards', () => {
     await expect(p).rejects.toBeInstanceOf(SessionSupersededError);
   });
 
+  // F38 round 11: overlapping startup validations share one generation (React
+  // StrictMode double-effects), so recency must order them -- an OLDER validation
+  // failing after a newer one succeeded must not log the validated session out.
+  it('an older loadFromStorage failure cannot log out a newer successful validation', async () => {
+    storage.setItem('accessToken', 'valid-token-aaaa');
+    storage.setItem('refreshToken', 'valid-token-bbbb');
+    storage.setItem('user', JSON.stringify({ id: 'u1', username: 'alice' }));
+    const dOld = deferred<{ id: string; username: string }>();
+    const dNew = deferred<{ id: string; username: string }>();
+    vi.mocked(client.apiGetMe)
+      .mockReturnValueOnce(dOld.promise as never)
+      .mockReturnValueOnce(dNew.promise as never);
+
+    const pOld = useAuthStore.getState().loadFromStorage();
+    const pNew = useAuthStore.getState().loadFromStorage();
+    dNew.resolve({ id: 'u1', username: 'alice' }); // the NEWER validation succeeds
+    await pNew;
+    dOld.reject(new Error('expired')); // the OLDER one then fails
+    await pOld;
+
+    expect(useAuthStore.getState().isAuthenticated).toBe(true); // not logged out
+    expect(useAuthStore.getState().user).toEqual({ id: 'u1', username: 'alice' });
+    useAuthStore.setState({ user: null, isAuthenticated: false });
+    storage.removeItem('accessToken'); storage.removeItem('refreshToken'); storage.removeItem('user');
+  });
+
+  // F38 round 11: closeDM is fire-and-forget at every call site, so it must be
+  // TOTAL -- logout aborts its in-flight request, and that rejection must not
+  // surface as an unhandled rejection mid-teardown.
+  it('closeDM never rejects: a teardown-aborted close resolves silently', async () => {
+    useDMStore.setState({ error: null });
+    const d = deferred<void>();
+    vi.mocked(client.apiCloseDM).mockReturnValue(d.promise);
+    const p = useDMStore.getState().closeDM('dm1');
+    invalidateSession(); // logout begins; the request is then aborted
+    d.reject(new Error('canceled'));
+    await expect(p).resolves.toBeUndefined();
+    expect(useDMStore.getState().error).toBeNull(); // not this session's concern
+  });
+
+  it('closeDM records a same-session failure as error state instead of rejecting', async () => {
+    useDMStore.setState({ error: null });
+    const d = deferred<void>();
+    vi.mocked(client.apiCloseDM).mockReturnValue(d.promise);
+    const p = useDMStore.getState().closeDM('dm1');
+    d.reject(new Error('boom'));
+    await expect(p).resolves.toBeUndefined();
+    expect(useDMStore.getState().error).toBe('Failed to close conversation');
+    useDMStore.setState({ error: null });
+  });
+
   // F38 round 9: login must TEAR DOWN the superseded identity at entry -- clear the
   // old bearer token (so pending-window requests cannot commit the old account's
   // data under the new generation), abort in-flight transport, and reset every

@@ -19,11 +19,17 @@ vi.mock('../../api/client', async (orig) => {
     apiCreateWebhook: vi.fn(),
     apiRegenerateWebhookToken: vi.fn(),
     apiDeleteWebhook: vi.fn(async () => {}),
+    apiGetBots: vi.fn(async () => []),
+    apiCreateBot: vi.fn(),
+    apiRegenerateBotToken: vi.fn(),
+    apiDeleteBot: vi.fn(async () => {}),
   };
 });
 
-import { WebhooksTab } from './ServerSettingsDialog';
+import { WebhooksTab, IntegrationsTab } from './ServerSettingsDialog';
 import * as client from '../../api/client';
+import { invalidateSession } from '../../api/session';
+import { act } from '@testing-library/react';
 
 function webhook(over: Partial<Webhook> = {}): Webhook {
   return {
@@ -193,5 +199,117 @@ describe('WebhooksTab', () => {
     // Resolve and flush, so the pending state update happens inside act.
     resolve(webhook({ id: 'w1', token: 'whk_new', tokenHint: 'k_new123' }));
     await screen.findByText(/k_new123/);
+  });
+
+  // F38 round 11: a create held across an identity boundary must not publish the
+  // OLD session's one-time plaintext token into the new session's UI.
+  it('a create resolving after a session change does not reveal the token', async () => {
+    let resolveCreate!: (w: Webhook) => void;
+    vi.mocked(client.apiCreateWebhook).mockImplementation(
+      () =>
+        new Promise((res) => {
+          resolveCreate = res as (w: Webhook) => void;
+        })
+    );
+    render(<WebhooksTab serverId="s1" />);
+    await screen.findByPlaceholderText('Webhook name');
+
+    await userEvent.type(screen.getByPlaceholderText('Webhook name'), 'hook');
+    await userEvent.click(screen.getByRole('button', { name: 'Create' })); // held
+
+    await act(async () => {
+      invalidateSession();
+      resolveCreate(webhook({ id: 'w9', token: 'whk_stale_create', tokenHint: 'create99' }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(screen.queryByDisplayValue(/whk_stale_create/)).toBeNull(); // no reveal
+    expect(screen.queryByText(/create99/)).toBeNull(); // no row added
+  });
+
+  // F38 round 11: a rotation held across an identity boundary must not publish the
+  // OLD session's newly-minted plaintext token into the new session's UI.
+  it('a rotation resolving after a session change does not reveal the token', async () => {
+    vi.mocked(client.apiGetWebhooks).mockResolvedValue([webhook({ id: 'w1', tokenHint: 'abcd1234' })]);
+    let resolveRotate!: (w: Webhook) => void;
+    vi.mocked(client.apiRegenerateWebhookToken).mockImplementation(
+      () =>
+        new Promise((res) => {
+          resolveRotate = res as (w: Webhook) => void;
+        })
+    );
+    render(<WebhooksTab serverId="s1" />);
+    await screen.findByText(/abcd1234/);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Regenerate' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm rotate' })); // held
+
+    await act(async () => {
+      invalidateSession(); // a new account logs in while the rotation is in flight
+      resolveRotate(webhook({ id: 'w1', token: 'whk_stale', tokenHint: 'stale123' }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // Neither the reveal nor the row update may happen for the old session.
+    expect(screen.queryByDisplayValue(/whk_stale/)).toBeNull();
+    expect(screen.queryByText(/stale123/)).toBeNull();
+    expect(screen.getByText(/abcd1234/)).toBeInTheDocument(); // row unchanged
+  });
+});
+
+describe('IntegrationsTab (bots) session ownership', () => {
+  // F38 round 11: bot creation returns a one-time plaintext token shown in a modal
+  // -- the same secret-publishing hazard as webhook rotation.
+  it('a bot create resolving after a session change does not show the token modal', async () => {
+    let resolveCreate!: (b: unknown) => void;
+    vi.mocked(client.apiCreateBot).mockImplementation(
+      () =>
+        new Promise((res) => {
+          resolveCreate = res;
+        }) as never
+    );
+    render(<IntegrationsTab serverId="s1" />);
+    await screen.findByPlaceholderText('Bot username');
+
+    await userEvent.type(screen.getByPlaceholderText('Bot username'), 'helper');
+    await userEvent.click(screen.getByRole('button', { name: 'Create Bot' })); // held
+
+    await act(async () => {
+      invalidateSession();
+      resolveCreate({
+        id: 'b1', username: 'helper', token: 'bot_stale_token', tokenHint: 'oken1234',
+        createdAt: '2026-01-01T00:00:00Z',
+      });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(screen.queryByText(/Bot Token/)).toBeNull(); // modal never opened
+    expect(screen.queryByText(/bot_stale_token/)).toBeNull();
+  });
+
+  it('a bot token regeneration resolving after a session change does not show the token modal', async () => {
+    vi.mocked(client.apiGetBots).mockResolvedValue([
+      { id: 'b1', username: 'helper', tokenHint: 'oken1234', createdAt: '2026-01-01T00:00:00Z' } as never,
+    ]);
+    let resolveRegen!: (v: { token: string }) => void;
+    vi.mocked(client.apiRegenerateBotToken).mockImplementation(
+      () =>
+        new Promise((res) => {
+          resolveRegen = res as (v: { token: string }) => void;
+        })
+    );
+    render(<IntegrationsTab serverId="s1" />);
+    await screen.findByText(/helper/);
+
+    await userEvent.click(screen.getByRole('button', { name: /Regenerate/ })); // held
+
+    await act(async () => {
+      invalidateSession();
+      resolveRegen({ token: 'bot_stale_token2' });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(screen.queryByText(/Bot Token/)).toBeNull();
+    expect(screen.queryByText(/bot_stale_token2/)).toBeNull();
   });
 });

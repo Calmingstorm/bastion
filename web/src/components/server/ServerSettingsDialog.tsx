@@ -921,8 +921,12 @@ export function WebhooksTab({ serverId }: { serverId: string }) {
     const name = newName.trim();
     if (!name || !newChannelId) return;
     setIsCreating(true);
+    // A create resolving after an identity boundary belongs to the previous
+    // session -- its one-time plaintext token must never be revealed in this UI.
+    const generation = captureSessionGeneration();
     try {
       const wh = await apiCreateWebhook(serverId, { name, channelId: newChannelId });
+      if (!isSessionGenerationCurrent(generation)) return;
       // Keep the plaintext token only in `revealed`; the persistent list row must
       // never hold it, or a dismissed token would linger in memory.
       setWebhooks((prev) => [toWebhookSummary(wh), ...prev]);
@@ -937,8 +941,12 @@ export function WebhooksTab({ serverId }: { serverId: string }) {
   const handleRegenerate = async (webhookId: string) => {
     if (regeneratingId) return; // guard against double-clicks racing rotations
     setRegeneratingId(webhookId);
+    // A rotation held across an identity boundary must not publish the OLD
+    // session's newly-minted plaintext token into the new session's UI.
+    const generation = captureSessionGeneration();
     try {
       const wh = await apiRegenerateWebhookToken(serverId, webhookId);
+      if (!isSessionGenerationCurrent(generation)) return;
       // Replace the row (updates the hint) and reveal the new token once.
       setWebhooks((prev) => prev.map((w) => (w.id === wh.id ? toWebhookSummary(wh) : w)));
       setRevealed(wh);
@@ -952,8 +960,10 @@ export function WebhooksTab({ serverId }: { serverId: string }) {
   };
 
   const handleDelete = async (webhookId: string) => {
+    const generation = captureSessionGeneration();
     try {
       await apiDeleteWebhook(serverId, webhookId);
+      if (!isSessionGenerationCurrent(generation)) return;
       setWebhooks((prev) => prev.filter((w) => w.id !== webhookId));
     } catch { /* handled */ }
     setDeleteConfirm(null);
@@ -1075,7 +1085,7 @@ export function WebhooksTab({ serverId }: { serverId: string }) {
 
 /* ---- Integrations (Bots) ---- */
 
-function IntegrationsTab({ serverId }: { serverId: string }) {
+export function IntegrationsTab({ serverId }: { serverId: string }) {
   const [bots, setBots] = useState<Bot[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [newUsername, setNewUsername] = useState('');
@@ -1096,11 +1106,15 @@ function IntegrationsTab({ serverId }: { serverId: string }) {
     const username = newUsername.trim();
     if (!username) return;
     setIsCreating(true);
+    // A create resolving after an identity boundary must not publish the previous
+    // session's one-time bot token into the new session's UI.
+    const generation = captureSessionGeneration();
     try {
       const bot = await apiCreateBot(serverId, {
         username,
         description: newDescription.trim() || undefined,
       });
+      if (!isSessionGenerationCurrent(generation)) return;
       setBots((prev) => [bot, ...prev]);
       setNewUsername('');
       setNewDescription('');
@@ -1113,16 +1127,22 @@ function IntegrationsTab({ serverId }: { serverId: string }) {
   };
 
   const handleDelete = async (botId: string) => {
+    const generation = captureSessionGeneration();
     try {
       await apiDeleteBot(serverId, botId);
+      if (!isSessionGenerationCurrent(generation)) return;
       setBots((prev) => prev.filter((b) => b.id !== botId));
     } catch { /* handled */ }
     setDeleteConfirm(null);
   };
 
   const handleRegenerate = async (botId: string, botName: string) => {
+    // Same secret-publishing hazard as webhook rotation: a held regeneration must
+    // not reveal the old session's token after the boundary.
+    const generation = captureSessionGeneration();
     try {
       const { token } = await apiRegenerateBotToken(serverId, botId);
+      if (!isSessionGenerationCurrent(generation)) return;
       setTokenModal({ token, botName });
     } catch { /* handled */ }
   };
