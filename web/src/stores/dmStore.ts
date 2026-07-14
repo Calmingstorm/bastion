@@ -167,7 +167,17 @@ export const useDMStore = create<DMState>((set, get) => ({
     dmLineage.assert([channelId]);
     const known = useDMStore.getState().dmChannels.find((d) => d.id === channelId);
     if (known) {
-      const apply = upsertDM(known);
+      // PRESENCE guarantee, not a content overwrite: when the list (a fresher
+      // snapshot mid-replay, or current state) already carries the row, keep
+      // THAT version -- the captured copy is older and would regress fields a
+      // fresher snapshot delivered (e.g. the lastMessage preview). The captured
+      // row only fills absence; either way the DM moves to the front, since a
+      // new message makes it the most recent conversation.
+      const apply = (list: DMChannel[]) => {
+        const present = list.find((d) => d.id === channelId);
+        const row = present ?? known;
+        return [row, ...list.filter((d) => d.id !== channelId)];
+      };
       dmLineage.claim(apply, { asserts: [channelId] });
       set((state) => ({ dmChannels: apply(state.dmChannels) }));
     }

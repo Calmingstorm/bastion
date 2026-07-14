@@ -1344,6 +1344,26 @@ describe('session-boundary guards', () => {
     useDMStore.getState().reset();
   });
 
+  it('a replayed aliveness row does not regress fields a fresher snapshot delivered', async () => {
+    // The known row captured at event time is OLDER than the snapshot the fetch
+    // returns (the snapshot was read after the message committed): the journal
+    // must guarantee the row's PRESENCE, never overwrite fresher content.
+    useDMStore.setState({ dmChannels: [{ id: 'dm-f', lastMessage: { id: 'm1', content: 'old' } } as never] });
+    const dFetch = deferred<DMChannel[]>();
+    vi.mocked(client.apiGetDMs).mockReturnValue(dFetch.promise);
+    const pFetch = useDMStore.getState().fetchDMs(); // in flight
+    useDMStore.getState().noteChannelAlive('dm-f'); // message event: journals the OLD known row
+    dFetch.resolve([
+      { id: 'dm-f', lastMessage: { id: 'm2', content: 'new' } } as never, // fresher snapshot row
+    ]);
+    await pFetch;
+    const dm = useDMStore.getState().dmChannels.find((d2) => d2.id === 'dm-f') as never as {
+      lastMessage?: { content: string };
+    };
+    expect(dm?.lastMessage?.content).toBe('new'); // fresher content survived the replay
+    useDMStore.getState().reset();
+  });
+
   it('the deciding fetch clears a dangling DM selection when the close won', async () => {
     useDMStore.setState({ dmChannels: [{ id: 'dm-s' } as DMChannel], selectedDMId: 'dm-s' });
     const dFetch = deferred<DMChannel[]>();
