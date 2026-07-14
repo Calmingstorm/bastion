@@ -950,6 +950,69 @@ describe('session-boundary guards', () => {
     useServerStore.getState().reset();
   });
 
+  // F38 round 24.5 (self-found): unreadStore had the same discard-model defect --
+  // fetchReadStates wholesale-replaced the map, erasing overlapping acks and
+  // mention badges. Same lineage treatment as the server/DM lists.
+  it('a held read-state fetch does not erase an overlapping ack', async () => {
+    useUnreadStore.setState({ readStates: {}, unreadChannels: new Set(['c1']) });
+    const dFetch = deferred<unknown>();
+    vi.mocked(client.apiGetReadStates).mockReturnValue(dFetch.promise as never);
+    vi.mocked(client.apiAckChannel).mockResolvedValue(undefined as never);
+    const pFetch = useUnreadStore.getState().fetchReadStates(); // snapshot held
+    await useUnreadStore.getState().ackChannel('c1', 'm9'); // user reads c1 mid-flight
+    dFetch.resolve([
+      { channelId: 'c1', lastMessageId: 'm1', mentionCount: 3 }, // pre-ack read
+      { channelId: 'c2', lastMessageId: 'm2', mentionCount: 1 },
+    ]);
+    await pFetch;
+    expect(useUnreadStore.getState().readStates['c1']?.mentionCount).toBe(0); // ack survived
+    expect(useUnreadStore.getState().readStates['c1']?.lastMessageId).toBe('m9');
+    expect(useUnreadStore.getState().readStates['c2']?.mentionCount).toBe(1); // snapshot row survived
+    useUnreadStore.getState().reset();
+  });
+
+  it('a held read-state fetch does not eat a mention badge raised mid-flight', async () => {
+    useUnreadStore.setState({ readStates: {}, unreadChannels: new Set() });
+    const dFetch = deferred<unknown>();
+    vi.mocked(client.apiGetReadStates).mockReturnValue(dFetch.promise as never);
+    const pFetch = useUnreadStore.getState().fetchReadStates();
+    useUnreadStore.getState().incrementMention('c3'); // ping lands mid-flight
+    dFetch.resolve([]); // snapshot predates the mention
+    await pFetch;
+    expect(useUnreadStore.getState().getMentionCount('c3')).toBe(1); // badge NOT vanished
+    useUnreadStore.getState().reset();
+  });
+
+  it('unreadStore reset invalidates a held read-state fetch', async () => {
+    useUnreadStore.setState({ readStates: {}, unreadChannels: new Set() });
+    const dFetch = deferred<unknown>();
+    vi.mocked(client.apiGetReadStates).mockReturnValue(dFetch.promise as never);
+    const pFetch = useUnreadStore.getState().fetchReadStates();
+    useUnreadStore.getState().reset();
+    dFetch.resolve([{ channelId: 'c1', lastMessageId: 'm1', mentionCount: 5 }]);
+    await pFetch;
+    expect(useUnreadStore.getState().readStates).toEqual({}); // not repopulated
+    useUnreadStore.getState().reset();
+  });
+
+  it('a journal-gap read-state fetch retries with a fresh snapshot', async () => {
+    useUnreadStore.setState({ readStates: {}, unreadChannels: new Set() });
+    const d1 = deferred<unknown>();
+    const d2 = deferred<unknown>();
+    vi.mocked(client.apiGetReadStates)
+      .mockReturnValueOnce(d1.promise as never)
+      .mockReturnValueOnce(d2.promise as never);
+    const pFetch = useUnreadStore.getState().fetchReadStates();
+    for (let i = 0; i < 129; i += 1) useUnreadStore.getState().incrementMention('c-hot');
+    d1.resolve([]); // unreconcilable: journal outran the fetch
+    await Promise.resolve();
+    d2.resolve([{ channelId: 'c9', lastMessageId: 'm1', mentionCount: 2 }]);
+    await pFetch;
+    expect(vi.mocked(client.apiGetReadStates)).toHaveBeenCalledTimes(2); // retried
+    expect(useUnreadStore.getState().readStates['c9']?.mentionCount).toBe(2);
+    useUnreadStore.getState().reset();
+  });
+
   it('reset invalidates lineage-owned requests: a held fetch cannot repopulate the cleared store', async () => {
     useServerStore.setState({ servers: [], selectedServerId: 'srv-keep', channels: [] });
     useDMStore.setState({ dmChannels: [] });
