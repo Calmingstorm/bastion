@@ -175,6 +175,37 @@ describe('session-boundary guards', () => {
     await expect(p).rejects.toBeInstanceOf(SessionSupersededError);
   });
 
+  // F38 round 9: login must TEAR DOWN the superseded identity at entry -- clear the
+  // old bearer token (so pending-window requests cannot commit the old account's
+  // data under the new generation), abort in-flight transport, and reset every
+  // per-user store (cached data must not survive into the new session).
+  it('login tears down the previous identity at entry, before the request resolves', async () => {
+    const d = deferred<LoginResponse>();
+    vi.mocked(client.apiLogin).mockReturnValue(d.promise);
+
+    const p = useAuthStore.getState().login('b@x.com', 'pw');
+    // Teardown happens synchronously at entry -- the login request is still held.
+    expect(client.clearTokens).toHaveBeenCalled();
+    expect(client.abortInFlightRequests).toHaveBeenCalled();
+    expect(resetAllStores).toHaveBeenCalled();
+
+    d.resolve({ user: { id: 'u-b' }, accessToken: 'b', refreshToken: 'b' } as LoginResponse);
+    await p;
+  });
+
+  it('register tears down the previous identity at entry, before the request resolves', async () => {
+    const d = deferred<LoginResponse>();
+    vi.mocked(client.apiRegister).mockReturnValue(d.promise);
+
+    const p = useAuthStore.getState().register('bob', 'b@x.com', 'pw');
+    expect(client.clearTokens).toHaveBeenCalled();
+    expect(client.abortInFlightRequests).toHaveBeenCalled();
+    expect(resetAllStores).toHaveBeenCalled();
+
+    d.resolve({ user: { id: 'u-b' }, accessToken: 'b', refreshToken: 'b' } as LoginResponse);
+    await p;
+  });
+
   it('a value-returning mutation (createDM) returns undefined and does not add after the session ends', async () => {
     useDMStore.setState({ dmChannels: [] });
     const d = deferred<DMChannel>();

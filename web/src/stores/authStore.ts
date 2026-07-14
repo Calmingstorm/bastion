@@ -46,11 +46,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   error: null,
 
   login: async (email: string, password: string) => {
+    // A login attempt is a new identity boundary, and the boundary must TEAR DOWN
+    // the superseded identity now -- not merely advance the generation. Without the
+    // full logout teardown, the previous account's cached stores survive into the
+    // new session, requests issued while this login is pending still carry the old
+    // bearer token (stamped with the new generation, so their responses would
+    // commit as current), and the old WebSocket stays live. logout() invalidates
+    // the session FIRST, then aborts in-flight requests, clears tokens, and resets
+    // every per-user store (including the socket teardown).
+    get().logout();
     set({ isLoading: true, error: null });
-    // A login attempt is a new identity boundary: advance the generation now so it
-    // supersedes any older in-flight auth op or session work, and capture it to
-    // detect a newer boundary (a concurrent login, or a logout) during the request.
-    invalidateSession();
     const generation = captureSessionGeneration();
     try {
       const response = await apiLogin(email, password);
@@ -77,9 +82,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   register: async (username: string, email: string, password: string) => {
+    // Registration also establishes a new identity -- same full teardown as login.
+    get().logout();
     set({ isLoading: true, error: null });
-    // Registration also establishes a new identity -- same boundary as login.
-    invalidateSession();
     const generation = captureSessionGeneration();
     try {
       const response = await apiRegister(username, email, password);
