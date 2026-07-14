@@ -269,26 +269,6 @@ func (h *Hub) RemoveChannel(channelID uuid.UUID) {
 	h.mu.Unlock()
 }
 
-// unsubscribeUserFromChannel removes a user's clients from a channel WITHOUT
-// bumping the reconcile generation -- used to roll back a speculative subscribe,
-// which is not a revocation and must not disturb other in-flight revalidations.
-func (h *Hub) unsubscribeUserFromChannel(userID, channelID uuid.UUID) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	set, ok := h.channels[channelID]
-	if !ok {
-		return
-	}
-	if clients, ok := h.users[userID]; ok {
-		for c := range clients {
-			delete(set, c)
-		}
-	}
-	if len(set) == 0 {
-		delete(h.channels, channelID)
-	}
-}
-
 // sameUUIDSet reports whether two id slices contain the same set of ids (order-
 // insensitive). Used to detect that authorization membership is UNCHANGED across
 // two reads even though the reconcile generation moved. Its inputs come from
