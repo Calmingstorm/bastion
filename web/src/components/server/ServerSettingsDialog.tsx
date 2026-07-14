@@ -333,7 +333,7 @@ function OverviewTab({ serverId }: { serverId: string }) {
 
 /* ---- Channels ---- */
 
-function ChannelsTab({ serverId }: { serverId: string }) {
+export function ChannelsTab({ serverId }: { serverId: string }) {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -344,11 +344,21 @@ function ChannelsTab({ serverId }: { serverId: string }) {
   const [isCreating, setIsCreating] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
 
+  // Only the LATEST list fetch owns the list and loading flag (session + recency).
+  const listFetchSeqRef = useRef(0);
+
   useEffect(() => {
+    const generation = captureSessionGeneration();
+    const seq = ++listFetchSeqRef.current;
+    const owns = () => seq === listFetchSeqRef.current && isSessionGenerationCurrent(generation);
     apiGetChannels(serverId)
-      .then((chs) => setChannels(chs.sort((a, b) => a.position - b.position)))
+      .then((chs) => {
+        if (owns()) setChannels(chs.sort((a, b) => a.position - b.position));
+      })
       .catch(() => {})
-      .finally(() => setIsLoading(false));
+      .finally(() => {
+        if (owns()) setIsLoading(false);
+      });
   }, [serverId]);
 
   const handleCreate = async () => {

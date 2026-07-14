@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { apiSearch } from '../../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { useServerStore } from '../../stores/serverStore';
 import type { SearchResult } from '../../types';
 
@@ -30,6 +31,7 @@ export function SearchDialog({ open, onClose }: SearchDialogProps) {
   const [loading, setLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const searchSeqRef = useRef(0);
   const selectedServerId = useServerStore((s) => s.selectedServerId);
   const selectChannel = useServerStore((s) => s.selectChannel);
 
@@ -59,11 +61,21 @@ export function SearchDialog({ open, onClose }: SearchDialogProps) {
       return;
     }
     debounceRef.current = setTimeout(() => {
+      // Only the LATEST fired search owns the results (session + query recency).
+      const generation = captureSessionGeneration();
+      const seq = ++searchSeqRef.current;
+      const owns = () => seq === searchSeqRef.current && isSessionGenerationCurrent(generation);
       setLoading(true);
       apiSearch(q.trim(), { serverId: selectedServerId || undefined })
-        .then(setResults)
-        .catch(() => setResults([]))
-        .finally(() => setLoading(false));
+        .then((r) => {
+          if (owns()) setResults(r);
+        })
+        .catch(() => {
+          if (owns()) setResults([]);
+        })
+        .finally(() => {
+          if (owns()) setLoading(false);
+        });
     }, 400);
   }, [selectedServerId]);
 

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { apiSearchGifs, apiTrendingGifs } from '../../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import type { GifResult } from '../../api/client';
 import { useFeatureStore } from '../../stores/featureStore';
 
@@ -30,27 +31,42 @@ export function GifPicker({ onSelect }: GifPickerProps) {
     return () => document.removeEventListener('mousedown', handleClick);
   }, [open]);
 
+  // Only the LATEST fired request owns the grid (session + query recency): a
+  // slower older query must not overwrite newer results.
+  const gifSeqRef = useRef(0);
+  const ownedFetch = useCallback((fetcher: () => Promise<GifResult[]>) => {
+    const generation = captureSessionGeneration();
+    const seq = ++gifSeqRef.current;
+    const owns = () => seq === gifSeqRef.current && isSessionGenerationCurrent(generation);
+    setLoading(true);
+    fetcher()
+      .then((g) => {
+        if (owns()) setGifs(g);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (owns()) setLoading(false);
+      });
+  }, []);
+
   // Load trending when opened
   useEffect(() => {
     if (!open) return;
-    setLoading(true);
-    apiTrendingGifs(20).then(setGifs).catch(() => {}).finally(() => setLoading(false));
-  }, [open]);
+    ownedFetch(() => apiTrendingGifs(20));
+  }, [open, ownedFetch]);
 
   // Debounced search
   const handleSearch = useCallback((q: string) => {
     setQuery(q);
     if (debounceRef.current) clearTimeout(debounceRef.current);
     if (!q.trim()) {
-      setLoading(true);
-      apiTrendingGifs(20).then(setGifs).catch(() => {}).finally(() => setLoading(false));
+      ownedFetch(() => apiTrendingGifs(20));
       return;
     }
     debounceRef.current = setTimeout(() => {
-      setLoading(true);
-      apiSearchGifs(q.trim(), 20).then(setGifs).catch(() => {}).finally(() => setLoading(false));
+      ownedFetch(() => apiSearchGifs(q.trim(), 20));
     }, 300);
-  }, []);
+  }, [ownedFetch]);
 
   return (
     <div ref={containerRef} className="relative">

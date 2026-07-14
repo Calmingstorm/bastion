@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, act } from '@testing-library/react';
-import type { MemberWithUser, Role, ServerBan, AuditLogEntry, ServerInvite } from '../../types';
+import type { MemberWithUser, Role, ServerBan, AuditLogEntry, ServerInvite, Channel } from '../../types';
 
 vi.mock('../../api/client', async (orig) => {
   const actual = await orig<typeof import('../../api/client')>();
@@ -13,10 +13,11 @@ vi.mock('../../api/client', async (orig) => {
     apiGetInvites: vi.fn(),
     apiCreateInvite: vi.fn(),
     apiDeleteInvite: vi.fn(),
+    apiGetChannels: vi.fn(),
   };
 });
 
-import { MembersTab, RolesTab, BansTab, AuditTab } from './ServerSettingsDialog';
+import { MembersTab, RolesTab, BansTab, AuditTab, ChannelsTab } from './ServerSettingsDialog';
 import { InviteDialog } from './InviteDialog';
 import * as client from '../../api/client';
 import { invalidateSession } from '../../api/session';
@@ -97,6 +98,23 @@ describe('server-settings tabs session ownership', () => {
     });
 
     expect(screen.queryByText(/oldactor/)).toBeNull();
+    expect(container.querySelector('.animate-spin')).not.toBeNull();
+  });
+
+  it('a stale channels response renders nothing and never completes loading', async () => {
+    let resolveChannels!: (c: Channel[]) => void;
+    vi.mocked(client.apiGetChannels).mockImplementation(
+      () => new Promise((res) => { resolveChannels = res as (c: Channel[]) => void; })
+    );
+    const { container } = render(<ChannelsTab serverId="s1" />);
+
+    await act(async () => {
+      invalidateSession();
+      resolveChannels([{ id: 'c9', name: 'old-channel', type: 'text', position: 0 } as Channel]);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(screen.queryByText(/old-channel/)).toBeNull();
     expect(container.querySelector('.animate-spin')).not.toBeNull();
   });
 

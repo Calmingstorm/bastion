@@ -20,6 +20,10 @@ export function NewDMDialog({ open, onOpenChange }: NewDMDialogProps) {
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // Only the LATEST fired search owns the results (session + query recency): a
+  // slower OLDER query must not overwrite newer results, and an old-account
+  // response must not render after an identity boundary.
+  const searchSeqRef = useRef(0);
   const selectDM = useDMStore((s) => s.selectDM);
   const fetchDMs = useDMStore((s) => s.fetchDMs);
   const createDM = useDMStore((s) => s.createDM);
@@ -41,16 +45,21 @@ export function NewDMDialog({ open, onOpenChange }: NewDMDialogProps) {
       return;
     }
     debounceRef.current = setTimeout(async () => {
+      const generation = captureSessionGeneration();
+      const seq = ++searchSeqRef.current;
+      const owns = () => seq === searchSeqRef.current && isSessionGenerationCurrent(generation);
       setIsSearching(true);
       try {
         const users = await apiSearchUsers(query.trim());
+        if (!owns()) return;
         // Filter out already selected users
         const selectedIds = new Set(selected.map((u) => u.id));
         setResults(users.filter((u) => !selectedIds.has(u.id)));
       } catch {
+        if (!owns()) return;
         setResults([]);
       } finally {
-        setIsSearching(false);
+        if (owns()) setIsSearching(false);
       }
     }, 300);
 

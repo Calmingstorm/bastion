@@ -53,6 +53,67 @@ describe('NewDMDialog session guard', () => {
     expect(onOpenChange).not.toHaveBeenCalledWith(false); // dialog not closed on stale
   });
 
+  // F38 round 15: the user search is session+query owned -- an old-account response
+  // must not render after invalidation, and a slower OLDER query must not overwrite
+  // newer results.
+  it('a stale-session search response is not rendered', async () => {
+    const user = userEvent.setup();
+    let resolveSearch!: (u: MessageAuthor[]) => void;
+    vi.spyOn(client, 'apiSearchUsers').mockImplementation(
+      () => new Promise((res) => { resolveSearch = res as (u: MessageAuthor[]) => void; })
+    );
+    render(<NewDMDialog open onOpenChange={vi.fn()} />);
+    await user.type(screen.getByPlaceholderText('Search by username...'), 'old');
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 350)); // past the debounce; search in flight
+    });
+
+    await act(async () => {
+      invalidateSession();
+      resolveSearch([{ id: 'u9', username: 'oldaccountuser' } as MessageAuthor]);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(screen.queryByText(/oldaccountuser/)).toBeNull();
+  });
+
+  it('a slower older search cannot overwrite newer results', async () => {
+    const user = userEvent.setup();
+    let resolveFirst!: (u: MessageAuthor[]) => void;
+    let resolveSecond!: (u: MessageAuthor[]) => void;
+    vi.spyOn(client, 'apiSearchUsers')
+      .mockImplementationOnce(
+        () => new Promise((res) => { resolveFirst = res as (u: MessageAuthor[]) => void; })
+      )
+      .mockImplementationOnce(
+        () => new Promise((res) => { resolveSecond = res as (u: MessageAuthor[]) => void; })
+      );
+    render(<NewDMDialog open onOpenChange={vi.fn()} />);
+    const input = screen.getByPlaceholderText('Search by username...');
+
+    await user.type(input, 'al');
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 350)); // query 1 fired (held)
+    });
+    await user.type(input, 'ice');
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 350)); // query 2 fired (held)
+    });
+
+    await act(async () => {
+      resolveSecond([{ id: 'u1', username: 'alice-new' } as MessageAuthor]); // newer first
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await act(async () => {
+      resolveFirst([{ id: 'u2', username: 'al-old' } as MessageAuthor]); // older last
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // (The result row renders the name twice: display name + @username.)
+    expect(screen.getAllByText(/alice-new/).length).toBeGreaterThan(0); // newer kept
+    expect(screen.queryByText(/al-old/)).toBeNull(); // older discarded
+  });
+
   it('selects the DM and closes the dialog when the session is unchanged', async () => {
     const user = userEvent.setup();
     vi.spyOn(client, 'apiCreateDM').mockResolvedValue({ id: 'dm-new' } as DMChannel);

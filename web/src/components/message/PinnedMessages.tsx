@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { apiGetPinnedMessages, apiUnpinMessage } from '../../api/client';
+import { captureSessionGeneration, isSessionGenerationCurrent } from '../../api/session';
 import { resolveMediaUrl } from '../../platform';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import type { PinnedMessage } from '../../types';
@@ -15,21 +16,41 @@ interface PinnedMessagesProps {
 export function PinnedMessages({ open, onOpenChange, channelId }: PinnedMessagesProps) {
   const [pins, setPins] = useState<PinnedMessage[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  // Only the LATEST fetch owns the pins and loading flag -- across session
+  // boundaries AND channel switches (the effect refetches on channelId change,
+  // claiming a new sequence, which supersedes reads and mutation continuations
+  // started for the previous channel).
+  const fetchSeqRef = useRef(0);
 
   useEffect(() => {
     if (!open || !channelId) return;
     setIsLoading(true);
+    const generation = captureSessionGeneration();
+    const seq = ++fetchSeqRef.current;
+    const owns = () => seq === fetchSeqRef.current && isSessionGenerationCurrent(generation);
     apiGetPinnedMessages(channelId)
-      .then(setPins)
-      .catch(() => setPins([]))
-      .finally(() => setIsLoading(false));
+      .then((p) => {
+        if (owns()) setPins(p);
+      })
+      .catch(() => {
+        if (owns()) setPins([]);
+      })
+      .finally(() => {
+        if (owns()) setIsLoading(false);
+      });
   }, [open, channelId]);
 
   // Listen for pin updates
   useEffect(() => {
     const handler = () => {
       if (open && channelId) {
-        apiGetPinnedMessages(channelId).then(setPins).catch(() => {});
+        const generation = captureSessionGeneration();
+        const seq = ++fetchSeqRef.current;
+        apiGetPinnedMessages(channelId)
+          .then((p) => {
+            if (seq === fetchSeqRef.current && isSessionGenerationCurrent(generation)) setPins(p);
+          })
+          .catch(() => {});
       }
     };
     eventBus.on('bastion:pin-update', handler);
@@ -37,8 +58,13 @@ export function PinnedMessages({ open, onOpenChange, channelId }: PinnedMessages
   }, [open, channelId]);
 
   const handleUnpin = async (messageId: string) => {
+    // The continuation is owned by the session AND the list it was started for: a
+    // newer fetch (channel switch or refresh) claims a new sequence, superseding it.
+    const generation = captureSessionGeneration();
+    const seqAtStart = fetchSeqRef.current;
     try {
       await apiUnpinMessage(channelId, messageId);
+      if (seqAtStart !== fetchSeqRef.current || !isSessionGenerationCurrent(generation)) return;
       setPins((prev) => prev.filter((p) => p.id !== messageId));
     } catch { /* handled */ }
   };
