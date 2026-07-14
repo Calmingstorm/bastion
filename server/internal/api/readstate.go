@@ -88,11 +88,12 @@ func (h *ReadStateHandler) Ack(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = tx.Rollback(r.Context()) }()
 
 	if _, err = tx.Exec(r.Context(),
-		`INSERT INTO read_states (user_id, channel_id, last_message_id, last_read_at, last_read_seq)
-		 VALUES ($1, $2, $3, NOW(), $4)
+		`INSERT INTO read_states (user_id, channel_id, last_message_id, last_read_at, last_read_seq, projection_revision)
+		 VALUES ($1, $2, $3, NOW(), $4, 1)
 		 ON CONFLICT (user_id, channel_id)
 		 DO UPDATE SET last_message_id = $3, last_read_at = NOW(),
-		   last_read_seq = $4
+		   last_read_seq = $4,
+		   projection_revision = read_states.projection_revision + 1
 		 WHERE COALESCE(read_states.last_read_seq, -1) < $4`,
 		userID, channelID, messageID, msgSeq,
 	); err != nil {
@@ -109,13 +110,13 @@ func (h *ReadStateHandler) Ack(w http.ResponseWriter, r *http.Request) {
 	// state instead of optimistically guessing what the ack cleared.
 	var rs models.ReadState
 	if err := tx.QueryRow(r.Context(),
-		`SELECT rs.user_id, rs.channel_id, rs.last_message_id, rs.last_read_at, rs.last_read_seq,
+		`SELECT rs.user_id, rs.channel_id, rs.last_message_id, rs.last_read_at, rs.last_read_seq, rs.projection_revision,
 		        (SELECT COUNT(*) FROM mentions m
 		         WHERE m.user_id = rs.user_id AND m.channel_id = rs.channel_id
 		           AND m.seq > COALESCE(rs.last_read_seq, 0)) AS mention_count
 		 FROM read_states rs WHERE rs.user_id = $1 AND rs.channel_id = $2`,
 		userID, channelID,
-	).Scan(&rs.UserID, &rs.ChannelID, &rs.LastMessageID, &rs.LastReadAt, &rs.LastReadSeq, &rs.MentionCount); err != nil {
+	).Scan(&rs.UserID, &rs.ChannelID, &rs.LastMessageID, &rs.LastReadAt, &rs.LastReadSeq, &rs.ProjectionRevision, &rs.MentionCount); err != nil {
 		log.Error().Err(err).Msg("failed to read committed read state after ack")
 		writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 		return
@@ -145,7 +146,7 @@ func (h *ReadStateHandler) ListReadStates(w http.ResponseWriter, r *http.Request
 	// mention_count is COMPUTED, not stored: the number of this user's mentions
 	// in the channel whose message seq is above the read watermark.
 	rows, err := h.db.Query(r.Context(),
-		`SELECT rs.user_id, rs.channel_id, rs.last_message_id, rs.last_read_at, rs.last_read_seq,
+		`SELECT rs.user_id, rs.channel_id, rs.last_message_id, rs.last_read_at, rs.last_read_seq, rs.projection_revision,
 		        (SELECT COUNT(*) FROM mentions m
 		         WHERE m.user_id = rs.user_id AND m.channel_id = rs.channel_id
 		           AND m.seq > COALESCE(rs.last_read_seq, 0)) AS mention_count
@@ -162,7 +163,7 @@ func (h *ReadStateHandler) ListReadStates(w http.ResponseWriter, r *http.Request
 	for rows.Next() {
 		var rs models.ReadState
 		if err := rows.Scan(&rs.UserID, &rs.ChannelID, &rs.LastMessageID,
-			&rs.LastReadAt, &rs.LastReadSeq, &rs.MentionCount); err != nil {
+			&rs.LastReadAt, &rs.LastReadSeq, &rs.ProjectionRevision, &rs.MentionCount); err != nil {
 			log.Error().Err(err).Msg("failed to scan read state")
 			writeJSON(w, http.StatusInternalServerError, errorResponse("INTERNAL_ERROR", "internal server error"))
 			return

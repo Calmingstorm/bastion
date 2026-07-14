@@ -367,6 +367,31 @@ func TestRemoveChannelBumpsReconcileGen(t *testing.T) {
 	}
 }
 
+// TestReconcileChannelUsersDropsPreexistingUnauthorizedClient: channel-create
+// reconciliation must replace the entire live set, not only users subscribed by
+// that call. A stale client installed by a concurrent connect before revocation
+// must be removed by the authoritative set.
+func TestReconcileChannelUsersDropsPreexistingUnauthorizedClient(t *testing.T) {
+	hub := NewHub()
+	staleUser := uuid.New()
+	authorizedUser := uuid.New()
+	channelID := uuid.New()
+	staleClient := newDroppingClient(staleUser)
+	authorizedClient := newDroppingClient(authorizedUser)
+	hub.RegisterUser(staleClient)
+	hub.RegisterUser(authorizedClient)
+	hub.Subscribe(channelID, staleClient)
+
+	hub.ReconcileChannelUsers(channelID, []uuid.UUID{authorizedUser})
+
+	if channelHas(hub, channelID, staleClient) {
+		t.Fatal("authoritative reconciliation left a pre-existing unauthorized client subscribed")
+	}
+	if !channelHas(hub, channelID, authorizedClient) {
+		t.Fatal("authoritative reconciliation did not subscribe the authorized client")
+	}
+}
+
 // TestSubscribeAuthorizedStableConvergesUnderGenChurn: with a STABLE authorized
 // set, SubscribeAuthorizedStable converges even while the reconcile generation
 // keeps moving (a spurious/grant bump) -- two agreeing reads confirm membership --

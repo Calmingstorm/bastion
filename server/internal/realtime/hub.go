@@ -60,22 +60,7 @@ func (h *Hub) Run() {
 		select {
 		case msg := <-h.broadcastCh:
 			h.mu.RLock()
-			clients := h.channels[msg.channelID]
-			for client := range clients {
-				select {
-				case client.send <- msg.event:
-				default:
-					dropped := client.dropCount.Add(1)
-					log.Warn().
-						Str("userID", client.userID.String()).
-						Str("eventType", msg.event.Type).
-						Int64("dropCount", dropped).
-						Msg("dropping event, client send buffer full")
-					if dropped >= 10 {
-						client.closeSlow()
-					}
-				}
-			}
+			h.broadcastToClientsLocked(h.channels[msg.channelID], msg.event)
 			h.mu.RUnlock()
 
 		case <-h.stopCh:
@@ -115,6 +100,36 @@ func (h *Hub) Unsubscribe(channelID uuid.UUID, client *Client) {
 
 func (h *Hub) BroadcastToChannel(channelID uuid.UUID, event Event) {
 	h.broadcastCh <- broadcastMessage{channelID: channelID, event: event}
+}
+
+// BroadcastToChannelNow dispatches against the live subscription set before it
+// returns. It is used while the caller holds the database's shared server-event
+// fence, so an authorization/deletion transaction cannot commit between the
+// final authoritative read and dispatch. Queueing for the hub loop would release
+// that fence too early and recreate the post-commit delivery race.
+func (h *Hub) BroadcastToChannelNow(channelID uuid.UUID, event Event) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	h.broadcastToClientsLocked(h.channels[channelID], event)
+}
+
+// broadcastToClientsLocked sends to a client set while h.mu is read-locked.
+func (h *Hub) broadcastToClientsLocked(clients map[*Client]struct{}, event Event) {
+	for client := range clients {
+		select {
+		case client.send <- event:
+		default:
+			dropped := client.dropCount.Add(1)
+			log.Warn().
+				Str("userID", client.userID.String()).
+				Str("eventType", event.Type).
+				Int64("dropCount", dropped).
+				Msg("dropping event, client send buffer full")
+			if dropped >= 10 {
+				client.closeSlow()
+			}
+		}
+	}
 }
 
 func (h *Hub) UnsubscribeAll(client *Client) {
@@ -327,54 +342,66 @@ func sameUUIDSet(a, b []uuid.UUID) bool {
 // stale list. Returns (exists, err): exists=false (channel gone) -> caller
 // broadcasts nothing; the speculative subscriptions are rolled back first.
 func (h *Hub) SubscribeAuthorizedStable(channelID uuid.UUID, read func() (ids []uuid.UUID, exists bool, err error)) (bool, error) {
-	subscribed := make(map[uuid.UUID]struct{})
-	rollback := func() {
-		for uid := range subscribed {
-			h.unsubscribeUserFromChannel(uid, channelID)
-		}
-	}
 	var prev []uuid.UUID
 	havePrev := false
 	for i := 0; i < connectMaxAttempts; i++ {
 		gen := h.ReconcileGen()
 		ids, exists, err := read()
 		if err != nil {
-			rollback()
+			h.RemoveChannel(channelID) // fail closed on an indeterminate set
 			return false, err
 		}
 		if !exists {
-			rollback()
+			h.RemoveChannel(channelID)
 			return false, nil
 		}
-		// Targeted reconcile: add newly-authorized, drop no-longer-authorized, so
-		// the hub tracks the latest read without a full teardown between passes.
-		want := make(map[uuid.UUID]struct{}, len(ids))
-		for _, uid := range ids {
-			want[uid] = struct{}{}
-		}
-		for uid := range want {
-			if _, ok := subscribed[uid]; !ok {
-				h.SubscribeUser(uid, channelID)
-			}
-		}
-		for uid := range subscribed {
-			if _, ok := want[uid]; !ok {
-				h.unsubscribeUserFromChannel(uid, channelID)
-			}
-		}
-		subscribed = want
+		// Reconcile the ENTIRE live set, not merely users added by this call. A
+		// concurrent connect/join may already have subscribed a user whose access
+		// was revoked before this read; leaving pre-existing entries untouched
+		// would leak the create event and later messages.
+		h.ReconcileChannelUsers(channelID, ids)
 		if h.ReconcileGen() == gen {
-			return true, nil // fast path: nothing raced
+			return true, nil
 		}
 		if havePrev && sameUUIDSet(prev, ids) {
-			return true, nil // set-stable: membership unchanged across reads
+			return true, nil
 		}
 		prev = ids
 		havePrev = true
 	}
-	// Exhausted (unreachable outside an adversarial revocation flood): the last
-	// reconcile stands; deliver best-effort to the live hub set.
+	// The last exact reconciliation stands. The caller still dispatches against
+	// the live set; authorization commits are fenced by the database.
 	return true, nil
+}
+
+// ReconcileChannelUsers makes a channel's connected-client set exactly match
+// the supplied authorized users in one locked section.
+func (h *Hub) ReconcileChannelUsers(channelID uuid.UUID, authorized []uuid.UUID) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	want := make(map[uuid.UUID]struct{}, len(authorized))
+	for _, uid := range authorized {
+		want[uid] = struct{}{}
+	}
+	set := h.channels[channelID]
+	if set == nil {
+		set = make(map[*Client]struct{})
+	}
+	for client := range set {
+		if _, ok := want[client.userID]; !ok {
+			delete(set, client)
+		}
+	}
+	for uid := range want {
+		for client := range h.users[uid] {
+			set[client] = struct{}{}
+		}
+	}
+	if len(set) == 0 {
+		delete(h.channels, channelID)
+	} else {
+		h.channels[channelID] = set
+	}
 }
 
 // BumpReconcileGen advances the reconcile generation to signal an authorization

@@ -159,8 +159,11 @@ type ReadState struct {
 	LastMessageID *uuid.UUID `json:"lastMessageId,omitempty"`
 	LastReadAt    time.Time  `json:"lastReadAt"`
 	// The server-owned read watermark: the seq of the acknowledged message.
-	LastReadSeq  *int64 `json:"lastReadSeq,omitempty"`
-	MentionCount int    `json:"mentionCount"`
+	LastReadSeq *int64 `json:"lastReadSeq,omitempty"`
+	// Database-ordered revision of the (watermark, mention projection). Equal
+	// watermarks can carry different mention counts; this orders those snapshots.
+	ProjectionRevision int64 `json:"projectionRevision"`
+	MentionCount       int   `json:"mentionCount"`
 }
 
 type MemberWithUser struct {

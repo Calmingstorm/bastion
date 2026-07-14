@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
 
@@ -62,9 +64,13 @@ type updateChannelRequest struct {
 // carries ViewChannel (or Administrator). Raw membership is NOT authorization
 // -- a member whose channel access was revoked must receive no channel events,
 // and create/update payloads carry channel metadata that would otherwise leak.
-func (h *ChannelHandler) authorizedMemberIDs(r *http.Request, serverID uuid.UUID) ([]uuid.UUID, error) {
+type channelQuerier interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+func (h *ChannelHandler) authorizedMemberIDs(ctx context.Context, q channelQuerier, serverID uuid.UUID) ([]uuid.UUID, error) {
 	viewBits := permissions.ViewChannel | permissions.Administrator
-	rows, err := h.db.Query(r.Context(), `
+	rows, err := q.Query(ctx, `
 		SELECT sm.user_id
 		FROM server_members sm
 		INNER JOIN servers s ON s.id = sm.server_id
@@ -102,7 +108,7 @@ func (h *ChannelHandler) broadcastToServer(r *http.Request, serverID uuid.UUID, 
 		ids = recipients[0]
 	} else {
 		var err error
-		if ids, err = h.authorizedMemberIDs(r, serverID); err != nil {
+		if ids, err = h.authorizedMemberIDs(r.Context(), h.db, serverID); err != nil {
 			log.Error().Err(err).Msg("failed to resolve authorized members for broadcast")
 			return
 		}
@@ -261,25 +267,50 @@ func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// exists=false if the channel was deleted (broadcast nothing). Delivery below
 	// is to the LIVE subscription set, so a revocation landing after it returns is
 	// excluded by its own synchronous unsubscribe.
+	// Test transitions are performed before taking the shared DB fence: production
+	// authorization/deletion commits cannot cross the fenced read-to-dispatch
+	// interval. The ensuing authoritative read must observe these completed changes.
+	if AfterChannelCreateSubscribeForTest != nil {
+		AfterChannelCreateSubscribeForTest()
+	}
+	if AfterChannelCreateStableForTest != nil {
+		AfterChannelCreateStableForTest()
+	}
+
+	// Hold the shared server-event fence through the final authz read, exact hub
+	// reconciliation, and synchronous dispatch. Authorization/deletion commits
+	// take the matching exclusive transaction lock via migration triggers, so no
+	// committed state change can land between that read and delivery.
+	fence, fenceErr := h.db.Acquire(r.Context())
+	if fenceErr != nil {
+		log.Error().Err(fenceErr).Msg("channel create: failed to acquire event fence connection")
+		writeJSON(w, http.StatusCreated, ch)
+		return
+	}
+	defer fence.Release()
+	if _, fenceErr = fence.Exec(r.Context(),
+		`SELECT pg_advisory_lock_shared(hashtextextended('bastion-server-events:' || $1::text, 0))`, serverID); fenceErr != nil {
+		log.Error().Err(fenceErr).Msg("channel create: failed to acquire event fence")
+		writeJSON(w, http.StatusCreated, ch)
+		return
+	}
+	defer func() {
+		_, _ = fence.Exec(context.Background(),
+			`SELECT pg_advisory_unlock_shared(hashtextextended('bastion-server-events:' || $1::text, 0))`, serverID)
+	}()
+
 	exists, subErr := h.hub.SubscribeAuthorizedStable(ch.ID, func() ([]uuid.UUID, bool, error) {
 		var stillExists bool
-		if err := h.db.QueryRow(r.Context(),
+		if err := fence.QueryRow(r.Context(),
 			`SELECT EXISTS(SELECT 1 FROM channels WHERE id = $1)`, ch.ID).Scan(&stillExists); err != nil {
 			return nil, false, err
 		}
 		if !stillExists {
 			return nil, false, nil
 		}
-		ids, authErr := h.authorizedMemberIDs(r, serverID)
+		ids, authErr := h.authorizedMemberIDs(r.Context(), fence, serverID)
 		if authErr != nil {
 			return nil, false, authErr
-		}
-		// Test seam: fires AFTER the authorized set is read but before the loop's
-		// generation re-check, so a revocation (or delete) it triggers happens
-		// inside a reconcile pass -- the member is included in THIS pass and must
-		// be excluded on the next.
-		if AfterChannelCreateSubscribeForTest != nil {
-			AfterChannelCreateSubscribeForTest()
 		}
 		return ids, true, nil
 	})
@@ -294,12 +325,6 @@ func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if exists {
-		// Test seam: fires after the stable pass but before delivery, so a
-		// revocation here lands in the window BroadcastToChannel must still
-		// exclude (the revoke synchronously unsubscribes the member).
-		if AfterChannelCreateStableForTest != nil {
-			AfterChannelCreateStableForTest()
-		}
 		// Deliver to the LIVE channel subscription set under the hub lock, NOT a
 		// captured recipient list: SubscribeAuthorizedStable subscribed exactly
 		// the authorized members, so a revocation landing between the stable
@@ -308,7 +333,7 @@ func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 		// the intersection of authorization and live subscription Odin's review
 		// requires -- a stale confirmed slice would leak CHANNEL_CREATE to a
 		// just-revoked member.
-		h.hub.BroadcastToChannel(ch.ID, realtime.Event{
+		h.hub.BroadcastToChannelNow(ch.ID, realtime.Event{
 			Type: realtime.EventChannelCreate,
 			Data: ch,
 		})

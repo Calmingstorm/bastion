@@ -792,6 +792,53 @@ func TestAckReturnsCommittedReadState(t *testing.T) {
 	}
 }
 
+// TestEqualWatermarkProjectionRevisionOrdersMentionCounts: equal read
+// watermarks do not imply equal mention projections. A mention can commit above
+// the watermark between two reads; the later DB projection must carry a higher
+// revision so clients can reject a delayed older response without guessing from
+// mentionCount.
+func TestEqualWatermarkProjectionRevisionOrdersMentionCounts(t *testing.T) {
+	h := testutil.New(t)
+	owner := h.Register("owner")
+	member := h.Register("member")
+	serverID := h.CreateServer(owner, "S")
+	channelID := h.CreateChannel(owner, serverID, "general")
+	joinServer(h, owner, member, serverID)
+
+	m1 := sendMessage(h, owner, channelID, "one")
+	type readState struct {
+		LastReadSeq        *int64 `json:"lastReadSeq"`
+		ProjectionRevision int64  `json:"projectionRevision"`
+		MentionCount       int    `json:"mentionCount"`
+	}
+	var before readState
+	if code := h.Request(http.MethodPost, "/api/v1/channels/"+channelID+"/ack",
+		member.AccessToken, map[string]string{"messageId": m1}, &before); code != http.StatusOK {
+		t.Fatalf("initial ack: got %d", code)
+	}
+
+	if code := postTextMessage(h, owner, channelID, "@member newer"); code != http.StatusCreated {
+		t.Fatalf("mention: got %d", code)
+	}
+
+	// Re-ack the same message. The watermark is unchanged, but the response was
+	// read after the mention committed and must therefore carry a newer revision.
+	var after readState
+	if code := h.Request(http.MethodPost, "/api/v1/channels/"+channelID+"/ack",
+		member.AccessToken, map[string]string{"messageId": m1}, &after); code != http.StatusOK {
+		t.Fatalf("duplicate ack: got %d", code)
+	}
+	if before.LastReadSeq == nil || after.LastReadSeq == nil || *before.LastReadSeq != *after.LastReadSeq {
+		t.Fatalf("expected equal watermark, before=%v after=%v", before.LastReadSeq, after.LastReadSeq)
+	}
+	if after.MentionCount != 1 {
+		t.Fatalf("newer equal-watermark projection must count the mention, got %d", after.MentionCount)
+	}
+	if after.ProjectionRevision <= before.ProjectionRevision {
+		t.Fatalf("newer projection must have a greater revision: before=%d after=%d", before.ProjectionRevision, after.ProjectionRevision)
+	}
+}
+
 // TestMentionPersistenceFailureDoesNotNotify: if the mention row (or its
 // read_states anchor) fails to persist, no NOTIFICATION is emitted -- the
 // authoritative computed badge would not include it, so a notification would be

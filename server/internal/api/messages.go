@@ -908,15 +908,9 @@ func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, a
 				return false
 			}
 			defer func() { _ = tx.Rollback(r.Context()) }()
-			if _, err := tx.Exec(r.Context(),
-				`INSERT INTO mentions (user_id, channel_id, message_id, seq)
-				 VALUES ($1, $2, $3, $4)
-				 ON CONFLICT (user_id, message_id) DO NOTHING`,
-				uid, channelID, msgID, msgSeq,
-			); err != nil {
-				log.Error().Err(err).Msg("failed to record mention; skipping notification")
-				return false
-			}
+			// Ensure the projection anchor exists before inserting the mention. The
+			// mentions INSERT/DELETE trigger advances projection_revision under this
+			// row's lock, ordering every change to the computed badge with acks.
 			if _, err := tx.Exec(r.Context(),
 				`INSERT INTO read_states (user_id, channel_id) VALUES ($1, $2)
 				 ON CONFLICT (user_id, channel_id) DO NOTHING`,
@@ -924,6 +918,19 @@ func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, a
 			); err != nil {
 				log.Error().Err(err).Msg("failed to ensure read_states anchor; skipping notification")
 				return false
+			}
+			result, err := tx.Exec(r.Context(),
+				`INSERT INTO mentions (user_id, channel_id, message_id, seq)
+				 VALUES ($1, $2, $3, $4)
+				 ON CONFLICT (user_id, message_id) DO NOTHING`,
+				uid, channelID, msgID, msgSeq,
+			)
+			if err != nil {
+				log.Error().Err(err).Msg("failed to record mention; skipping notification")
+				return false
+			}
+			if result.RowsAffected() == 0 {
+				return false // replay: no new projection and no duplicate notification
 			}
 			if err := tx.Commit(r.Context()); err != nil {
 				log.Error().Err(err).Msg("failed to commit mention; skipping notification")

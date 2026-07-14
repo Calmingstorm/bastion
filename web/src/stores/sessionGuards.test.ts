@@ -1297,6 +1297,22 @@ describe('session-boundary guards', () => {
     useUnreadStore.getState().reset();
   });
 
+  it('a newer equal-watermark projection replaces an older local projection by DB revision', async () => {
+    useUnreadStore.setState({
+      readStates: {
+        c1: { userId: '', channelId: 'c1', lastMessageId: 'm9', lastReadAt: '', lastReadSeq: 9, projectionRevision: 10, mentionCount: 0 },
+      },
+      unreadChannels: new Set(['c1']),
+    });
+    vi.mocked(client.apiAckChannel).mockResolvedValue({
+      userId: '', channelId: 'c1', lastMessageId: 'm9', lastReadAt: '', lastReadSeq: 9, projectionRevision: 11, mentionCount: 1,
+    } as never);
+    await useUnreadStore.getState().ackChannel('c1', 'm9');
+    expect(useUnreadStore.getState().getMentionCount('c1')).toBe(1);
+    expect(useUnreadStore.getState().isUnread('c1')).toBe(true);
+    useUnreadStore.getState().reset();
+  });
+
   it('an ack commits the server-returned count, not a local guess', async () => {
     // The response carries cross-device mentions the ack did NOT cover (count 2):
     // the client commits that, keeping the channel flagged, instead of zeroing.

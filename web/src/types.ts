@@ -154,6 +154,8 @@ export interface ReadState {
   lastReadAt: string;
   /** Server-owned read watermark: the seq of the acknowledged message. */
   lastReadSeq?: number;
+  /** DB-ordered revision for equal-watermark mention projections. */
+  projectionRevision?: number;
   mentionCount: number;
 }
 
