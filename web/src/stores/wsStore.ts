@@ -43,8 +43,12 @@ export const useWSStore = create<WSState>((set) => ({
 
     // Register handlers before connecting
     wsClient.on('MESSAGE_CREATE', (data: unknown) => {
-      const payload = data as { message: Message } | Message;
+      const payload = data as { message: Message; eventAt?: string } | Message;
       const message = 'message' in payload ? payload.message : payload;
+      // The server's own emission time. Prefer it over message.createdAt for the
+      // unread clock: bots may backdate createdAt (a presentation timestamp),
+      // and a backdated mention is still a post-acknowledgment EVENT.
+      const eventAt = 'message' in payload && payload.eventAt ? payload.eventAt : message.createdAt;
       if (message && message.channelId) {
         useMessageStore.getState().addMessage(message.channelId, message);
 
@@ -53,9 +57,9 @@ export const useWSStore = create<WSState>((set) => ({
         const selectedDMId = useDMStore.getState().selectedDMId;
         const activeChannelId = selectedChannelId || selectedDMId;
         if (message.channelId !== activeChannelId) {
-          // Server-minted createdAt: lets the store drop a DELAYED notification
+          // Server-minted event time: lets the store drop a DELAYED notification
           // whose message an ack already covered (and reconcile the flag later).
-          useUnreadStore.getState().markUnread(message.channelId, message.createdAt);
+          useUnreadStore.getState().markUnread(message.channelId, eventAt);
         }
 
         // A message in a channel is proof a DM is ALIVE: clear any DM

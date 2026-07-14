@@ -547,15 +547,19 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 		)
 	}
 
-	// Broadcast to WebSocket subscribers
+	// Broadcast to WebSocket subscribers. eventAt is the server's own emission
+	// time and is NOT overridable: bots may backdate msg.createdAt (a
+	// presentation timestamp), and unread reconciliation must compare
+	// server-minted times only -- a backdated mention must still read as a
+	// post-acknowledgment event.
 	h.hub.BroadcastToChannel(channelID, realtime.Event{
 		Type: realtime.EventMessageCreate,
-		Data: msg,
+		Data: map[string]any{"message": msg, "eventAt": time.Now().UTC()},
 	})
 
 	// Process @mentions (only for server channels, not DMs)
 	if serverID != nil {
-		h.processMentions(r, *serverID, channelID, userID, req.Content, msg.CreatedAt)
+		h.processMentions(r, *serverID, channelID, userID, req.Content)
 	}
 
 	writeJSON(w, http.StatusCreated, msg)
@@ -729,7 +733,7 @@ func (h *MessageHandler) Delete(w http.ResponseWriter, r *http.Request) {
 }
 
 // processMentions parses @mentions from message content and sends notifications.
-func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, authorID uuid.UUID, content string, createdAt time.Time) {
+func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, authorID uuid.UUID, content string) {
 	matches := mentionRegex.FindAllStringSubmatch(content, -1)
 	if len(matches) == 0 {
 		return
@@ -829,10 +833,11 @@ func (h *MessageHandler) processMentions(r *http.Request, serverID, channelID, a
 				"senderName":   senderName,
 				"channelName":  channelName,
 				"content":      snippet,
-				// Server-minted message time: clients drop a DELAYED notification
-				// whose message an acknowledgment already covered (client and
-				// server clocks are never compared).
-				"createdAt": createdAt,
+				// The notification's own EMISSION time -- deliberately not the
+				// message's createdAt, which bots may backdate: unread
+				// reconciliation compares this against lastReadAt, and both must
+				// be server-minted, non-overridable times.
+				"createdAt": time.Now().UTC(),
 			},
 		})
 	}
@@ -963,11 +968,12 @@ func (h *MessageHandler) BulkImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Broadcast all imported messages
+	// Broadcast all imported messages (same envelope as live creates: eventAt is
+	// the emission time -- imported history is NEW to the channel now)
 	for _, msg := range result {
 		h.hub.BroadcastToChannel(channelID, realtime.Event{
 			Type: realtime.EventMessageCreate,
-			Data: msg,
+			Data: map[string]any{"message": msg, "eventAt": time.Now().UTC()},
 		})
 	}
 

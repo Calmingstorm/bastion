@@ -38,24 +38,54 @@ type updateChannelRequest struct {
 	CategoryID *string `json:"categoryId,omitempty"`
 }
 
-// broadcastToServer delivers a server-scoped event exactly once per member.
-// It fans out per USER, not per channel: channel fanout delivered duplicates to
-// anyone subscribed to several of the server's channels, and -- once deletes
-// broadcast after commit -- a CHANNEL_DELETE fanned out through the SURVIVING
-// channels missed clients subscribed only to the deleted one. Membership is the
-// stable recipient set regardless of which rows the event is about.
-func (h *ChannelHandler) broadcastToServer(r *http.Request, serverID uuid.UUID, event realtime.Event) {
-	rows, err := h.db.Query(r.Context(), `SELECT user_id FROM server_members WHERE server_id = $1`, serverID)
+// authorizedMemberIDs returns the deduplicated set of members allowed to SEE
+// channel events in this server: the owner plus members whose role union
+// carries ViewChannel (or Administrator). Raw membership is NOT authorization
+// -- a member whose channel access was revoked must receive no channel events,
+// and create/update payloads carry channel metadata that would otherwise leak.
+func (h *ChannelHandler) authorizedMemberIDs(r *http.Request, serverID uuid.UUID) []uuid.UUID {
+	viewBits := permissions.ViewChannel | permissions.Administrator
+	rows, err := h.db.Query(r.Context(), `
+		SELECT sm.user_id
+		FROM server_members sm
+		INNER JOIN servers s ON s.id = sm.server_id
+		WHERE sm.server_id = $1
+		  AND (s.owner_id = sm.user_id
+		       OR (COALESCE((
+		            SELECT bit_or(r2.permissions)
+		            FROM member_roles mr
+		            INNER JOIN roles r2 ON r2.id = mr.role_id
+		            WHERE mr.server_id = sm.server_id AND mr.user_id = sm.user_id
+		          ), 0) & $2) != 0)`, serverID, viewBits)
 	if err != nil {
-		log.Error().Err(err).Msg("failed to query server members for broadcast")
-		return
+		log.Error().Err(err).Msg("failed to query authorized members for broadcast")
+		return nil
 	}
 	defer rows.Close()
+	var ids []uuid.UUID
 	for rows.Next() {
 		var uid uuid.UUID
 		if err := rows.Scan(&uid); err != nil {
 			continue
 		}
+		ids = append(ids, uid)
+	}
+	return ids
+}
+
+// broadcastToServer delivers a channel event exactly once per AUTHORIZED
+// member. Per-channel fanout delivered duplicates and, post-commit, missed
+// exclusive subscribers of a deleted channel; raw per-member fanout bypassed
+// ViewChannel. Deletion callers capture the recipient set BEFORE deleting and
+// pass it here (broadcast still happens only after the commit).
+func (h *ChannelHandler) broadcastToServer(r *http.Request, serverID uuid.UUID, event realtime.Event, recipients ...[]uuid.UUID) {
+	var ids []uuid.UUID
+	if len(recipients) > 0 {
+		ids = recipients[0]
+	} else {
+		ids = h.authorizedMemberIDs(r, serverID)
+	}
+	for _, uid := range ids {
 		h.hub.BroadcastToUser(uid, event)
 	}
 }
@@ -352,6 +382,11 @@ func (h *ChannelHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	var channelName string
 	h.db.QueryRow(r.Context(), `SELECT name FROM channels WHERE id = $1 AND server_id = $2`, channelID, serverID).Scan(&channelName)
 
+	// Capture the authorized recipient set BEFORE the delete: the event is
+	// broadcast only after the commit, but its audience is defined by the world
+	// in which the channel still existed.
+	recipients := h.authorizedMemberIDs(r, serverID)
+
 	result, err := h.db.Exec(r.Context(),
 		`DELETE FROM channels WHERE id = $1 AND server_id = $2`, channelID, serverID,
 	)
@@ -377,7 +412,7 @@ func (h *ChannelHandler) Delete(w http.ResponseWriter, r *http.Request) {
 			"channelId": channelID.String(),
 			"serverId":  serverID.String(),
 		},
-	})
+	}, recipients)
 
 	// Audit log
 	writeAuditLog(h.db, r.Context(), serverID, userID, "CHANNEL_DELETE", "channel", channelID, map[string]any{

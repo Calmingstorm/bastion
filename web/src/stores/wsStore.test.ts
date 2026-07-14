@@ -154,6 +154,23 @@ describe('wsStore MESSAGE_CREATE production wiring', () => {
     expect(useUnreadStore.getState().isUnread('ch-a')).toBe(false);
   });
 
+  it('prefers the non-overridable eventAt over a bot-backdated createdAt', () => {
+    // Bots may backdate message.createdAt (a presentation timestamp). The
+    // envelope's eventAt is the server's own emission time: a backdated mention
+    // is still a post-acknowledgment EVENT and must raise the flag.
+    useUnreadStore.setState({
+      readStates: {
+        'ch-b': { userId: '', channelId: 'ch-b', lastMessageId: 'm9', lastReadAt: '2026-07-14T12:00:10Z', mentionCount: 0 },
+      },
+      unreadChannels: new Set(),
+    });
+    handlers['MESSAGE_CREATE']({
+      message: { id: 'm7', channelId: 'ch-b', content: 'sneaky', createdAt: '2026-07-14T11:00:00Z' }, // backdated
+      eventAt: '2026-07-14T12:00:15Z', // the server actually emitted it AFTER the ack
+    });
+    expect(useUnreadStore.getState().isUnread('ch-b')).toBe(true); // not swallowed
+  });
+
   it('NOTIFICATION passes the server-minted createdAt through to markUnread', () => {
     // A delayed notification whose message predates the committed lastReadAt
     // must not permanently restore isUnread -- same contract as MESSAGE_CREATE.
