@@ -9,7 +9,7 @@ interface UnreadState {
   unreadChannels: Set<string>;
   fetchReadStates: () => Promise<void>;
   ackChannel: (channelId: string, messageId: string) => Promise<void>;
-  markUnread: (channelId: string) => void;
+  markUnread: (channelId: string, createdAt?: string) => void;
   incrementMention: (channelId: string) => void;
   isUnread: (channelId: string) => boolean;
   getMentionCount: (channelId: string) => number;
@@ -46,6 +46,15 @@ const bumpActivity = (channelId: string) =>
 // cleared store or fire its follow-up fetch (auth generation aside).
 let resetEpoch = 0;
 
+// The unread FLAG must also reconcile with server truth: a DELAYED pre-ack
+// notification (its message predates an ack that already covered it) would
+// otherwise resurrect the flag forever, since fetches never write the flag and
+// only an ack clears it. Both timestamps below are SERVER-minted (a message's
+// createdAt; a read state's lastReadAt from a fetch) -- one clock, comparable.
+// flagRaisedAt records the newest message time that raised each flag; a
+// committed read state whose lastReadAt covers it clears the flag.
+const flagRaisedAt = new Map<string, number>();
+
 const toMap = (list: ReadState[]) => {
   const map: Record<string, ReadState> = {};
   list.forEach((rs) => {
@@ -72,7 +81,25 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
           token = readStateLineage.startFetch(); // retry with a fresh snapshot
           continue;
         }
-        set({ readStates: toMap(outcome.list) });
+        // Reconcile the unread FLAG with the committed truth: a server-minted
+        // lastReadAt at or beyond the message that raised a flag means the user
+        // has read it (possibly from another device, possibly an ack this flag's
+        // delayed notification predated).
+        // Reconcile the unread FLAG with the committed truth: a server-minted
+        // lastReadAt at or beyond the message that raised a flag means the user
+        // has read it (possibly from another device, possibly an ack this flag's
+        // delayed notification predated).
+        set((state) => {
+          const newUnread = new Set(state.unreadChannels);
+          for (const rs of outcome.list) {
+            const raised = flagRaisedAt.get(rs.channelId);
+            if (raised !== undefined && rs.lastReadAt && Date.parse(rs.lastReadAt) >= raised) {
+              newUnread.delete(rs.channelId);
+              flagRaisedAt.delete(rs.channelId);
+            }
+          }
+          return { readStates: toMap(outcome.list), unreadChannels: newUnread };
+        });
         return;
       }
     } catch {
@@ -95,6 +122,7 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
         // Clear the unread flag only if nothing new arrived during the flight.
         if ((activityEpochs.get(channelId) ?? 0) === epochAtEntry) {
           newUnread.delete(channelId);
+          flagRaisedAt.delete(channelId);
         }
         // OPTIMISTIC zero, gated on nothing having moved since entry (no new
         // activity, no authoritative rebase): if anything moved, leave the count
@@ -111,7 +139,11 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
               userId: '',
               channelId,
               lastMessageId: messageId,
-              lastReadAt: new Date().toISOString(),
+              // Keep the previous SERVER-minted lastReadAt rather than fabricate
+              // one from the client clock -- markUnread compares message
+              // createdAt against this field, and mixing clocks would corrupt
+              // that comparison. The follow-up fetch supplies the fresh value.
+              lastReadAt: state.readStates[channelId]?.lastReadAt ?? '',
               mentionCount: 0,
             },
           },
@@ -126,10 +158,20 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
     }
   },
 
-  // unreadChannels is a purely local set that fetchReadStates never writes, so
-  // markUnread needs no follow-up fetch -- there is no server count to sync.
-  markUnread: (channelId: string) => {
+  // markUnread needs no follow-up fetch (there is no server count to sync), but
+  // it is server-clock aware: a message already covered by the known
+  // server-minted lastReadAt is not unread (its notification was delayed past
+  // the ack that read it), and the raise is recorded so a LATER committed
+  // lastReadAt can retire the flag.
+  markUnread: (channelId: string, createdAt?: string) => {
     bumpActivity(channelId);
+    const raisedAt = createdAt ? Date.parse(createdAt) : NaN;
+    if (!Number.isNaN(raisedAt)) {
+      const lastReadAt = get().readStates[channelId]?.lastReadAt;
+      if (lastReadAt && Date.parse(lastReadAt) >= raisedAt) return; // already read
+      const prev = flagRaisedAt.get(channelId);
+      flagRaisedAt.set(channelId, prev === undefined ? raisedAt : Math.max(prev, raisedAt));
+    }
     set((state) => {
       const newUnread = new Set(state.unreadChannels);
       newUnread.add(channelId);
@@ -173,6 +215,7 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
   reset: () => {
     readStateLineage.reset(); // held fetches must not repopulate; no cross-account leakage
     activityEpochs.clear();
+    flagRaisedAt.clear();
     resetEpoch += 1;
     set({ readStates: {}, unreadChannels: new Set() });
   },

@@ -53,7 +53,9 @@ export const useWSStore = create<WSState>((set) => ({
         const selectedDMId = useDMStore.getState().selectedDMId;
         const activeChannelId = selectedChannelId || selectedDMId;
         if (message.channelId !== activeChannelId) {
-          useUnreadStore.getState().markUnread(message.channelId);
+          // Server-minted createdAt: lets the store drop a DELAYED notification
+          // whose message an ack already covered (and reconcile the flag later).
+          useUnreadStore.getState().markUnread(message.channelId, message.createdAt);
         }
 
         // A message in a channel is proof a DM is ALIVE: clear any DM

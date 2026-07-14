@@ -65,7 +65,18 @@ export const useDMStore = create<DMState>((set, get) => ({
           token = dmLineage.startFetch();
           continue;
         }
-        set({ dmChannels: outcome.list, isLoading: false });
+        // The SELECTION is reconciled with the committed list (same rule as the
+        // server selection): if the authoritative list omits the selected DM --
+        // e.g. a close won its race and the deciding fetch drops the row -- the
+        // selection must not dangle over a conversation that no longer exists.
+        set((state) => ({
+          dmChannels: outcome.list,
+          isLoading: false,
+          selectedDMId:
+            state.selectedDMId && outcome.list.some((d) => d.id === state.selectedDMId)
+              ? state.selectedDMId
+              : null,
+        }));
         return;
       }
     } catch {
@@ -144,11 +155,22 @@ export const useDMStore = create<DMState>((set, get) => ({
   // An event proved this channel is alive -- a message arrived in it (the server
   // reopens a closed DM BEFORE broadcasting MESSAGE_CREATE). Clears any close
   // tombstone so the refetch that same event triggers can SHOW the reopened
-  // conversation instead of filtering it. No journal write: there is no list
-  // application to make, only evidence to record.
+  // conversation instead of filtering it.
+  //
+  // When the DM is locally KNOWN, the aliveness is also made DURABLE: the known
+  // row is journaled as an upsert, so an in-flight fetch whose snapshot was read
+  // before this reopen (a close/reopen deciding fetch, an initial load) commits
+  // WITH the row re-applied instead of erasing an open conversation. It also
+  // moves the DM to the front -- a new message makes it the most recent.
   noteChannelAlive: (channelId: string) => {
     bumpAlive(channelId);
     dmLineage.assert([channelId]);
+    const known = useDMStore.getState().dmChannels.find((d) => d.id === channelId);
+    if (known) {
+      const apply = upsertDM(known);
+      dmLineage.claim(apply, { asserts: [channelId] });
+      set((state) => ({ dmChannels: apply(state.dmChannels) }));
+    }
   },
 
   selectDM: (channelId: string | null) => {

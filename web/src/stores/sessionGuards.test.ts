@@ -1320,6 +1320,80 @@ describe('session-boundary guards', () => {
     useDMStore.getState().reset();
   });
 
+  // F38 round 28: message-only reopen evidence is durable; the deciding fetch
+  // reconciles the DM selection; the unread flag reconciles with server truth.
+  it('a message-only reopen survives the close/reopen deciding fetch', async () => {
+    // The close raced reopen #1 and triggered the deciding fetch; while it is in
+    // flight, reopen #2 arrives as a MESSAGE in the still-listed DM (no DM_CREATE,
+    // no addDM). The known row's aliveness must be journaled, or the deciding
+    // snapshot -- read before reopen #2 committed -- erases an open conversation.
+    useDMStore.setState({ dmChannels: [{ id: 'dm-m' } as DMChannel] });
+    const dClose = deferred<void>();
+    vi.mocked(client.apiCloseDM).mockReturnValue(dClose.promise as never);
+    const dDeciding = deferred<DMChannel[]>();
+    vi.mocked(client.apiGetDMs).mockReturnValue(dDeciding.promise);
+    const pClose = useDMStore.getState().closeDM('dm-m');
+    useDMStore.getState().noteChannelAlive('dm-m'); // reopen #1: proof mid-flight
+    dClose.resolve();
+    await pClose; // deciding fetch now in flight
+    useDMStore.getState().noteChannelAlive('dm-m'); // reopen #2: a message in the KNOWN dm
+    dDeciding.resolve([]); // snapshot read before reopen #2 committed
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(useDMStore.getState().dmChannels.map((d2) => d2.id)).toEqual(['dm-m']); // not erased
+    useDMStore.getState().reset();
+  });
+
+  it('the deciding fetch clears a dangling DM selection when the close won', async () => {
+    useDMStore.setState({ dmChannels: [{ id: 'dm-s' } as DMChannel], selectedDMId: 'dm-s' });
+    const dFetch = deferred<DMChannel[]>();
+    vi.mocked(client.apiGetDMs).mockReturnValue(dFetch.promise);
+    const pFetch = useDMStore.getState().fetchDMs();
+    dFetch.resolve([]); // authoritative: the DM is closed
+    await pFetch;
+    expect(useDMStore.getState().dmChannels).toEqual([]);
+    expect(useDMStore.getState().selectedDMId).toBeNull(); // no dangling selection
+    useDMStore.getState().reset();
+  });
+
+  it('a delayed pre-ack notification cannot raise the unread flag', async () => {
+    // The notification's message predates the committed server-minted lastReadAt:
+    // the user already read it (the notification was just delivered late).
+    useUnreadStore.setState({
+      readStates: {
+        c1: { userId: '', channelId: 'c1', lastMessageId: 'm9', lastReadAt: '2026-07-14T12:00:10Z', mentionCount: 0 },
+      },
+      unreadChannels: new Set(),
+    });
+    useUnreadStore.getState().markUnread('c1', '2026-07-14T12:00:05Z'); // older than lastReadAt
+    expect(useUnreadStore.getState().isUnread('c1')).toBe(false); // not resurrected
+    useUnreadStore.getState().markUnread('c1', '2026-07-14T12:00:15Z'); // genuinely newer
+    expect(useUnreadStore.getState().isUnread('c1')).toBe(true);
+    useUnreadStore.getState().reset();
+  });
+
+  it('a committed lastReadAt retires a flag its ack-window notification raised', async () => {
+    // The delayed notification landed BEFORE the fresh lastReadAt was known:
+    // the flag goes up, and the next authoritative commit takes it down.
+    useUnreadStore.setState({
+      readStates: {
+        c2: { userId: '', channelId: 'c2', lastMessageId: 'm1', lastReadAt: '2026-07-14T12:00:00Z', mentionCount: 0 },
+      },
+      unreadChannels: new Set(),
+    });
+    useUnreadStore.getState().markUnread('c2', '2026-07-14T12:00:05Z'); // newer than known lastReadAt
+    expect(useUnreadStore.getState().isUnread('c2')).toBe(true);
+    const dFetch = deferred<unknown>();
+    vi.mocked(client.apiGetReadStates).mockReturnValue(dFetch.promise as never);
+    const pFetch = useUnreadStore.getState().fetchReadStates();
+    dFetch.resolve([
+      { channelId: 'c2', lastMessageId: 'm9', lastReadAt: '2026-07-14T12:00:10Z', mentionCount: 0 },
+    ]); // the ack this notification predated
+    await pFetch;
+    expect(useUnreadStore.getState().isUnread('c2')).toBe(false); // reconciled with server truth
+    useUnreadStore.getState().reset();
+  });
+
   it('permissionStore reset invalidates a held permissions fetch', async () => {
     usePermissionStore.setState({ permissions: {} });
     const dPerm = deferred<{ permissions: number }>();

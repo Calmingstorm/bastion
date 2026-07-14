@@ -347,15 +347,6 @@ func (h *ChannelHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	var channelName string
 	h.db.QueryRow(r.Context(), `SELECT name FROM channels WHERE id = $1 AND server_id = $2`, channelID, serverID).Scan(&channelName)
 
-	// Broadcast BEFORE delete so clients still have the channel context
-	h.broadcastToServer(r, serverID, realtime.Event{
-		Type: realtime.EventChannelDelete,
-		Data: map[string]string{
-			"channelId": channelID.String(),
-			"serverId":  serverID.String(),
-		},
-	})
-
 	result, err := h.db.Exec(r.Context(),
 		`DELETE FROM channels WHERE id = $1 AND server_id = $2`, channelID, serverID,
 	)
@@ -368,6 +359,20 @@ func (h *ChannelHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, errorResponse("NOT_FOUND", "channel not found"))
 		return
 	}
+
+	// Broadcast AFTER the delete commits, never before. The event only carries
+	// ids, so clients need no live row for "context" -- and broadcasting first
+	// had two real failure modes: a fetch racing the window between broadcast
+	// and commit could read the channel back into existence, and a delete that
+	// FAILED after broadcasting left every connected client having removed a
+	// channel that still exists, with no event that would ever correct them.
+	h.broadcastToServer(r, serverID, realtime.Event{
+		Type: realtime.EventChannelDelete,
+		Data: map[string]string{
+			"channelId": channelID.String(),
+			"serverId":  serverID.String(),
+		},
+	})
 
 	// Audit log
 	writeAuditLog(h.db, r.Context(), serverID, userID, "CHANNEL_DELETE", "channel", channelID, map[string]any{
