@@ -425,6 +425,36 @@ func TestSubscribeAuthorizedStableConvergesUnderGenChurn(t *testing.T) {
 	}
 }
 
+// TestSubscribeAuthorizedStableReadErrorPreservesSubscriptions: a transient read
+// error must NOT tear down the channel's existing subscriptions. A concurrent
+// connect may have subscribed an authorized member (connects only subscribe
+// viewable channels), and dropping them on an indeterminate read would strand an
+// already-connected client until reconnect. The call returns the error and the
+// caller broadcasts nothing; the committed row self-heals on the client's next
+// channel-list fetch.
+func TestSubscribeAuthorizedStableReadErrorPreservesSubscriptions(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	userID := uuid.New()
+	channelID := uuid.New()
+	client := newDroppingClient(userID)
+	hub.RegisterUser(client)
+	hub.Subscribe(channelID, client) // a concurrent connect already subscribed this authorized member
+
+	readErr := errors.New("transient db error")
+	_, err := hub.SubscribeAuthorizedStable(channelID, func() ([]uuid.UUID, bool, error) {
+		return nil, false, readErr
+	})
+	if !errors.Is(err, readErr) {
+		t.Fatalf("expected the read error, got %v", err)
+	}
+	if !channelHas(hub, channelID, client) {
+		t.Fatal("a transient read error must not drop a pre-existing authorized subscription")
+	}
+}
+
 // TestSubscribeAuthorizedStableBestEffortOnFlood: if authorization genuinely never
 // stabilizes (the set differs on every read), the primitive does NOT error and
 // does NOT hang -- it best-efforts within its bounded attempts and returns. The

@@ -74,3 +74,60 @@ func TestMigration018BackfillsAttachmentPositions(t *testing.T) {
 		t.Fatal("position column should be dropped after rollback")
 	}
 }
+
+// TestMigration019FencesServerOwnerUpdate verifies that migration 019 extends the
+// per-server event fence on the servers table from DELETE-only to also cover
+// owner_id UPDATE (an ownership transfer changes channel-visibility authorization),
+// and that the down migration reverts it to DELETE-only.
+func TestMigration019FencesServerOwnerUpdate(t *testing.T) {
+	dsn := testutil.NewMigrationDB(t)
+	m := newMigrator(t, dsn)
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	fenceEvents := func() map[string]bool {
+		t.Helper()
+		rows, err := pool.Query(ctx,
+			`SELECT DISTINCT event_manipulation FROM information_schema.triggers
+			  WHERE event_object_table = 'servers'
+			    AND action_statement LIKE '%lock_bastion_server_events%'`)
+		if err != nil {
+			t.Fatalf("read servers fence events: %v", err)
+		}
+		defer rows.Close()
+		events := map[string]bool{}
+		for rows.Next() {
+			var e string
+			if err := rows.Scan(&e); err != nil {
+				t.Fatalf("scan event: %v", err)
+			}
+			events[e] = true
+		}
+		return events
+	}
+
+	if err := m.Migrate(18); err != nil {
+		t.Fatalf("migrate to v18: %v", err)
+	}
+	if ev := fenceEvents(); !ev["DELETE"] || ev["UPDATE"] {
+		t.Fatalf("v18 servers fence events = %v, want DELETE only", ev)
+	}
+
+	if err := m.Migrate(19); err != nil {
+		t.Fatalf("migrate to v19: %v", err)
+	}
+	if ev := fenceEvents(); !ev["DELETE"] || !ev["UPDATE"] {
+		t.Fatalf("v19 servers fence events = %v, want DELETE and UPDATE", ev)
+	}
+
+	if err := m.Migrate(18); err != nil {
+		t.Fatalf("migrate down to v18: %v", err)
+	}
+	if ev := fenceEvents(); !ev["DELETE"] || ev["UPDATE"] {
+		t.Fatalf("after rollback servers fence events = %v, want DELETE only", ev)
+	}
+}
